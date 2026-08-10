@@ -5,9 +5,10 @@ import {
   FALLBACK_MODELS,
   capabilityFor,
   inferAdapter,
+  migrateSavedProfile,
+  modelForSdVersion,
   pollDelayForAdapter,
-  preferredModelForSdVersion,
-  sdVersionForModel,
+  sdVersionForProfile,
 } from "./providerCatalog.js";
 import {
   fileStem,
@@ -53,25 +54,6 @@ function loadJson(key, fallback) {
   } catch {
     return fallback;
   }
-}
-
-function migrateSavedProfile(profile) {
-  if (profile?.id === "lwaigc") {
-    return {
-      ...profile,
-      baseUrl: "https://ai.lwaigc.cn",
-      adapter: "lwaigc",
-      model: profile.model || "firefly-seedance2-720p",
-      mediaUploadUrl: "https://ai.lwaigc.cn/v1/assets",
-    };
-  }
-  if (
-    profile?.adapter === "canseedream" &&
-    String(profile.baseUrl || "").replace(/\/$/, "") === "https://canseedream.com"
-  ) {
-    return { ...profile, baseUrl: "https://see.ximeiedu.org" };
-  }
-  return profile;
 }
 
 function uid(prefix = "item") {
@@ -294,11 +276,11 @@ function Workbench({ onLogout }) {
   const activeProfile =
     profiles.find((profile) => profile.id === activeId) || profiles[0];
   const capability = useMemo(() => capabilityFor(activeProfile), [activeProfile]);
-  const sdVersion = sdVersionForModel(activeProfile.model);
+  const sdVersion = sdVersionForProfile(activeProfile);
   const availableActiveModels = modelOptions[activeProfile.id];
   const sdVersionAvailability = {
-    sd20: preferredModelForSdVersion(activeProfile.adapter, "sd20"),
-    sd25: preferredModelForSdVersion(activeProfile.adapter, "sd25"),
+    sd20: modelForSdVersion(activeProfile, "sd20", availableActiveModels),
+    sd25: modelForSdVersion(activeProfile, "sd25", availableActiveModels),
   };
   const numericDurations = capability.durations.filter((value) => typeof value === "number");
   const maximumDurationLabel = numericDurations.length ? `${Math.max(...numericDurations)}秒` : "自动时长";
@@ -1202,7 +1184,9 @@ function Workbench({ onLogout }) {
               />
             </div>
             <p className="upload-mode-note">
-              {activeProfile.mediaUploadUrl
+              {activeProfile.adapter === "paipu"
+                ? "素材上传：图片使用 Paipu 上传接口；本地音频和视频自动转为临时 HTTPS 地址"
+                : activeProfile.mediaUploadUrl
                 ? "素材上传：使用你填写的自定义上传地址"
                 : "素材上传：未填写地址时自动选择临时转链（约 1–3 小时后失效）"}
             </p>

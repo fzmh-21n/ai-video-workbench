@@ -29,6 +29,7 @@ import {
   meaiccLimitIssue,
   meaiccVideoPayload,
 } from "./src/meaiccCatalog.js";
+import { mediaUploadMode } from "./src/uploadPolicy.js";
 
 // 与飞猫最新插件保持一致：本地中转服务不继承梯子/环境代理。
 // 只影响本工作台进程，不会改动 Windows 或浏览器的代理设置。
@@ -454,15 +455,10 @@ async function uploadTemporaryMedia(file, material = {}) {
 }
 
 async function uploadMedia(config, file, material = {}) {
-  if (!config.mediaUploadUrl) return uploadTemporaryMedia(file, material);
-  const displayName = String(material.name || file.originalname || "本地素材");
-  const kindLabel = material.kind === "audio" ? "音频" : material.kind === "video" ? "视频" : "图片";
-  if (
-    new URL(config.mediaUploadUrl).hostname === "api.paipu.net" &&
-    !String(file.mimetype || "").startsWith("image/")
-  ) {
-    throw httpError(400, `Paipu 的公开上传接口目前只支持图片；本地${kindLabel}“${displayName}”请使用公网素材 URL`);
+  if (mediaUploadMode(config, file.mimetype) === "temporary") {
+    return uploadTemporaryMedia(file, material);
   }
+  const displayName = String(material.name || file.originalname || "本地素材");
   const bytes = fileBytes(file);
   const form = new FormData();
   form.set("file", new Blob([bytes], { type: file.mimetype || "application/octet-stream" }), displayName);

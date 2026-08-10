@@ -40,7 +40,7 @@ export function meaiccVideoPayload(model, input) {
 }
 
 export function meaiccLimitIssue(model, materials, duration) {
-  if (!MEAICC_VIDEO_MODELS.includes(model)) return "请选择 MEAICC 视频模型";
+  if (!String(model || "").trim()) return "请选择 MEAICC 视频模型";
   const capability = meaiccCapability();
   const counts = (materials || []).reduce(
     (result, item) => {

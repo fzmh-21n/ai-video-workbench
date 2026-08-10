@@ -134,6 +134,10 @@ const SD_VERSION_MODELS = {
   meaicc: {
     sd20: "seedance-2.0",
   },
+  canseedream: {
+    sd20: "kele_pool",
+    sd25: "lajiao_pool",
+  },
 };
 
 export function preferredModelForSdVersion(adapter, version) {
@@ -386,6 +390,36 @@ export function capabilityFor(profile) {
   return base;
 }
 
+export function sdVersionForProfile(profile) {
+  if (profile?.adapter === "canseedream") {
+    const capability = capabilityFor(profile);
+    const numericDurations = capability.durations.filter((value) => typeof value === "number");
+    const exceedsSd20Limits =
+      capability.images > 9 ||
+      capability.videos > 3 ||
+      capability.audios > 3 ||
+      (numericDurations.length > 0 && Math.max(...numericDurations) > 15);
+    return exceedsSd20Limits ? "sd25" : "sd20";
+  }
+  return sdVersionForModel(profile?.model);
+}
+
+export function modelForSdVersion(profile, version, availableModels) {
+  const currentModel = String(profile?.model || "").trim();
+  if (currentModel && sdVersionForProfile(profile) === version) return currentModel;
+
+  const preferred = preferredModelForSdVersion(profile?.adapter, version);
+  if (profile?.adapter !== "canseedream") return preferred;
+
+  const candidates = Array.isArray(availableModels) && availableModels.length
+    ? availableModels
+    : FALLBACK_MODELS.canseedream;
+  if (preferred && candidates.includes(preferred)) return preferred;
+  return candidates.find((model) => (
+    sdVersionForProfile({ ...profile, model }) === version
+  )) || "";
+}
+
 export function inferAdapter(baseUrl) {
   try {
     const host = new URL(baseUrl).hostname.toLowerCase();
@@ -397,4 +431,44 @@ export function inferAdapter(baseUrl) {
     if (host === "api.meaicc.com") return "meaicc";
   } catch {}
   return "newapi";
+}
+
+export function migrateSavedProfile(profile) {
+  if (!profile || typeof profile !== "object") return profile;
+  const inferredAdapter = inferAdapter(profile.baseUrl);
+  const officialLwaigc = profile.id === "lwaigc" || inferredAdapter === "lwaigc";
+  if (officialLwaigc || profile.adapter === "lwaigc") {
+    return {
+      ...profile,
+      baseUrl: officialLwaigc ? "https://ai.lwaigc.cn" : profile.baseUrl,
+      adapter: "lwaigc",
+      model: LWAIGC_VIDEO_MODELS.includes(profile.model)
+        ? profile.model
+        : "firefly-seedance2-720p",
+      mediaUploadUrl: officialLwaigc
+        ? "https://ai.lwaigc.cn/v1/assets"
+        : profile.mediaUploadUrl || "",
+    };
+  }
+
+  const officialMeaicc = profile.id === "meaicc" || inferredAdapter === "meaicc";
+  if (officialMeaicc || profile.adapter === "meaicc") {
+    return {
+      ...profile,
+      baseUrl: officialMeaicc ? "https://api.meaicc.com" : profile.baseUrl,
+      adapter: "meaicc",
+      model: String(profile.model || "").trim() || "seedance-2.0",
+    };
+  }
+
+  if (
+    profile.adapter === "canseedream" &&
+    String(profile.baseUrl || "").replace(/\/$/, "") === "https://canseedream.com"
+  ) {
+    return { ...profile, baseUrl: "https://see.ximeiedu.org" };
+  }
+  if (profile.adapter === "newapi" && inferredAdapter !== "newapi") {
+    return { ...profile, adapter: inferredAdapter };
+  }
+  return profile;
 }

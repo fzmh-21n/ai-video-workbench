@@ -12,6 +12,7 @@ import {
   FALLBACK_MODELS,
   capabilityFor,
   inferAdapter,
+  migrateSavedProfile,
   pollDelayForAdapter,
   preferredModelForSdVersion,
   sdVersionForModel,
@@ -139,7 +140,32 @@ test("enforces the documented 25-second input-plus-output video boundary", () =>
   );
 });
 
-test("rejects unsupported MEAICC duration and model values", () => {
+test("rejects unsupported MEAICC duration and an empty model", () => {
   assert.match(meaiccLimitIssue("seedance-2.0", [], 16), /不支持 16 秒/);
-  assert.equal(meaiccLimitIssue("unknown-model", [], 10), "请选择 MEAICC 视频模型");
+  assert.equal(meaiccLimitIssue("", [], 10), "请选择 MEAICC 视频模型");
+});
+
+test("accepts the exact MEAICC route model selected from the live model list", () => {
+  assert.equal(meaiccLimitIssue("sd-2-c5", [], 15), "");
+  assert.equal(meaiccVideoPayload("sd-2-c5", {
+    prompt: "线路模型测试",
+    duration: 15,
+    resolution: "720p",
+    aspectRatio: "9:16",
+    materials: [],
+  }).model, "sd-2-c5");
+});
+
+test("repairs an older MEAICC profile with an invalid saved model", () => {
+  const migrated = migrateSavedProfile({
+    id: "api_old_meaicc",
+    name: "林木森AI",
+    baseUrl: "https://api.meaicc.com/v1",
+    adapter: "newapi",
+    model: "",
+    mediaUploadUrl: "",
+  });
+  assert.equal(migrated.adapter, "meaicc");
+  assert.equal(migrated.model, "seedance-2.0");
+  assert.equal(migrated.baseUrl, "https://api.meaicc.com");
 });

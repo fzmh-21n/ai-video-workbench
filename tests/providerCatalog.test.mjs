@@ -5,7 +5,10 @@ import {
   DEFAULT_PROFILES,
   capabilityFor,
   inferAdapter,
+  migrateSavedProfile,
+  modelForSdVersion,
   preferredModelForSdVersion,
+  sdVersionForProfile,
   sdVersionForModel,
 } from "../src/providerCatalog.js";
 import {
@@ -208,4 +211,52 @@ test("maps the SD version switch for both supported relay adapters", () => {
 
 test("rejects unknown LWAIGC models before any upstream request", () => {
   assert.equal(lwaigcLimitIssue("unknown-video-model", [], 10), "请选择 LWAIGC 视频模型");
+});
+
+test("migrates an older custom LWAIGC profile and restores audio capability", () => {
+  const migrated = migrateSavedProfile({
+    id: "api_old_lwaigc",
+    name: "LwAigc",
+    baseUrl: "https://ai.lwaigc.cn",
+    adapter: "newapi",
+    model: "dbb-Q933-pro",
+    mediaUploadUrl: "",
+  });
+  assert.equal(migrated.adapter, "lwaigc");
+  assert.equal(migrated.model, "dbb-Q933-pro");
+  assert.equal(migrated.mediaUploadUrl, "https://ai.lwaigc.cn/v1/assets");
+  assert.equal(capabilityFor(migrated).audios, 3);
+});
+
+test("serializes all three documented dbb-Q933-pro audio references", () => {
+  const fullCapacity = materials(9, 3, 3);
+  assert.equal(lwaigcLimitIssue("dbb-Q933-pro", fullCapacity, 15), "");
+  const payload = lwaigcVideoPayload("dbb-Q933-pro", {
+    prompt: "DBB 满容量音频测试",
+    duration: 15,
+    resolution: "720p",
+    aspectRatio: "9:16",
+    materials: fullCapacity,
+  }, "client_dbb_audio");
+  assert.equal(payload.audio_urls.length, 3);
+  assert.equal(payload.image_urls.length, 9);
+  assert.equal(payload.video_urls.length, 3);
+});
+
+test("detects and switches CanSeeDream SD2.5 routes from live capabilities", () => {
+  const profile = {
+    adapter: "canseedream",
+    model: "kele_pool",
+    routeCapabilities: {
+      kele_pool: { images: 9, videos: 3, audios: 3, durations: [15], resolutions: ["480p"], ratios: ["9:16"] },
+      lajiao_pool: { images: 30, videos: 10, audios: 10, durations: [4, 5, 15, 29], resolutions: ["720p"], ratios: ["9:16"] },
+      aggc_1080: { images: 30, videos: 10, audios: 10, durations: [30], resolutions: ["720p"], ratios: ["9:16"] },
+    },
+  };
+  const models = ["kele_pool", "lajiao_pool", "aggc_1080"];
+  assert.equal(sdVersionForProfile(profile), "sd20");
+  assert.equal(modelForSdVersion(profile, "sd25", models), "lajiao_pool");
+  assert.equal(sdVersionForProfile({ ...profile, model: "aggc_1080" }), "sd25");
+  assert.equal(modelForSdVersion({ ...profile, model: "aggc_1080" }, "sd25", models), "aggc_1080");
+  assert.equal(modelForSdVersion({ ...profile, model: "aggc_1080" }, "sd20", models), "kele_pool");
 });

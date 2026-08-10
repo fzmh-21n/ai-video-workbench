@@ -24,7 +24,7 @@ function sectionRange(prompt, heading) {
   const markerStart = prompt.indexOf(marker);
   if (markerStart < 0) return null;
   const contentStart = markerStart + marker.length;
-  const nextHeading = prompt.slice(contentStart).search(/【[^】]+】/);
+  const nextHeading = prompt.slice(contentStart).search(/(?:^|\r?\n)\s*【[^】]+】/);
   const end = nextHeading < 0 ? prompt.length : contentStart + nextHeading;
   return { markerStart, contentStart, end, content: prompt.slice(contentStart, end) };
 }
@@ -47,7 +47,15 @@ function cleanRequestedName(value) {
 function requestedNames(content, role) {
   const meaningfulLines = content.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   if (role === "voice") {
-    return uniqueEntries(meaningfulLines.map((line) => cleanRequestedName(line.split(/[：:]/, 1)[0])));
+    return uniqueEntries(
+      meaningfulLines.map((line) => {
+        const voiceLabel = line
+          .split(/[：:]/, 1)[0]
+          .replace(/\s*【声音[0-9０-９]+】\s*$/, "")
+          .trim();
+        return cleanRequestedName(voiceLabel);
+      }),
+    );
   }
   if (role === "people") {
     return uniqueEntries(
@@ -57,10 +65,11 @@ function requestedNames(content, role) {
     );
   }
 
-  // 背景列表只读取标题后的第一行；每个词条必须与文件名精准匹配。
-  const firstLine = meaningfulLines[0] || "";
+  // 背景模块的每一行都可能是独立场景；每个词条必须与文件名精准匹配。
   return uniqueEntries(
-    firstLine.split(/[、，,；;]/).map((part) => cleanRequestedName(part)),
+    meaningfulLines.flatMap((line) =>
+      line.split(/[、，,；;]/).map((part) => cleanRequestedName(part)),
+    ),
   );
 }
 

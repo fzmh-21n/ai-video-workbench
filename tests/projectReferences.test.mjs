@@ -12,6 +12,15 @@ function image(name) {
   };
 }
 
+function audio(name) {
+  return {
+    key: `audio:${name}`,
+    kind: "audio",
+    file: { name },
+    name,
+  };
+}
+
 test("cleans spaces, hidden newlines, full-width digits, and full-width underscores", () => {
   assert.equal(cleanMatchValue(" \r０１１＿人物１\n "), "011_人物1");
 });
@@ -65,4 +74,59 @@ test("does not choose between duplicate extensionless filenames", () => {
 
   assert.equal(plan.matches.length, 0);
   assert.equal(plan.missing.length, 1);
+});
+
+test("matches every scene listed on separate background lines", () => {
+  const plan = planProjectReferences(
+    [
+      "【本节的所有背景】",
+      "013_三号防火瞭望屋外雪夜",
+      "014_三号防火瞭望屋内困守版",
+      "【本节背景说明】",
+      "后续说明不属于场景名称。",
+    ].join("\n"),
+    [
+      image("013_三号防火瞭望屋外雪夜.jpg"),
+      image("014_三号防火瞭望屋内困守版.png"),
+    ],
+  );
+
+  assert.equal(plan.matches.length, 2);
+  assert.equal(
+    plan.annotatedPrompt,
+    [
+      "【本节的所有背景】",
+      "@013_三号防火瞭望屋外雪夜=013_三号防火瞭望屋外雪夜",
+      "@014_三号防火瞭望屋内困守版=014_三号防火瞭望屋内困守版",
+      "【本节背景说明】",
+      "后续说明不属于场景名称。",
+    ].join("\n"),
+  );
+});
+
+test("matches every voice after removing only the fixed voice-number label", () => {
+  const plan = planProjectReferences(
+    [
+      "【本段角色声线锁定】",
+      "陈卫东 【声音2】：中年男性，中低音。",
+      "孙桂兰【声音１】：中年女性，中低音。",
+      "何志勇 【声音3】: 中年男性，中低音。",
+      "【本节出场的所有人物】",
+      "陈卫东",
+    ].join("\n"),
+    [audio("陈卫东.wav"), audio("孙桂兰.wav"), audio("何志勇.wav")],
+  );
+
+  assert.equal(plan.matches.filter((match) => match.role === "voice").length, 3);
+  assert.equal(
+    plan.annotatedPrompt,
+    [
+      "【本段角色声线锁定】",
+      "@陈卫东=陈卫东 【声音2】：中年男性，中低音。",
+      "@孙桂兰=孙桂兰【声音１】：中年女性，中低音。",
+      "@何志勇=何志勇 【声音3】: 中年男性，中低音。",
+      "【本节出场的所有人物】",
+      "陈卫东",
+    ].join("\n"),
+  );
 });

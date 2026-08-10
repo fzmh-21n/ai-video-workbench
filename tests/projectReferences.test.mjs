@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { cleanMatchValue, planProjectReferences } from "../src/projectReferences.js";
+import {
+  cleanMatchValue,
+  internalizeProjectAliases,
+  planProjectReferences,
+} from "../src/projectReferences.js";
 
 function image(name) {
   return {
@@ -19,6 +23,10 @@ function audio(name) {
     file: { name },
     name,
   };
+}
+
+function numberedName(number, label) {
+  return `${String(number).padStart(3, "0")}_${label}`;
 }
 
 test("cleans spaces, hidden newlines, full-width digits, and full-width underscores", () => {
@@ -129,4 +137,159 @@ test("matches every voice after removing only the fixed voice-number label", () 
       "陈卫东",
     ].join("\n"),
   );
+});
+
+test("matches mixed people, scenes, and voices in one prompt", () => {
+  const prompt = [
+    "【本段角色声线锁定】",
+    "旁白【声音1】：低沉",
+    "林晓【声音2】：清亮",
+    "顾远【声音3】：稳重",
+    "【本节出场的所有人物】",
+    "001_林晓、002_顾远，003_旁白",
+    "004_医生;005_护士；006_司机",
+    "【本节的所有背景】",
+    "011_医院门口",
+    "012_医院走廊、013_诊室",
+  ].join("\n");
+  const names = [
+    "旁白", "林晓", "顾远", "001_林晓", "002_顾远", "003_旁白",
+    "004_医生", "005_护士", "006_司机", "011_医院门口", "012_医院走廊", "013_诊室",
+  ];
+  const assets = [
+    audio("旁白.mp3"), audio("林晓.wav"), audio("顾远.m4a"),
+    ...names.slice(3, 9).map((name) => image(`${name}.png`)),
+    ...names.slice(9).map((name) => image(`${name}.jpg`)),
+  ];
+
+  const result = planProjectReferences(prompt, assets);
+
+  assert.equal(result.matches.length, 12);
+  assert.equal(result.missing.length, 0);
+  for (const name of names) assert.ok(result.annotatedPrompt.includes(`@${name}=${name}`));
+});
+
+test("handles the full 30 image and 10 audio reference capacity", () => {
+  const people = Array.from({ length: 20 }, (_, index) => numberedName(index + 1, `人物${index + 1}`));
+  const scenes = Array.from({ length: 10 }, (_, index) => numberedName(index + 101, `场景${index + 1}`));
+  const voices = Array.from({ length: 10 }, (_, index) => `声线角色${index + 1}`);
+  const prompt = [
+    "【本段角色声线锁定】",
+    ...voices.map((name, index) => `${name}【声音${index + 1}】：测试声线`),
+    "【本节出场的所有人物】",
+    people.join("、"),
+    "【本节的所有背景】",
+    ...scenes,
+  ].join("\r\n");
+  const assets = [
+    ...people.map((name) => image(`${name}.png`)),
+    ...scenes.map((name) => image(`${name}.jpeg`)),
+    ...voices.map((name) => audio(`${name}.mp3`)),
+  ];
+
+  const result = planProjectReferences(prompt, assets);
+
+  assert.equal(result.matches.length, 40);
+  assert.equal(result.missing.length, 0);
+  assert.equal((result.annotatedPrompt.match(/@[^=\r\n]+=/g) || []).length, 40);
+  for (const name of [...people, ...scenes, ...voices]) {
+    assert.ok(result.annotatedPrompt.includes(`@${name}=${name}`));
+  }
+});
+
+test("normalizes fullwidth characters on both prompt and asset filenames", () => {
+  const prompt = [
+    "【本节出场的所有人物】",
+    "０１１＿人物正面",
+    "【本节的所有背景】",
+    "０２１＿林间空地",
+  ].join("\n");
+  const result = planProjectReferences(prompt, [
+    image("011_人物正面.jpg"),
+    image("０２１＿林间空地.png"),
+  ]);
+
+  assert.equal(result.matches.length, 2);
+  assert.equal(result.missing.length, 0);
+  assert.match(result.annotatedPrompt, /@011_人物正面=011_人物正面/);
+  assert.match(result.annotatedPrompt, /@021_林间空地=021_林间空地/);
+});
+
+test("keeps exact punctuation and does not collapse distinct directions", () => {
+  const prompt = [
+    "【本节出场的所有人物】",
+    "011_人物（正面）、011_人物（背面）",
+  ].join("\n");
+  const result = planProjectReferences(prompt, [
+    image("011_人物（正面）.jpg"),
+    image("011_人物正面.jpg"),
+  ]);
+
+  assert.equal(result.matches.length, 1);
+  assert.deepEqual(result.missing.map((item) => item.requested), ["011_人物（背面）"]);
+  assert.match(result.annotatedPrompt, /@011_人物（正面）=011_人物（正面）/);
+  assert.doesNotMatch(result.annotatedPrompt, /@011_人物正面=011_人物（背面）/);
+});
+
+test("annotates exact matches while leaving only missing entries unchanged", () => {
+  const prompt = [
+    "【本节的所有背景】",
+    "101_场景1",
+    "102_场景2",
+    "103_场景3",
+  ].join("\n");
+  const result = planProjectReferences(prompt, [image("101_场景1.jpg"), image("103_场景3.jpg")]);
+
+  assert.equal(result.matches.length, 2);
+  assert.deepEqual(result.missing.map((item) => item.requested), ["102_场景2"]);
+  assert.match(result.annotatedPrompt, /@101_场景1=101_场景1/);
+  assert.match(result.annotatedPrompt, /\n102_场景2\n/);
+  assert.match(result.annotatedPrompt, /@103_场景3=103_场景3/);
+});
+
+test("is idempotent when the same prompt is planned repeatedly", () => {
+  const prompt = [
+    "【本段角色声线锁定】",
+    "林晓【声音1】：清亮",
+    "【本节出场的所有人物】",
+    "011_林晓",
+    "【本节的所有背景】",
+    "021_客厅",
+  ].join("\n");
+  const assets = [audio("林晓.mp3"), image("011_林晓.jpg"), image("021_客厅.png")];
+  const first = planProjectReferences(prompt, assets);
+  const second = planProjectReferences(first.annotatedPrompt, assets);
+
+  assert.equal(second.annotatedPrompt, first.annotatedPrompt);
+  assert.equal((second.annotatedPrompt.match(/@[^=\n]+=/g) || []).length, 3);
+});
+
+test("internalizes every generated image and audio alias", () => {
+  const prompt = [
+    "【本段角色声线锁定】",
+    "@旁白=旁白【声音1】：低沉",
+    "@林晓=林晓【声音2】：清亮",
+    "【本节出场的所有人物】",
+    "@001_林晓=001_林晓、@002_顾远=002_顾远",
+    "【本节的所有背景】",
+    "@101_医院=101_医院",
+    "@102_街道=102_街道",
+  ].join("\n");
+  const references = [
+    { kind: "audio", alias: "旁白", tag: "@Audio1" },
+    { kind: "audio", alias: "林晓", tag: "@Audio2" },
+    { kind: "image", alias: "001_林晓", tag: "@Image1" },
+    { kind: "image", alias: "002_顾远", tag: "@Image2" },
+    { kind: "image", alias: "101_医院", tag: "@Image3" },
+    { kind: "image", alias: "102_街道", tag: "@Image4" },
+  ];
+
+  const result = internalizeProjectAliases(prompt, references);
+
+  for (const [tag, name] of [
+    ["@Audio1", "旁白"], ["@Audio2", "林晓"], ["@Image1", "001_林晓"],
+    ["@Image2", "002_顾远"], ["@Image3", "101_医院"], ["@Image4", "102_街道"],
+  ]) {
+    assert.ok(result.includes(`${tag}=${name}`));
+  }
 });

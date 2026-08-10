@@ -1,3 +1,5 @@
+import { LWAIGC_VIDEO_MODELS, lwaigcCapability } from "./lwaigcCatalog.js";
+
 export const DEFAULT_PROFILES = [
   {
     id: "fmgo",
@@ -30,6 +32,14 @@ export const DEFAULT_PROFILES = [
     adapter: "canseedream",
     model: "kele_pool",
     mediaUploadUrl: "",
+  },
+  {
+    id: "lwaigc",
+    name: "LWAIGC",
+    baseUrl: "https://ai.lwaigc.cn",
+    adapter: "lwaigc",
+    model: "firefly-seedance2-720p",
+    mediaUploadUrl: "https://ai.lwaigc.cn/v1/assets",
   },
 ];
 
@@ -89,6 +99,7 @@ export const FALLBACK_MODELS = {
     "sora-2-portrait-12s",
   ],
   canseedream: ["kele_pool", "tc_pool", "shutiao_pool", "lajiao_pool", "yingtao_pool"],
+  lwaigc: LWAIGC_VIDEO_MODELS,
 };
 
 export const FALLBACK_MODEL_LABELS = {
@@ -100,6 +111,26 @@ export const FALLBACK_MODEL_LABELS = {
     yingtao_pool: "樱桃 SD2.5 满血 · 720P · 30秒 · 2990积分",
   },
 };
+
+const SD_VERSION_MODELS = {
+  lwaigc: {
+    sd20: "firefly-seedance2-720p",
+    sd25: "mf-seedance2.5",
+  },
+  paipu: {
+    sd20: "lec-seedance-videos-standard",
+    sd25: "lec-seedance-2-5",
+  },
+};
+
+export function preferredModelForSdVersion(adapter, version) {
+  return SD_VERSION_MODELS[adapter]?.[version] || "";
+}
+
+export function sdVersionForModel(modelName) {
+  const model = String(modelName || "").toLowerCase();
+  return /(?:seedance|sd)[-.]?2[.-]?5|sd25/.test(model) ? "sd25" : "sd20";
+}
 
 export function capabilityFor(profile) {
   const model = String(profile?.model || "").toLowerCase();
@@ -332,6 +363,8 @@ export function capabilityFor(profile) {
     return { ...common, durations: [15], ratios: [...common.ratios, "adaptive"] };
   }
 
+  if (adapter === "lwaigc") return lwaigcCapability(profile?.model);
+
   return base;
 }
 
@@ -342,6 +375,7 @@ export function inferAdapter(baseUrl) {
     if (host === "api.paipu.net") return "paipu";
     if (host === "api.viralee.top") return "viralee";
     if (host === "canseedream.com" || host === "see.ximeiedu.org") return "canseedream";
+    if (host === "ai.lwaigc.cn") return "lwaigc";
   } catch {}
   return "newapi";
 }

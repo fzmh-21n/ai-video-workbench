@@ -5,6 +5,8 @@ import {
   FALLBACK_MODELS,
   capabilityFor,
   inferAdapter,
+  preferredModelForSdVersion,
+  sdVersionForModel,
 } from "./providerCatalog.js";
 import {
   fileStem,
@@ -20,6 +22,11 @@ import {
   putTasks,
   removeTask as removeStoredTask,
 } from "./taskStore.js";
+import {
+  clearCredentials,
+  readCredentials,
+  saveCredentials,
+} from "./credentialStore.js";
 
 const PROFILE_KEY = "video-workbench-profiles-v2";
 const ACTIVE_KEY = "video-workbench-active-profile-v2";
@@ -48,6 +55,15 @@ function loadJson(key, fallback) {
 }
 
 function migrateSavedProfile(profile) {
+  if (profile?.id === "lwaigc") {
+    return {
+      ...profile,
+      baseUrl: "https://ai.lwaigc.cn",
+      adapter: "lwaigc",
+      model: profile.model || "firefly-seedance2-720p",
+      mediaUploadUrl: "https://ai.lwaigc.cn/v1/assets",
+    };
+  }
   if (
     profile?.adapter === "canseedream" &&
     String(profile.baseUrl || "").replace(/\/$/, "") === "https://canseedream.com"
@@ -127,6 +143,7 @@ function normalizeModels(payload, adapter) {
   const values = raw
     .map((model) => (typeof model === "string" ? model : model?.id || model?.name))
     .filter(Boolean);
+  if (adapter === "lwaigc" && Array.isArray(payload?.models)) return values;
   return values.length ? values : FALLBACK_MODELS[adapter] || [];
 }
 
@@ -140,6 +157,80 @@ function statusLabel(status) {
 }
 
 export default function App() {
+  const [authStatus, setAuthStatus] = useState("checking");
+  const [loginName, setLoginName] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [loginError, setLoginError] = useState("");
+  const [loggingIn, setLoggingIn] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/auth/session")
+      .then((response) => {
+        if (!cancelled) setAuthStatus(response.ok ? "authenticated" : "anonymous");
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setAuthStatus("anonymous");
+          setLoginError("无法连接工作台服务，请稍后重试");
+        }
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  async function submitLogin(event) {
+    event.preventDefault();
+    if (!loginName.trim() || !loginPassword) {
+      setLoginError("请输入用户名和密码");
+      return;
+    }
+    setLoggingIn(true);
+    setLoginError("");
+    try {
+      const response = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: loginName.trim(), password: loginPassword }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.message || "登录失败");
+      setLoginPassword("");
+      setAuthStatus("authenticated");
+    } catch (error) {
+      setLoginError(error.message || "登录失败");
+    } finally {
+      setLoggingIn(false);
+    }
+  }
+
+  async function logout() {
+    await fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
+    setAuthStatus("anonymous");
+    setLoginPassword("");
+  }
+
+  if (authStatus !== "authenticated") {
+    return (
+      <main className="login-shell">
+        <form className="login-card" onSubmit={submitLogin}>
+          <div className="login-brand">影</div>
+          <span>PRIVATE WORKSPACE</span>
+          <h1>AI 视频生成工作台</h1>
+          <p>{authStatus === "checking" ? "正在验证登录状态…" : "请输入工作台账号后继续"}</p>
+          <label><span>用户名</span><input autoComplete="username" value={loginName} onChange={(event) => setLoginName(event.target.value)} disabled={authStatus === "checking" || loggingIn} /></label>
+          <label><span>密码</span><input type="password" autoComplete="current-password" value={loginPassword} onChange={(event) => setLoginPassword(event.target.value)} disabled={authStatus === "checking" || loggingIn} /></label>
+          {loginError && <div className="login-error" role="alert">{loginError}</div>}
+          <button className="primary-button" type="submit" disabled={authStatus === "checking" || loggingIn}>{loggingIn ? "登录中…" : "登录工作台"}</button>
+          <small>此工作台不开放注册</small>
+        </form>
+      </main>
+    );
+  }
+
+  return <Workbench onLogout={logout} />;
+}
+
+function Workbench({ onLogout }) {
   const [profiles, setProfiles] = useState(() => {
     const saved = loadJson(PROFILE_KEY, null);
     if (!Array.isArray(saved) || !saved.length) return DEFAULT_PROFILES;
@@ -180,6 +271,7 @@ export default function App() {
   const [draft, setDraft] = useState(profiles[0]);
   const [draftKey, setDraftKey] = useState("");
   const [draftUploadKey, setDraftUploadKey] = useState("");
+  const [rememberKey, setRememberKey] = useState(false);
   const [modelOptions, setModelOptions] = useState({});
   const [configStatus, setConfigStatus] = useState("填写配置后测试连接");
   const [testing, setTesting] = useState(false);
@@ -201,6 +293,14 @@ export default function App() {
   const activeProfile =
     profiles.find((profile) => profile.id === activeId) || profiles[0];
   const capability = useMemo(() => capabilityFor(activeProfile), [activeProfile]);
+  const sdVersion = sdVersionForModel(activeProfile.model);
+  const availableActiveModels = modelOptions[activeProfile.id];
+  const sdVersionAvailability = {
+    sd20: preferredModelForSdVersion(activeProfile.adapter, "sd20"),
+    sd25: preferredModelForSdVersion(activeProfile.adapter, "sd25"),
+  };
+  const numericDurations = capability.durations.filter((value) => typeof value === "number");
+  const maximumDurationLabel = numericDurations.length ? `${Math.max(...numericDurations)}秒` : "自动时长";
   const totalReferenceBytes = references.reduce(
     (total, item) => total + (item.file?.size || 0),
     0,
@@ -292,7 +392,35 @@ export default function App() {
   }, [activeProfile.id, activeProfile.model]);
 
   function keyFor(profile) {
-    return sessionStorage.getItem(`video-api-key:${profile.id}`) || "";
+    return readCredentials(profile.id).apiKey;
+  }
+
+  function mediaKeyFor(profile) {
+    return readCredentials(profile.id).mediaKey;
+  }
+
+  function switchSdVersion(version) {
+    const model = sdVersionAvailability[version];
+    if (!model) {
+      setNotice(`当前中转站 ${activeProfile.name} 没有配置 ${version === "sd25" ? "SD2.5" : "SD2.0"} 模型`);
+      return;
+    }
+    if (Array.isArray(availableActiveModels) && !availableActiveModels.includes(model)) {
+      setNotice(`当前 API Key 没有 ${model} 的调用权限，请在中转站管理中重新读取模型`);
+      return;
+    }
+    setProfiles((current) => current.map((profile) => (
+      profile.id === activeProfile.id ? { ...profile, model } : profile
+    )));
+    const nextCapability = capabilityFor({ ...activeProfile, model });
+    const exceeded = Object.keys(REFERENCE_LIMITS).filter(
+      (kind) => referenceCounts[kind] > (nextCapability[`${kind}s`] ?? 0),
+    );
+    const label = version === "sd25" ? "SD2.5（30图 / 10音频 / 10视频 / 最长30秒）" : "SD2.0（9图 / 3音频 / 3视频 / 最长15秒）";
+    const warning = exceeded.length
+      ? `；已有素材超限：${exceeded.map((kind) => `${KIND_LABELS[kind]} ${referenceCounts[kind]}/${nextCapability[`${kind}s`]}`).join("、")}，请删除标红的超额素材后提交`
+      : "";
+    setNotice(`已切换到 ${label}，当前模型：${model}${warning}`);
   }
 
   function headersFor(profile, explicitKey) {
@@ -303,7 +431,7 @@ export default function App() {
       "x-api-adapter": profile.adapter,
       "x-media-upload-url": (profile.mediaUploadUrl || "").trim(),
       "x-media-upload-key":
-        sessionStorage.getItem(`video-media-key:${profile.id}`) ||
+        mediaKeyFor(profile) ||
         (explicitKey ?? keyFor(profile)).trim(),
     };
   }
@@ -359,18 +487,22 @@ export default function App() {
   }, [taskDatabaseReady]);
 
   function openConfig(profile = activeProfile) {
+    const credentials = readCredentials(profile.id);
     setDraft({ ...profile });
-    setDraftKey(keyFor(profile));
-    setDraftUploadKey(sessionStorage.getItem(`video-media-key:${profile.id}`) || "");
+    setDraftKey(credentials.apiKey);
+    setDraftUploadKey(credentials.mediaKey);
+    setRememberKey(credentials.remember);
     setConfigStatus("填写配置后测试连接");
     setConfigOpen(true);
   }
 
   function selectDraft(id) {
     const profile = profiles.find((item) => item.id === id);
+    const credentials = readCredentials(profile.id);
     setDraft({ ...profile });
-    setDraftKey(keyFor(profile));
-    setDraftUploadKey(sessionStorage.getItem(`video-media-key:${profile.id}`) || "");
+    setDraftKey(credentials.apiKey);
+    setDraftUploadKey(credentials.mediaKey);
+    setRememberKey(credentials.remember);
     setConfigStatus("填写配置后测试连接");
   }
 
@@ -386,6 +518,7 @@ export default function App() {
     setDraft(profile);
     setDraftKey("");
     setDraftUploadKey("");
+    setRememberKey(false);
     setConfigStatus("请填写新中转站配置");
   }
 
@@ -407,8 +540,11 @@ export default function App() {
           ? current.map((item) => (item.id === saved.id ? saved : item))
           : [...current, saved];
       });
-      sessionStorage.setItem(`video-api-key:${saved.id}`, draftKey.trim());
-      sessionStorage.setItem(`video-media-key:${saved.id}`, draftUploadKey.trim());
+      saveCredentials(saved.id, {
+        apiKey: draftKey,
+        mediaKey: draftUploadKey,
+        remember: rememberKey,
+      });
       setActiveId(saved.id);
       setDraft(saved);
       setNotice(`已切换到 ${saved.name} · ${saved.model}`);
@@ -425,14 +561,15 @@ export default function App() {
       return;
     }
     const remaining = profiles.filter((item) => item.id !== draft.id);
-    sessionStorage.removeItem(`video-api-key:${draft.id}`);
-    sessionStorage.removeItem(`video-media-key:${draft.id}`);
+    clearCredentials(draft.id);
     setProfiles(remaining);
     const next = remaining[0];
+    const credentials = readCredentials(next.id);
     setActiveId(next.id);
     setDraft({ ...next });
-    setDraftKey(keyFor(next));
-    setDraftUploadKey(sessionStorage.getItem(`video-media-key:${next.id}`) || "");
+    setDraftKey(credentials.apiKey);
+    setDraftUploadKey(credentials.mediaKey);
+    setRememberKey(credentials.remember);
   }
 
   async function testProfile() {
@@ -535,7 +672,7 @@ export default function App() {
           continue;
         }
         const used = next.filter((item) => item.kind === asset.kind).length;
-        if (used >= REFERENCE_LIMITS[asset.kind] || next.length >= 50) continue;
+        if (used >= (capability[`${asset.kind}s`] ?? 0) || next.length >= 50) continue;
         if (bytes + asset.file.size > MAX_TOTAL_BYTES) continue;
         bytes += asset.file.size;
         next.push({
@@ -580,7 +717,7 @@ export default function App() {
         messages.push(`${file.name} 格式不支持`);
         continue;
       }
-      const limit = REFERENCE_LIMITS[kind];
+      const limit = capability[`${kind}s`] ?? 0;
       const used = next.filter((item) => item.kind === kind).length;
       if (!limit || used >= limit || next.length >= 50) {
         messages.push(`${file.name} 超过${KIND_LABELS[kind]}素材数量限制`);
@@ -621,7 +758,7 @@ export default function App() {
       if (!["http:", "https:"].includes(parsed.protocol)) throw new Error();
       const kind = kindFromUrl(parsed.href, urlKind);
       const durationSeconds = await readMediaDuration(parsed.href, kind);
-      const limit = REFERENCE_LIMITS[kind];
+      const limit = capability[`${kind}s`] ?? 0;
       if (!limit || references.filter((item) => item.kind === kind).length >= limit)
         throw new Error(`${KIND_LABELS[kind]}素材最多只能添加 ${limit} 个`);
       setReferences((current) =>
@@ -899,6 +1036,21 @@ export default function App() {
           </div>
         </div>
         <div className="provider-switcher">
+          <div className="model-version-switch" role="group" aria-label="Seedance 模型版本">
+            <span>模型版本</span>
+            <button
+              className={sdVersion === "sd20" ? "active" : ""}
+              disabled={!sdVersionAvailability.sd20 || (Array.isArray(availableActiveModels) && !availableActiveModels.includes(sdVersionAvailability.sd20))}
+              onClick={() => switchSdVersion("sd20")}
+              title="9张图片、3个音频、3个视频，最长15秒"
+            >SD2.0</button>
+            <button
+              className={sdVersion === "sd25" ? "active" : ""}
+              disabled={!sdVersionAvailability.sd25 || (Array.isArray(availableActiveModels) && !availableActiveModels.includes(sdVersionAvailability.sd25))}
+              onClick={() => switchSdVersion("sd25")}
+              title="30张图片、10个音频、10个视频，最长30秒"
+            >SD2.5</button>
+          </div>
           <label>
             <span>当前中转站</span>
             <select value={activeProfile.id} onChange={(event) => setActiveId(event.target.value)}>
@@ -912,6 +1064,7 @@ export default function App() {
           </span>
           <span className="network-pill" title="工作台接口不继承系统或梯子代理">直连防丢包</span>
           <button className="secondary-button" onClick={() => openConfig()}>中转站管理</button>
+          <button className="logout-button" onClick={onLogout}>退出登录</button>
         </div>
       </header>
 
@@ -1056,7 +1209,7 @@ export default function App() {
                 <div className="empty-reference">
                   <strong>把参考图片、音频或视频拖到这里</strong>
                   <span>
-                    工作台通用上限为图片30张、音频10个、视频10个；提交能力以当前模型为准
+                    当前 {sdVersion === "sd25" ? "SD2.5" : "SD2.0"} 上限：图片{capability.images}张、音频{capability.audios}个、视频{capability.videos}个；{numericDurations.length ? "最长" : ""}{maximumDurationLabel}
                   </span>
                 </div>
               )}
@@ -1103,8 +1256,8 @@ export default function App() {
               <label><span>生成数量</span><select value={quantity} onChange={(event) => setQuantity(Number(event.target.value))}>{[1, 2, 3, 4].map((value) => <option key={value}>{value}</option>)}</select></label>
             </div>
             <label className="check-row">
-              <input type="checkbox" checked={syncAudio} disabled={capability.syncAudioFixed} onChange={(event) => setSyncAudio(event.target.checked)} />
-              生成同步音频{capability.syncAudioFixed ? "（当前模型固定开启）" : ""}
+              <input type="checkbox" checked={syncAudio} disabled={capability.syncAudioFixed || !capability.syncAudio} onChange={(event) => setSyncAudio(event.target.checked)} />
+              生成同步音频{capability.syncAudioFixed ? "（当前模型固定开启）" : !capability.syncAudio ? "（当前模型不支持）" : ""}
             </label>
             <div className="notice" role="status">ⓘ {notice}</div>
             <div className="submit-row">
@@ -1204,8 +1357,9 @@ export default function App() {
               <div className="config-form">
                 <label><span>配置名称</span><input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="例如：主力 API" /></label>
                 <label><span>Base URL</span><input value={draft.baseUrl} onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value, adapter: inferAdapter(event.target.value) })} placeholder="https://api.example.com" /></label>
-                <label><span>接口类型</span><select value={draft.adapter} onChange={(event) => setDraft({ ...draft, adapter: event.target.value })}><option value="fmgo">FMGO / 飞猫</option><option value="paipu">Paipu / Lec</option><option value="viralee">ViralE</option><option value="canseedream">CanSeeDream / 看见梦想</option><option value="newapi">New API 通用</option></select></label>
-                <label><span>API Key</span><input type="password" value={draftKey} onChange={(event) => setDraftKey(event.target.value)} placeholder="sk-••••••••" /><small>仅保存在当前浏览器会话，不写入源码。</small></label>
+                <label><span>接口类型</span><select value={draft.adapter} onChange={(event) => setDraft({ ...draft, adapter: event.target.value })}><option value="fmgo">FMGO / 飞猫</option><option value="paipu">Paipu / Lec</option><option value="viralee">ViralE</option><option value="canseedream">CanSeeDream / 看见梦想</option><option value="lwaigc">LWAIGC 官方统一接口</option><option value="newapi">New API 通用</option></select></label>
+                <label><span>API Key</span><input type="password" value={draftKey} onChange={(event) => setDraftKey(event.target.value)} placeholder="sk-••••••••" /><small>{rememberKey ? "将保存在此浏览器；公共电脑请勿启用。" : "仅保存在当前浏览器会话，不写入源码。"}</small></label>
+                <label className="remember-key-row"><input type="checkbox" checked={rememberKey} onChange={(event) => setRememberKey(event.target.checked)} /><span>在这台浏览器记住当前中转站的 Key</span></label>
                 <label>
                   <span>模型</span>
                   {(modelOptions[draft.id] || FALLBACK_MODELS[draft.adapter] || []).length ? (
@@ -1232,7 +1386,7 @@ export default function App() {
                     当前列表共 {(modelOptions[draft.id] || FALLBACK_MODELS[draft.adapter] || []).length} 个模型
                   </small>
                 </label>
-                <details className="advanced-config"><summary>高级素材上传设置</summary><label><span>素材上传地址</span><input value={draft.mediaUploadUrl || ""} onChange={(event) => setDraft({ ...draft, mediaUploadUrl: event.target.value })} placeholder="可选，例如 /v1/media/upload" /></label><label><span>独立上传密钥</span><input type="password" value={draftUploadKey} onChange={(event) => setDraftUploadKey(event.target.value)} placeholder="留空则使用当前 API Key" /><small>同样仅保存在当前浏览器会话。</small></label></details>
+                <details className="advanced-config"><summary>高级素材上传设置</summary><label><span>素材上传地址</span><input value={draft.mediaUploadUrl || ""} onChange={(event) => setDraft({ ...draft, mediaUploadUrl: event.target.value })} placeholder="可选，例如 /v1/media/upload" /></label><label><span>独立上传密钥</span><input type="password" value={draftUploadKey} onChange={(event) => setDraftUploadKey(event.target.value)} placeholder="留空则使用当前 API Key" /><small>保存位置跟随上方“记住 Key”选项。</small></label></details>
                 <div className="config-status" role="status">{configStatus}</div>
                 <div className="dialog-actions"><button onClick={testProfile} disabled={testing}>{testing ? "测试中…" : "测试并读取模型"}</button><button className="primary-button" onClick={() => saveProfile(true)}>保存并切换</button><button className="danger-button" onClick={deleteProfile}>删除配置</button></div>
               </div>

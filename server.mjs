@@ -11,6 +11,19 @@ import {
   writeFileSync,
 } from "node:fs";
 import { fileURLToPath } from "node:url";
+import {
+  clearedSessionCookie,
+  cookieValue,
+  createSessionToken,
+  sessionCookie,
+  verifyLoginCredentials,
+  verifySessionToken,
+} from "./serverAuth.mjs";
+import {
+  LWAIGC_VIDEO_MODELS,
+  lwaigcLimitIssue,
+  lwaigcVideoPayload,
+} from "./src/lwaigcCatalog.js";
 
 // 与飞猫最新插件保持一致：本地中转服务不继承梯子/环境代理。
 // 只影响本工作台进程，不会改动 Windows 或浏览器的代理设置。
@@ -117,6 +130,10 @@ const secretPath = path.join(dataDir, "job-secret");
 if (!existsSync(secretPath))
   writeFileSync(secretPath, crypto.randomBytes(48).toString("hex"), { mode: 0o600 });
 const jobSecret = readFileSync(secretPath, "utf8").trim();
+const loginUsername = String(process.env.WORKBENCH_USERNAME || "").trim();
+const loginPassword = String(process.env.WORKBENCH_PASSWORD || "");
+const loginConfigured = Boolean(loginUsername && loginPassword);
+const loginAttempts = new Map();
 
 function httpError(status, message) {
   const error = new Error(message);
@@ -163,6 +180,7 @@ function inferAdapter(url) {
   if (host === "api.paipu.net") return "paipu";
   if (host === "api.viralee.top") return "viralee";
   if (host === "canseedream.com" || host === "see.ximeiedu.org") return "canseedream";
+  if (host === "ai.lwaigc.cn") return "lwaigc";
   return "newapi";
 }
 
@@ -171,7 +189,7 @@ function providerConfig(req, requireModel = true) {
   const apiKey = String(req.get("x-api-key") || "").trim();
   const model = String(req.get("x-api-model") || "").trim();
   const requestedAdapter = String(req.get("x-api-adapter") || "").trim();
-  const adapter = ["fmgo", "paipu", "viralee", "canseedream", "newapi"].includes(requestedAdapter)
+  const adapter = ["fmgo", "paipu", "viralee", "canseedream", "lwaigc", "newapi"].includes(requestedAdapter)
     ? requestedAdapter
     : inferAdapter(resolvedBaseUrl);
   // canseedream.com 目前会 301 跳转至 see.ximeiedu.org。跨域跳转会按
@@ -180,7 +198,11 @@ function providerConfig(req, requireModel = true) {
   if (adapter === "canseedream" && new URL(resolvedBaseUrl).hostname === "canseedream.com")
     resolvedBaseUrl = "https://see.ximeiedu.org";
   const rawUploadUrl = String(req.get("x-media-upload-url") || "").trim();
-  const mediaUploadUrl = rawUploadUrl ? publicUrl(rawUploadUrl, "素材上传地址").toString() : "";
+  const mediaUploadUrl = rawUploadUrl
+    ? publicUrl(rawUploadUrl, "素材上传地址").toString()
+    : adapter === "lwaigc"
+      ? `${resolvedBaseUrl}/v1/assets`
+      : "";
   const mediaUploadKey = String(req.get("x-media-upload-key") || "").trim() || apiKey;
   if (!apiKey) throw httpError(400, "请填写 API Key");
   if (requireModel && !model) throw httpError(400, "请选择模型");
@@ -250,6 +272,8 @@ function fallbackModels(adapter) {
         ? VIRALEE_MODELS
         : adapter === "canseedream"
           ? CANSEEDREAM_ROUTES
+          : adapter === "lwaigc"
+            ? LWAIGC_VIDEO_MODELS
         : [];
 }
 
@@ -325,7 +349,7 @@ function videoUrlFrom(body, base) {
 }
 
 function errorFrom(body) {
-  return String(body?.error?.message || body?.error || body?.message || "视频生成失败");
+  return String(body?.error?.message || body?.message || body?.error || "视频生成失败");
 }
 
 function dateText(value) {
@@ -340,6 +364,12 @@ function safeNumber(value, fallback, min, max) {
   const number = Number(value);
   if (!Number.isFinite(number)) return fallback;
   return Math.max(min, Math.min(max, number));
+}
+
+function validateLwaigcLimits(config, meta, duration) {
+  if (config.adapter !== "lwaigc") return;
+  const issue = lwaigcLimitIssue(config.model, meta, duration);
+  if (issue) throw httpError(400, issue);
 }
 
 function cleanupFiles(files) {
@@ -418,15 +448,41 @@ async function uploadMedia(config, file, material = {}) {
   const bytes = fileBytes(file);
   const form = new FormData();
   form.set("file", new Blob([bytes], { type: file.mimetype || "application/octet-stream" }), displayName);
+  const headers = { Authorization: `Bearer ${config.mediaUploadKey}` };
+  if (config.adapter === "lwaigc") {
+    const fingerprint = crypto.createHash("sha256").update(bytes).digest("hex").slice(0, 40);
+    headers["Idempotency-Key"] = `asset_${fingerprint}`;
+  }
   const response = await upstream(
     config.mediaUploadUrl,
-    { method: "POST", headers: { Authorization: `Bearer ${config.mediaUploadKey}` }, body: form },
+    { method: "POST", headers, body: form },
     180_000,
   );
   const body = await readJson(response);
   const value = body?.url || body?.data?.url || body?.data?.[0]?.url;
   if (!value) throw httpError(502, `素材上传成功但没有返回 URL：${displayName}`);
   return publicUrl(value, "素材 URL").toString();
+}
+
+async function importLwaigcMedia(config, value) {
+  const source = publicUrl(value, "素材 URL");
+  if (
+    source.origin === config.baseUrl &&
+    /^\/v1\/(?:assets|media-references)\//.test(source.pathname)
+  ) return source.toString();
+
+  const fingerprint = crypto.createHash("sha256").update(source.toString()).digest("hex").slice(0, 40);
+  const response = await upstream(`${config.baseUrl}/v1/assets/url`, {
+    method: "POST",
+    headers: authHeaders(config, {
+      "Content-Type": "application/json",
+      "Idempotency-Key": `asset_url_${fingerprint}`,
+    }),
+    body: JSON.stringify({ url: source.toString() }),
+  }, 180_000);
+  const body = await readJson(response);
+  if (!body?.url) throw httpError(502, "LWAIGC 转存公网素材成功但没有返回 URL");
+  return publicUrl(body.url, "LWAIGC 素材 URL").toString();
 }
 
 function imageDataUrl(file) {
@@ -439,7 +495,10 @@ async function prepareMaterials(config, files, meta) {
   for (const item of meta) {
     const kind = ["image", "audio", "video"].includes(item.kind) ? item.kind : "image";
     if (item.url) {
-      materials.push({ ...item, kind, url: publicUrl(item.url, "素材 URL").toString() });
+      const url = config.adapter === "lwaigc"
+        ? await importLwaigcMedia(config, item.url)
+        : publicUrl(item.url, "素材 URL").toString();
+      materials.push({ ...item, kind, url });
       continue;
     }
     const file = files[Number(item.fileIndex)];
@@ -770,8 +829,43 @@ async function createFmgo(config, input) {
   };
 }
 
+async function createLwaigc(config, input) {
+  const clientTaskId = `workbench_${crypto.randomUUID()}`;
+  const bodyText = JSON.stringify(lwaigcVideoPayload(config.model, input, clientTaskId));
+  const request = () => upstream(`${config.baseUrl}/v1/videos`, {
+    method: "POST",
+    headers: authHeaders(config, {
+      "Content-Type": "application/json",
+      "Idempotency-Key": clientTaskId,
+    }),
+    body: bodyText,
+  }, 180_000);
+
+  let response;
+  try {
+    response = await request();
+  } catch {
+    response = await request();
+  }
+  if (response.status >= 500) {
+    await response.body?.cancel().catch(() => {});
+    response = await request();
+  }
+  const body = await readJson(response);
+  const taskId = taskIdFrom(body);
+  if (!taskId) throw httpError(502, "LWAIGC 创建成功但没有返回任务 ID");
+  return {
+    adapter: "lwaigc",
+    baseUrl: config.baseUrl,
+    taskId,
+    statusPath: `/v1/videos/${encodeURIComponent(taskId)}`,
+    model: config.model,
+  };
+}
+
 async function createVideo(config, input) {
   if (config.adapter === "fmgo") return createFmgo(config, input);
+  if (config.adapter === "lwaigc") return createLwaigc(config, input);
   if (config.adapter === "canseedream") {
     const response = await upstream(`${config.baseUrl}/api/v3/contents/generations/tasks`, {
       method: "POST",
@@ -856,7 +950,68 @@ app.use((req, _res, next) => {
   next();
 });
 
+app.use(express.json({ limit: "16kb" }));
+
 app.get("/api/health", (_req, res) => res.json({ ok: true }));
+
+function secureCookie(req) {
+  return (
+    process.env.NODE_ENV === "production" ||
+    req.secure ||
+    String(req.get("x-forwarded-proto") || "").split(",")[0].trim() === "https"
+  );
+}
+
+function currentSession(req) {
+  if (!loginConfigured) return null;
+  const token = cookieValue(req.get("cookie"), "workbench_session");
+  return verifySessionToken(token, jobSecret);
+}
+
+app.get("/api/auth/session", (req, res) => {
+  const session = currentSession(req);
+  if (!session) return res.status(401).json({ authenticated: false });
+  return res.json({ authenticated: true, username: session.username });
+});
+
+app.post("/api/auth/login", (req, res) => {
+  if (!loginConfigured) {
+    return res.status(503).json({ message: "服务器尚未配置工作台登录账号" });
+  }
+  const address = req.socket.remoteAddress || "unknown";
+  const now = Date.now();
+  const previous = loginAttempts.get(address);
+  const recent = previous && now - previous.startedAt < 15 * 60 * 1000
+    ? previous
+    : { count: 0, startedAt: now };
+  if (recent.count >= 5) return res.status(429).json({ message: "登录失败次数过多，请 15 分钟后再试" });
+
+  const valid = verifyLoginCredentials(
+    req.body?.username,
+    req.body?.password,
+    loginUsername,
+    loginPassword,
+  );
+  if (!valid) {
+    loginAttempts.set(address, { ...recent, count: recent.count + 1 });
+    return res.status(401).json({ message: "用户名或密码错误" });
+  }
+
+  loginAttempts.delete(address);
+  const token = createSessionToken(loginUsername, jobSecret);
+  res.setHeader("Set-Cookie", sessionCookie(token, secureCookie(req)));
+  return res.json({ authenticated: true, username: loginUsername });
+});
+
+app.post("/api/auth/logout", (req, res) => {
+  res.setHeader("Set-Cookie", clearedSessionCookie(secureCookie(req)));
+  res.json({ authenticated: false });
+});
+
+app.use("/api", (req, res, next) => {
+  if (!currentSession(req)) return res.status(401).json({ message: "请先登录工作台" });
+  return next();
+});
 
 app.get("/api/config/models", async (req, res, next) => {
   try {
@@ -908,8 +1063,14 @@ app.get("/api/config/models", async (req, res, next) => {
     }
     const body = await readJson(response);
     const list = Array.isArray(body?.data) ? body.data : Array.isArray(body?.models) ? body.models : [];
-    const models = list.map((item) => (typeof item === "string" ? item : item?.id || item?.name)).filter(Boolean);
-    res.json({ models: models.length ? models : fallbackModels(config.adapter) });
+    let models = list.map((item) => (typeof item === "string" ? item : item?.id || item?.name)).filter(Boolean);
+    if (config.adapter === "lwaigc") {
+      const documentedVideoModels = new Set(LWAIGC_VIDEO_MODELS);
+      models = models.filter((model) => documentedVideoModels.has(model));
+    }
+    res.json({
+      models: config.adapter === "lwaigc" ? models : models.length ? models : fallbackModels(config.adapter),
+    });
   } catch (error) {
     const adapter = (() => {
       try { return providerConfig(req, false).adapter; } catch { return ""; }
@@ -936,6 +1097,8 @@ app.post("/api/tasks", upload.array("references", 50), async (req, res, next) =>
       throw httpError(400, "参考素材信息无效");
     }
     if (!Array.isArray(meta) || meta.length > 50) throw httpError(400, "参考素材数量无效");
+    const requestedDuration = safeNumber(req.body.duration, 5, 1, 60);
+    validateLwaigcLimits(config, meta, requestedDuration);
     const materials = await prepareMaterials(config, files, meta);
     const prompt = withReferenceMapping(
       rawPrompt,
@@ -945,7 +1108,7 @@ app.post("/api/tasks", upload.array("references", 50), async (req, res, next) =>
     const input = {
       prompt,
       materials,
-      duration: safeNumber(req.body.duration, 5, 1, 60),
+      duration: requestedDuration,
       resolution: ["480p", "720p", "1080p", "4K"].includes(req.body.resolution)
         ? req.body.resolution
         : "720p",

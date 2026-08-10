@@ -5,15 +5,18 @@ const SECTION_RULES = [
 ];
 
 export function fileStem(name = "") {
-  return String(name).replace(/\.[^.]+$/, "").trim();
+  return cleanMatchValue(name).replace(/\.[^.]+$/, "");
 }
 
-function normalized(value = "") {
+export function cleanMatchValue(value = "") {
   return String(value)
-    .normalize("NFKC")
-    .replace(/^@[^=]+=/, "")
-    .replace(/[\s“”"'‘’【】\[\]（）()《》<>·._-]+/g, "")
-    .toLowerCase();
+    .trim()
+    .replace(/[\r\n]/g, "")
+    .replace(/[０-９＿]/g, (character) => {
+      if (character === "＿") return "_";
+      return String.fromCharCode(character.charCodeAt(0) - 0xfee0);
+    })
+    .trim();
 }
 
 function sectionRange(prompt, heading) {
@@ -26,91 +29,67 @@ function sectionRange(prompt, heading) {
   return { markerStart, contentStart, end, content: prompt.slice(contentStart, end) };
 }
 
-function unique(values) {
-  return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+function uniqueEntries(entries) {
+  const seen = new Set();
+  return entries.filter((entry) => {
+    if (!entry.requested || seen.has(entry.requested)) return false;
+    seen.add(entry.requested);
+    return true;
+  });
 }
 
 function cleanRequestedName(value) {
-  return String(value)
-    .trim()
-    .replace(/^[-*•\d.、\s]+/, "")
-    .replace(/^@[^=]+=/, "")
-    .replace(/[。；;，,]+$/, "")
-    .trim();
+  const source = String(value).trim();
+  const requestedSource = source.replace(/^@[^=]+=/, "");
+  return { source, requested: cleanMatchValue(requestedSource) };
 }
 
-function requestedNames(content, role, assets) {
+function requestedNames(content, role) {
   const meaningfulLines = content.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   if (role === "voice") {
-    return unique(meaningfulLines.map((line) => cleanRequestedName(line.split(/[：:]/, 1)[0])));
+    return uniqueEntries(meaningfulLines.map((line) => cleanRequestedName(line.split(/[：:]/, 1)[0])));
   }
   if (role === "people") {
-    return unique(
+    return uniqueEntries(
       meaningfulLines.flatMap((line) =>
         line.split(/[、，,；;]/).map((part) => cleanRequestedName(part.split(/[：:]/, 1)[0])),
       ),
     );
   }
 
-  // 背景列表通常写在标题后的第一行。最后一个场景后面可以直接连着说明，
-  // 因此用项目内的图片文件名取这一段的最长前缀，不分析后面的场景解释。
+  // 背景列表只读取标题后的第一行；每个词条必须与文件名精准匹配。
   const firstLine = meaningfulLines[0] || "";
-  return unique(
-    firstLine.split(/[、，,；;]/).map((part) => {
-      const value = cleanRequestedName(part);
-      const prefix = assets
-        .filter((asset) => asset.kind === "image" && value.startsWith(asset.stem))
-        .sort((a, b) => b.stem.length - a.stem.length)[0];
-      return prefix?.stem || value;
-    }),
+  return uniqueEntries(
+    firstLine.split(/[、，,；;]/).map((part) => cleanRequestedName(part)),
   );
 }
 
-function similarity(a, b) {
-  const left = normalized(a);
-  const right = normalized(b);
-  if (!left || !right) return 0;
-  if (left === right) return 1;
-  if (left.includes(right) || right.includes(left)) {
-    return Math.min(left.length, right.length) / Math.max(left.length, right.length);
-  }
-  const leftChars = new Map();
-  for (const char of left) leftChars.set(char, (leftChars.get(char) || 0) + 1);
-  let shared = 0;
-  for (const char of right) {
-    const count = leftChars.get(char) || 0;
-    if (count) {
-      shared += 1;
-      leftChars.set(char, count - 1);
-    }
-  }
-  return (2 * shared) / (left.length + right.length);
+function assetFileName(asset) {
+  return cleanMatchValue(asset.file?.name || asset.name || "");
 }
 
 function bestAsset(requested, kind, assets) {
+  const target = cleanMatchValue(requested);
+  if (!target) return null;
   const candidates = assets.filter((asset) => asset.kind === kind);
-  const exact = candidates.filter((asset) => normalized(asset.stem) === normalized(requested));
-  if (exact.length === 1) return exact[0];
-  if (exact.length > 1) return null;
+  const fullNameMatches = candidates.filter((asset) => assetFileName(asset) === target);
+  if (fullNameMatches.length === 1) return fullNameMatches[0];
+  if (fullNameMatches.length > 1) return null;
 
-  const scored = candidates
-    .map((asset) => ({ asset, score: similarity(requested, asset.stem) }))
-    .filter((item) => item.score >= 0.72)
-    .sort((a, b) => b.score - a.score || b.asset.stem.length - a.asset.stem.length);
-  if (!scored.length) return null;
-  if (scored[1] && Math.abs(scored[0].score - scored[1].score) < 0.03) return null;
-  return scored[0].asset;
+  const stemMatches = candidates.filter((asset) => fileStem(assetFileName(asset)) === target);
+  return stemMatches.length === 1 ? stemMatches[0] : null;
 }
 
 function annotateContent(content, matches) {
   let next = content;
   const ordered = [...matches].sort((a, b) => b.requested.length - a.requested.length);
   for (const match of ordered) {
-    const visible = `@${match.asset.stem}=${match.requested}`;
-    if (next.includes(visible)) continue;
-    const index = next.indexOf(match.requested);
-    if (index < 0 || next.slice(Math.max(0, index - match.asset.stem.length - 2), index).includes("@")) continue;
-    next = `${next.slice(0, index)}${visible}${next.slice(index + match.requested.length)}`;
+    const imageName = fileStem(assetFileName(match.asset));
+    const visible = `@${imageName}=${match.requested}`;
+    if (next.indexOf(visible) >= 0) continue;
+    const index = next.indexOf(match.source);
+    if (index < 0 || next.slice(Math.max(0, index - imageName.length - 2), index).indexOf("@") >= 0) continue;
+    next = `${next.slice(0, index)}${visible}${next.slice(index + match.source.length)}`;
   }
   return next;
 }
@@ -121,11 +100,11 @@ export function planProjectReferences(prompt, assets) {
   for (const rule of SECTION_RULES) {
     const range = sectionRange(prompt, rule.heading);
     if (!range) continue;
-    const names = requestedNames(range.content, rule.role, assets);
-    for (const requested of names) {
-      const asset = bestAsset(requested, rule.kind, assets);
-      if (asset) matches.push({ ...rule, requested, asset });
-      else if (requested) missing.push({ ...rule, requested });
+    const names = requestedNames(range.content, rule.role);
+    for (const entry of names) {
+      const asset = bestAsset(entry.requested, rule.kind, assets);
+      if (asset) matches.push({ ...rule, ...entry, asset });
+      else if (entry.requested) missing.push({ ...rule, ...entry });
     }
   }
 

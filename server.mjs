@@ -24,6 +24,11 @@ import {
   lwaigcLimitIssue,
   lwaigcVideoPayload,
 } from "./src/lwaigcCatalog.js";
+import {
+  MEAICC_VIDEO_MODELS,
+  meaiccLimitIssue,
+  meaiccVideoPayload,
+} from "./src/meaiccCatalog.js";
 
 // 与飞猫最新插件保持一致：本地中转服务不继承梯子/环境代理。
 // 只影响本工作台进程，不会改动 Windows 或浏览器的代理设置。
@@ -134,6 +139,7 @@ const loginUsername = String(process.env.WORKBENCH_USERNAME || "").trim();
 const loginPassword = String(process.env.WORKBENCH_PASSWORD || "");
 const loginConfigured = Boolean(loginUsername && loginPassword);
 const loginAttempts = new Map();
+const completedVideoUrls = new Map();
 
 function httpError(status, message) {
   const error = new Error(message);
@@ -181,6 +187,7 @@ function inferAdapter(url) {
   if (host === "api.viralee.top") return "viralee";
   if (host === "canseedream.com" || host === "see.ximeiedu.org") return "canseedream";
   if (host === "ai.lwaigc.cn") return "lwaigc";
+  if (host === "api.meaicc.com") return "meaicc";
   return "newapi";
 }
 
@@ -189,7 +196,7 @@ function providerConfig(req, requireModel = true) {
   const apiKey = String(req.get("x-api-key") || "").trim();
   const model = String(req.get("x-api-model") || "").trim();
   const requestedAdapter = String(req.get("x-api-adapter") || "").trim();
-  const adapter = ["fmgo", "paipu", "viralee", "canseedream", "lwaigc", "newapi"].includes(requestedAdapter)
+  const adapter = ["fmgo", "paipu", "viralee", "canseedream", "lwaigc", "meaicc", "newapi"].includes(requestedAdapter)
     ? requestedAdapter
     : inferAdapter(resolvedBaseUrl);
   // canseedream.com 目前会 301 跳转至 see.ximeiedu.org。跨域跳转会按
@@ -274,6 +281,8 @@ function fallbackModels(adapter) {
           ? CANSEEDREAM_ROUTES
           : adapter === "lwaigc"
             ? LWAIGC_VIDEO_MODELS
+            : adapter === "meaicc"
+              ? MEAICC_VIDEO_MODELS
         : [];
 }
 
@@ -316,7 +325,7 @@ function taskIdFrom(body) {
 function normalizeStatus(value) {
   const status = String(value || "queued").toLowerCase();
   if (["completed", "succeeded", "success"].includes(status)) return "completed";
-  if (["failed", "error", "cancelled", "canceled"].includes(status)) return "failed";
+  if (["failed", "error", "cancelled", "canceled"].includes(status) || status.startsWith("failed:")) return "failed";
   if (["queued", "pending", "waiting", "submitted"].includes(status)) return "queued";
   return "processing";
 }
@@ -324,6 +333,7 @@ function normalizeStatus(value) {
 function videoUrlFrom(body, base) {
   const candidates = [
     body?.video_url,
+    typeof body?.object === "string" ? body.object : null,
     body?.result_url,
     body?.url,
     body?.file_url,
@@ -333,6 +343,7 @@ function videoUrlFrom(body, base) {
     body?.output?.url,
     body?.result?.url,
     body?.data?.video_url,
+    typeof body?.data?.object === "string" ? body.data.object : null,
     body?.data?.result_url,
     body?.data?.url,
     body?.data?.metadata?.url,
@@ -349,7 +360,8 @@ function videoUrlFrom(body, base) {
 }
 
 function errorFrom(body) {
-  return String(body?.error?.message || body?.message || body?.error || "视频生成失败");
+  const statusError = /^failed:\s*(.+)$/i.exec(String(body?.status || ""))?.[1];
+  return String(body?.error?.message || body?.message || statusError || body?.error || "视频生成失败");
 }
 
 function dateText(value) {
@@ -369,6 +381,12 @@ function safeNumber(value, fallback, min, max) {
 function validateLwaigcLimits(config, meta, duration) {
   if (config.adapter !== "lwaigc") return;
   const issue = lwaigcLimitIssue(config.model, meta, duration);
+  if (issue) throw httpError(400, issue);
+}
+
+function validateMeaiccLimits(config, meta, duration) {
+  if (config.adapter !== "meaicc") return;
+  const issue = meaiccLimitIssue(config.model, meta, duration);
   if (issue) throw httpError(400, issue);
 }
 
@@ -891,6 +909,8 @@ async function createVideo(config, input) {
       ? paipuPayload(config, input)
       : config.adapter === "viralee"
         ? viraleePayload(config, input)
+        : config.adapter === "meaicc"
+          ? meaiccVideoPayload(config.model, input)
         : genericPayload(config, input);
   const response = await upstream(`${config.baseUrl}/v1/videos`, {
     method: "POST",
@@ -919,7 +939,7 @@ async function pollJob(config, job) {
     headers: authHeaders(config),
   });
   const body = await readJson(response);
-  return {
+  const result = {
     body,
     status: normalizeStatus(
       body?.status || body?.state || body?.task_status || body?.data?.status || body?.data?.state,
@@ -932,6 +952,14 @@ async function pollJob(config, job) {
     ),
     videoUrl: videoUrlFrom(body, config.baseUrl),
   };
+  if (result.status === "completed" && result.videoUrl) {
+    const cacheKey = `${config.baseUrl}\n${job.taskId}`;
+    completedVideoUrls.set(cacheKey, result.videoUrl);
+    if (completedVideoUrls.size > 1000) {
+      completedVideoUrls.delete(completedVideoUrls.keys().next().value);
+    }
+  }
+  return result;
 }
 
 function streamResponse(response, res) {
@@ -1099,6 +1127,7 @@ app.post("/api/tasks", upload.array("references", 50), async (req, res, next) =>
     if (!Array.isArray(meta) || meta.length > 50) throw httpError(400, "参考素材数量无效");
     const requestedDuration = safeNumber(req.body.duration, 5, 1, 60);
     validateLwaigcLimits(config, meta, requestedDuration);
+    validateMeaiccLimits(config, meta, requestedDuration);
     const materials = await prepareMaterials(config, files, meta);
     const prompt = withReferenceMapping(
       rawPrompt,
@@ -1163,7 +1192,7 @@ app.get("/api/tasks/:id/content", async (req, res, next) => {
     const job = decodeJob(req.params.id);
     verifyJobConfig(config, job);
     const range = req.get("range");
-    if (config.adapter !== "canseedream") {
+    if (config.adapter !== "canseedream" && config.adapter !== "meaicc") {
       const fixedResponse = await upstream(
         `${config.baseUrl}/v1/videos/${encodeURIComponent(job.taskId)}/content`,
         { headers: authHeaders(config, range ? { Range: range } : {}) },
@@ -1172,7 +1201,10 @@ app.get("/api/tasks/:id/content", async (req, res, next) => {
       if (fixedResponse.ok) return streamResponse(fixedResponse, res);
     }
 
-    const result = await pollJob(config, job);
+    const cachedVideoUrl = completedVideoUrls.get(`${config.baseUrl}\n${job.taskId}`);
+    const result = cachedVideoUrl
+      ? { status: "completed", videoUrl: cachedVideoUrl }
+      : await pollJob(config, job);
     if (result.status !== "completed") throw httpError(409, "视频尚未生成完成");
     if (!result.videoUrl) throw httpError(502, "任务已完成但没有返回视频地址");
     const resultUrl = publicUrl(result.videoUrl, "视频地址");

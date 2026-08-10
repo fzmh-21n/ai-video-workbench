@@ -5,6 +5,7 @@ import {
   FALLBACK_MODELS,
   capabilityFor,
   inferAdapter,
+  pollDelayForAdapter,
   preferredModelForSdVersion,
   sdVersionForModel,
 } from "./providerCatalog.js";
@@ -448,22 +449,30 @@ function Workbench({ onLogout }) {
           pending.map(async (task) => {
             const profile = profilesRef.current.find((item) => item.id === task.profileId);
             if (!profile || !keyFor(profile)) return null;
+            if (Number(task.nextPollAt) > Date.now()) return null;
+            const nextPollAt = Date.now() + pollDelayForAdapter(profile.adapter);
             try {
               const response = await fetch(`/api/tasks/${encodeURIComponent(task.id)}`, {
                 headers: headersFor(profile),
               });
               const body = await response.json().catch(() => ({}));
-              if (response.ok) return { ...body, networkWarning: "" };
+              if (response.ok) return { ...body, networkWarning: "", nextPollAt };
               if (TRANSIENT_NETWORK_STATUSES.has(response.status)) {
                 return {
                   id: task.id,
                   transient: true,
+                  nextPollAt,
                   networkWarning: `网络暂时不稳定（HTTP ${response.status}），任务仍在保留并会自动重试`,
                 };
               }
               return { id: task.id, status: "failed", error: body.message };
             } catch {
-              return null;
+              return {
+                id: task.id,
+                transient: true,
+                nextPollAt,
+                networkWarning: "网络暂时不可用，任务仍在保留并会自动重试",
+              };
             }
           }),
         );
@@ -471,7 +480,9 @@ function Workbench({ onLogout }) {
           .map((task) => {
             const update = updates.find((item) => item?.id === task.id);
             if (!update) return null;
-            if (update.transient) return { ...task, networkWarning: update.networkWarning };
+            if (update.transient) {
+              return { ...task, nextPollAt: update.nextPollAt, networkWarning: update.networkWarning };
+            }
             return { ...task, ...update, networkWarning: "", title: task.title, profileId: task.profileId };
           })
           .filter(Boolean);
@@ -482,7 +493,7 @@ function Workbench({ onLogout }) {
       } finally {
         pollingRef.current = false;
       }
-    }, 10000);
+    }, 5000);
     return () => window.clearInterval(interval);
   }, [taskDatabaseReady]);
 
@@ -884,6 +895,15 @@ function Workbench({ onLogout }) {
       );
       return;
     }
+    if (activeProfile.adapter === "meaicc") {
+      const inputVideoSeconds = references
+        .filter((item) => item.kind === "video")
+        .reduce((total, item) => total + (Number(item.durationSeconds) || 0), 0);
+      if (inputVideoSeconds + Number(duration) > 25) {
+        setNotice(`MEAICC 要求输入视频与输出视频总时长不超过 25 秒；当前为 ${inputVideoSeconds + Number(duration)} 秒`);
+        return;
+      }
+    }
     setSubmitting(true);
     const hasLocalMaterials = references.some((item) => item.file);
     setNotice(
@@ -934,6 +954,7 @@ function Workbench({ onLogout }) {
           prompt: submittedPrompt,
           projectName: projectName || "未归类",
           createdAtMs: createdAtMs + index,
+          nextPollAt: createdAtMs + pollDelayForAdapter(activeProfile.adapter),
         }));
       await putTasks(taskRecords);
       setPage(1);
@@ -1231,7 +1252,10 @@ function Workbench({ onLogout }) {
                   <small>{item.file ? formatBytes(item.file.size) : "网络素材"}</small>
                   {item.durationSeconds && <small>{item.durationSeconds} 秒</small>}
                   {!supported && <span className="unsupported-badge">当前模型不支持</span>}
-                  {item.kind === "image" && activeProfile.adapter === "viralee" && activeProfile.model.startsWith("viraldance") && (
+                  {item.kind === "image" && (
+                    (activeProfile.adapter === "viralee" && activeProfile.model.startsWith("viraldance")) ||
+                    activeProfile.adapter === "meaicc"
+                  ) && (
                     <select value={item.subType} onChange={(event) => setReferences((current) => current.map((ref) => ref.id === item.id ? { ...ref, subType: event.target.value } : ref))}>
                       <option value="reference">参考图</option>
                       <option value="first_frame">首帧</option>
@@ -1262,7 +1286,7 @@ function Workbench({ onLogout }) {
             <div className="notice" role="status">ⓘ {notice}</div>
             <div className="submit-row">
               <button className="primary-button" disabled={submitting} onClick={submitTask}>{submitting ? "提交中…" : "开始生成"}</button>
-              <button className="secondary-button" onClick={() => { setTaskRefreshVersion((value) => value + 1); setNotice("任务列表已刷新；生成中任务每10秒分批查询"); }}>刷新任务</button>
+            <button className="secondary-button" onClick={() => { setTaskRefreshVersion((value) => value + 1); setNotice("任务列表已刷新；生成中任务会按各中转站要求分批查询"); }}>刷新任务</button>
             </div>
           </div>
         </section>
@@ -1357,7 +1381,7 @@ function Workbench({ onLogout }) {
               <div className="config-form">
                 <label><span>配置名称</span><input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="例如：主力 API" /></label>
                 <label><span>Base URL</span><input value={draft.baseUrl} onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value, adapter: inferAdapter(event.target.value) })} placeholder="https://api.example.com" /></label>
-                <label><span>接口类型</span><select value={draft.adapter} onChange={(event) => setDraft({ ...draft, adapter: event.target.value })}><option value="fmgo">FMGO / 飞猫</option><option value="paipu">Paipu / Lec</option><option value="viralee">ViralE</option><option value="canseedream">CanSeeDream / 看见梦想</option><option value="lwaigc">LWAIGC 官方统一接口</option><option value="newapi">New API 通用</option></select></label>
+                <label><span>接口类型</span><select value={draft.adapter} onChange={(event) => setDraft({ ...draft, adapter: event.target.value })}><option value="fmgo">FMGO / 飞猫</option><option value="paipu">Paipu / Lec</option><option value="viralee">ViralE</option><option value="canseedream">CanSeeDream / 看见梦想</option><option value="lwaigc">LWAIGC 官方统一接口</option><option value="meaicc">MEAICC / 林木森AI</option><option value="newapi">New API 通用</option></select></label>
                 <label><span>API Key</span><input type="password" value={draftKey} onChange={(event) => setDraftKey(event.target.value)} placeholder="sk-••••••••" /><small>{rememberKey ? "将保存在此浏览器；公共电脑请勿启用。" : "仅保存在当前浏览器会话，不写入源码。"}</small></label>
                 <label className="remember-key-row"><input type="checkbox" checked={rememberKey} onChange={(event) => setRememberKey(event.target.checked)} /><span>在这台浏览器记住当前中转站的 Key</span></label>
                 <label>

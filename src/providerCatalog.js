@@ -1,4 +1,5 @@
 import { LWAIGC_VIDEO_MODELS, lwaigcCapability } from "./lwaigcCatalog.js";
+import { MEAICC_VIDEO_MODELS, meaiccCapability } from "./meaiccCatalog.js";
 
 export const DEFAULT_PROFILES = [
   {
@@ -40,6 +41,14 @@ export const DEFAULT_PROFILES = [
     adapter: "lwaigc",
     model: "firefly-seedance2-720p",
     mediaUploadUrl: "https://ai.lwaigc.cn/v1/assets",
+  },
+  {
+    id: "meaicc",
+    name: "MEAICC / 林木森AI",
+    baseUrl: "https://api.meaicc.com",
+    adapter: "meaicc",
+    model: "seedance-2.0",
+    mediaUploadUrl: "",
   },
 ];
 
@@ -100,6 +109,7 @@ export const FALLBACK_MODELS = {
   ],
   canseedream: ["kele_pool", "tc_pool", "shutiao_pool", "lajiao_pool", "yingtao_pool"],
   lwaigc: LWAIGC_VIDEO_MODELS,
+  meaicc: MEAICC_VIDEO_MODELS,
 };
 
 export const FALLBACK_MODEL_LABELS = {
@@ -121,10 +131,17 @@ const SD_VERSION_MODELS = {
     sd20: "lec-seedance-videos-standard",
     sd25: "lec-seedance-2-5",
   },
+  meaicc: {
+    sd20: "seedance-2.0",
+  },
 };
 
 export function preferredModelForSdVersion(adapter, version) {
   return SD_VERSION_MODELS[adapter]?.[version] || "";
+}
+
+export function pollDelayForAdapter(adapter) {
+  return adapter === "meaicc" ? 21_000 : 10_000;
 }
 
 export function sdVersionForModel(modelName) {
@@ -364,6 +381,7 @@ export function capabilityFor(profile) {
   }
 
   if (adapter === "lwaigc") return lwaigcCapability(profile?.model);
+  if (adapter === "meaicc") return meaiccCapability();
 
   return base;
 }
@@ -376,6 +394,7 @@ export function inferAdapter(baseUrl) {
     if (host === "api.viralee.top") return "viralee";
     if (host === "canseedream.com" || host === "see.ximeiedu.org") return "canseedream";
     if (host === "ai.lwaigc.cn") return "lwaigc";
+    if (host === "api.meaicc.com") return "meaicc";
   } catch {}
   return "newapi";
 }

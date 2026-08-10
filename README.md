@@ -8,6 +8,8 @@
 - Paipu / Lec API
 - ViralE
 - CanSeeDream / 看见梦想
+- LWAIGC
+- MEAICC / 林木森AI
 - 通用 New API 中转站
 
 ## 主要功能
@@ -21,7 +23,7 @@
 - 编辑时显示易读的 `@文件名=提示词名称`，提交时自动转换为中转站识别的 `@ImageN` / `@AudioN`。
 - 提示词上方提供“固定内容”，每次请求自动添加到最前方，清空素材不会删除。
 - 任务记录保存在免费的浏览器 IndexedDB 数据库中，每页只读取 10 条。
-- 未完成任务每 10 秒最多分批查询 10 条；完成和失败任务停止轮询。
+- 未完成任务按中转站要求分批查询；MEAICC 查询间隔保持在 20 秒以上，完成和失败任务停止轮询。
 - 支持按任务状态、项目、关键词和 7 天前历史筛选。
 - 同一时间只加载一个视频，收起、切换任务或翻页后立即释放视频内存。
 - 支持任务记录 JSON 备份的导出和导入；备份不包含视频文件和 API Key。
@@ -154,6 +156,8 @@ http://localhost:8787/
 - Paipu：`https://api.paipu.net`
 - ViralE：`https://api.viralee.top`
 - CanSeeDream：`https://see.ximeiedu.org`
+- LWAIGC：`https://ai.lwaigc.cn`
+- MEAICC / 林木森AI：`https://api.meaicc.com`
 
 CanSeeDream 的旧地址 `https://canseedream.com` 会自动迁移到当前接口域名，避免跨域跳转导致 Bearer Key 丢失。
 
@@ -167,7 +171,8 @@ CanSeeDream 的旧地址 `https://canseedream.com` 会自动迁移到当前接�
 
 ## 数据与安全
 
-- API Key 只保存在当前浏览器会话中，不写入源码、任务备份或 Git 仓库。
+- API Key 默认只保存在当前浏览器会话中；用户也可以按中转站选择在当前浏览器记住 Key。
+- API Key 不会写入源码、任务备份或 Git 仓库；公共电脑不应启用“记住 Key”。
 - 中转站普通配置、固定内容和任务记录保存在本机浏览器中。
 - `.workbench-data`、运行密钥、临时上传文件、日志和 `node_modules` 不应上传 GitHub。
 - 不要在截图、聊天或公开仓库中泄露 API Key。

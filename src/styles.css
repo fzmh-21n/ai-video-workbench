@@ -231,6 +231,18 @@ input, select {
 }
 .task-card:hover { border-color: #d9b873; box-shadow: 0 7px 18px rgba(101,76,36,.07); }
 .task-card.expanded { border-color: #d3ad66; }
+.batch-task-group { overflow: hidden; margin-bottom: 10px; border: 1px solid #d9b878; border-radius: 12px; background: #fff9ed; box-shadow: 0 3px 12px #96671a12; }
+.batch-task-group-head { display: flex; align-items: center; gap: 10px; padding: 13px; cursor: pointer; }
+.batch-task-group-head > div { min-width: 0; flex: 1; }
+.batch-task-group-head strong, .batch-task-group-head span { display: block; }
+.batch-task-group-head strong { overflow: hidden; color: #805414; text-overflow: ellipsis; white-space: nowrap; }
+.batch-task-group-head span { margin-top: 5px; color: #8c7960; font-size: 12px; }
+.batch-download-button { border-color: #bfcfbd; background: #edf8ef; color: #287347; white-space: nowrap; }
+.batch-download-button:disabled { border-color: #e2d7c6; background: #f4efe6; color: #aaa091; }
+.batch-group-progress { padding: 0 13px 12px; }
+.batch-task-children { display: grid; gap: 8px; padding: 10px; border-top: 1px solid #ead8b8; background: #fffdf8; }
+.batch-child-task { margin: 0; border-color: #eadcc6; background: #fff; }
+.batch-child-task .task-topline code { font-size: 12px; }
 .task-topline { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .task-topline code { color: #956219; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .task-topline > div { display: flex; align-items: center; gap: 7px; }
@@ -286,6 +298,50 @@ input, select {
 .dialog-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
 .danger-button { color: #be4f40 !important; margin-left: auto; }
 
+.work-mode-switch { display: flex; gap: 8px; padding: 10px 14px; border-bottom: 1px solid #eadbc5; background: #fffaf2; }
+.work-mode-switch button { flex: 1; min-height: 38px; border: 1px solid #dfcba8; border-radius: 9px; background: #fff; color: #806744; }
+.work-mode-switch button.active { border-color: #cc8a1f; background: #cc8a1f; color: #fff; box-shadow: 0 4px 12px #bd7a1828; }
+.batch-panel { padding: 14px; }
+.batch-panel .file-button { display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+.batch-clear-button:not(:disabled) { color: #b15242; border-color: #e2b4a9; background: #fff8f5; }
+.batch-toolbar { display: flex; flex-wrap: wrap; align-items: end; gap: 9px; margin: 14px 0; padding: 12px; border: 1px solid #ead8bc; border-radius: 11px; background: #fffaf2; }
+.batch-toolbar > div { flex: 1 1 190px; }
+.batch-toolbar strong, .batch-toolbar span { display: block; }
+.batch-toolbar span { margin-top: 4px; color: #907e65; font-size: 12px; }
+.batch-toolbar label { display: flex; align-items: center; gap: 7px; }
+.batch-toolbar label span { margin: 0; white-space: nowrap; }
+.batch-common-settings { margin: 12px 0; }
+.warning-check { color: #9b6010; }
+.batch-list { display: grid; gap: 10px; margin-top: 12px; }
+.batch-card { overflow: hidden; border: 1px solid #e6d5ba; border-radius: 11px; background: #fffdfa; }
+.batch-card.has-issue { border-color: #e9a38f; }
+.batch-card-head { width: 100%; display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 13px 14px; border: 0; border-radius: 0; background: transparent; text-align: left; }
+.batch-card-head span { color: #86745e; font-size: 12px; white-space: nowrap; }
+.batch-card-head .batch-card-summary { display: inline-flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.batch-card-head .batch-status { display: inline-flex; align-items: center; justify-content: center; min-width: 58px; padding: 4px 8px; border: 1px solid transparent; border-radius: 999px; font-weight: 700; line-height: 1; }
+.batch-card-head .batch-status-pending { border-color: #e6c78d; background: #fff5db; color: #9a6712; }
+.batch-card-head .batch-status-matched { border-color: #a9c9e7; background: #eef7ff; color: #3077a8; }
+.batch-card-head .batch-status-submitting { border-color: #c9b9ea; background: #f4efff; color: #7653ad; }
+.batch-card-head .batch-status-submitted,
+.batch-card-head .batch-status-generating { border-color: #c9b9ea; background: #f4efff; color: #7653ad; }
+.batch-card-head .batch-status-generated { border-color: #9fd6c6; background: #eaf9f3; color: #16765d; }
+.batch-card-head .batch-status-failed,
+.batch-card-head .batch-status-generation_failed { border-color: #e7ada2; background: #fff0ed; color: #b44335; }
+.batch-item-progress { display: flex; align-items: center; gap: 9px; padding: 0 14px 11px; }
+.batch-item-progress .progress-track { flex: 1; }
+.batch-item-progress b { min-width: 31px; color: #806d57; font-size: 11px; text-align: right; }
+.batch-issue, .batch-error { padding: 8px 14px; border-top: 1px solid #f1d7cd; background: #fff0eb; color: #ac4d39; font-size: 13px; }
+.batch-card-body { padding: 12px 14px 14px; border-top: 1px solid #eee0ca; }
+.batch-card-body > textarea { width: 100%; min-height: 220px; resize: vertical; }
+.batch-reference-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
+.batch-reference-list span { padding: 5px 8px; border-radius: 7px; background: #f5efe5; color: #765f42; font-size: 12px; }
+.batch-reference-list span.image { background: #fff0cd; }
+.batch-reference-list span.audio { background: #edf1ff; }
+.batch-reference-list span.video { background: #e9f7f2; }
+.batch-card-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.override-toggle { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; }
+.batch-overrides { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 10px; }
+
 @media (max-width: 1180px) {
   .workspace-shell { padding: 12px; }
   .workspace-grid { grid-template-columns: 1fr; }
@@ -307,6 +363,8 @@ input, select {
   .project-bar button { flex: 1; }
   .profile-list { display: flex; border-right: 0; border-bottom: 1px solid #ebdecb; overflow-x: auto; }
   .profile-list button { min-width: 170px; }
+  .batch-card-head { align-items: flex-start; flex-direction: column; }
+  .batch-overrides { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 520px) {

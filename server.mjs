@@ -29,7 +29,17 @@ import {
   meaiccLimitIssue,
   meaiccVideoPayload,
 } from "./src/meaiccCatalog.js";
-import { mediaUploadMode } from "./src/uploadPolicy.js";
+import { mediaUploadMode, tmpfilesDirectUrl } from "./src/uploadPolicy.js";
+import { ziyuJobFrom, ziyuJobPayload, ziyuModels, ziyuTaskId } from "./src/ziyuCatalog.js";
+import {
+  GLOBAL_AIOPC_BASE_URL,
+  GLOBAL_AIOPC_MODELS,
+  globalAiOpcCreatePath,
+  globalAiOpcPayload,
+  globalAiOpcStatusPath,
+} from "./src/globalAiOpcCatalog.js";
+import { normalizedTaskProgress } from "./src/taskProgress.js";
+import { friendlyUpstreamError } from "./src/upstreamError.js";
 
 // 与飞猫最新插件保持一致：本地中转服务不继承梯子/环境代理。
 // 只影响本工作台进程，不会改动 Windows 或浏览器的代理设置。
@@ -45,7 +55,7 @@ const rootDir = path.dirname(fileURLToPath(import.meta.url));
 const port = Number(process.env.PORT || 8787);
 const dataDir = path.join(rootDir, ".workbench-data");
 const uploadDir = path.join(dataDir, "uploads");
-const automaticUploadServices = ["Litterbox", "Uguu"];
+const automaticUploadServices = ["Litterbox", "Uguu", "Tmpfiles"];
 mkdirSync(dataDir, { recursive: true });
 mkdirSync(uploadDir, { recursive: true });
 
@@ -189,6 +199,8 @@ function inferAdapter(url) {
   if (host === "canseedream.com" || host === "see.ximeiedu.org") return "canseedream";
   if (host === "ai.lwaigc.cn") return "lwaigc";
   if (host === "api.meaicc.com") return "meaicc";
+  if (host === "ziyuai.vip" || host === "www.ziyuai.vip") return "ziyuai";
+  if (host === "zcbservice.aizfw.cn" || host === "docs.globalaiopc.com" || host === "api.globalaiopc.com") return "globalaiopc";
   return "newapi";
 }
 
@@ -197,7 +209,7 @@ function providerConfig(req, requireModel = true) {
   const apiKey = String(req.get("x-api-key") || "").trim();
   const model = String(req.get("x-api-model") || "").trim();
   const requestedAdapter = String(req.get("x-api-adapter") || "").trim();
-  const adapter = ["fmgo", "paipu", "viralee", "canseedream", "lwaigc", "meaicc", "newapi"].includes(requestedAdapter)
+  const adapter = ["fmgo", "paipu", "viralee", "canseedream", "lwaigc", "meaicc", "ziyuai", "globalaiopc", "newapi"].includes(requestedAdapter)
     ? requestedAdapter
     : inferAdapter(resolvedBaseUrl);
   // canseedream.com 目前会 301 跳转至 see.ximeiedu.org。跨域跳转会按
@@ -205,11 +217,14 @@ function providerConfig(req, requireModel = true) {
   // 同时兼容用户浏览器里已经保存的旧地址，直接改用当前官方接口域名。
   if (adapter === "canseedream" && new URL(resolvedBaseUrl).hostname === "canseedream.com")
     resolvedBaseUrl = "https://see.ximeiedu.org";
+  if (adapter === "globalaiopc") resolvedBaseUrl = GLOBAL_AIOPC_BASE_URL;
   const rawUploadUrl = String(req.get("x-media-upload-url") || "").trim();
   const mediaUploadUrl = rawUploadUrl
     ? publicUrl(rawUploadUrl, "素材上传地址").toString()
     : adapter === "lwaigc"
       ? `${resolvedBaseUrl}/v1/assets`
+      : adapter === "ziyuai"
+        ? `${resolvedBaseUrl}/api/v1/uploads`
       : "";
   const mediaUploadKey = String(req.get("x-media-upload-key") || "").trim() || apiKey;
   if (!apiKey) throw httpError(400, "请填写 API Key");
@@ -266,7 +281,7 @@ async function readJson(response) {
     if (response.status === 433) {
       message = `HTTP 433：网络代理或连接链路异常。工作台已启用直连防丢包，请稍后重试。${message ? ` ${message}` : ""}`;
     }
-    throw httpError(response.status, String(message));
+    throw httpError(response.status, friendlyUpstreamError(message));
   }
   return body;
 }
@@ -284,6 +299,8 @@ function fallbackModels(adapter) {
             ? LWAIGC_VIDEO_MODELS
             : adapter === "meaicc"
               ? MEAICC_VIDEO_MODELS
+              : adapter === "globalaiopc"
+                ? GLOBAL_AIOPC_MODELS
         : [];
 }
 
@@ -319,6 +336,8 @@ function taskIdFrom(body) {
       body?.task?.id ||
       body?.data?.id ||
       body?.data?.task_id ||
+      body?.jobId ||
+      body?.data?.jobId ||
       "",
   ).trim();
 }
@@ -331,38 +350,41 @@ function normalizeStatus(value) {
   return "processing";
 }
 
-function videoUrlFrom(body, base) {
+function videoUrlsFrom(body, base) {
   const candidates = [
+    body?.video?.url,
+    body?.data?.video?.url,
     body?.video_url,
-    typeof body?.object === "string" ? body.object : null,
     body?.result_url,
     body?.url,
     body?.file_url,
+    typeof body?.object === "string" && /^https?:\/\//i.test(body.object) ? body.object : null,
     body?.metadata?.url,
     body?.content?.video_url,
-    body?.video?.url,
     body?.output?.url,
     body?.result?.url,
     body?.data?.video_url,
-    typeof body?.data?.object === "string" ? body.data.object : null,
     body?.data?.result_url,
     body?.data?.url,
     body?.data?.metadata?.url,
     body?.data?.[0]?.url,
     body?.data?.[0]?.video_url,
+    body?.previewUrl,
+    body?.data?.previewUrl,
   ];
-  const value = candidates.find((candidate) => typeof candidate === "string" && candidate.trim());
-  if (!value) return null;
-  try {
-    return new URL(value, base).toString();
-  } catch {
-    return null;
-  }
+  return [...new Set(candidates.flatMap((candidate) => {
+    if (typeof candidate !== "string" || !candidate.trim()) return [];
+    try { return [new URL(candidate, base).toString()]; } catch { return []; }
+  }))];
+}
+
+function videoUrlFrom(body, base) {
+  return videoUrlsFrom(body, base)[0] || null;
 }
 
 function errorFrom(body) {
   const statusError = /^failed:\s*(.+)$/i.exec(String(body?.status || ""))?.[1];
-  return String(body?.error?.message || body?.message || statusError || body?.error || "视频生成失败");
+  return String(body?.failureReason || body?.data?.failureReason || body?.error?.message || body?.message || statusError || body?.error || "视频生成失败");
 }
 
 function dateText(value) {
@@ -448,6 +470,22 @@ async function uploadTemporaryMedia(file, material = {}) {
     errors.push(`Uguu: ${error?.message || "连接失败"}`);
   }
 
+  try {
+    const form = new FormData();
+    form.set("file", new Blob([bytes], { type: file.mimetype || "application/octet-stream" }), displayName);
+    const response = await upstream("https://tmpfiles.org/api/v1/upload", { method: "POST", body: form }, 180_000);
+    const text = await response.text();
+    let body = {};
+    try { body = JSON.parse(text); } catch {}
+    const value = body?.data?.url;
+    if (response.ok && /^https:\/\/tmpfiles\.org\//i.test(String(value || ""))) {
+      return publicUrl(tmpfilesDirectUrl(value), "自动素材 URL").toString();
+    }
+    errors.push(`Tmpfiles: HTTP ${response.status}${body?.status ? ` ${body.status}` : ""}`);
+  } catch (error) {
+    errors.push(`Tmpfiles: ${error?.message || "连接失败"}`);
+  }
+
   throw httpError(
     502,
     `自动临时转链失败：${displayName}。已尝试 ${automaticUploadServices.join("、")}。${errors.join("；")}。可以稍后重试，或填写自己的上传地址。`,
@@ -460,6 +498,36 @@ async function uploadMedia(config, file, material = {}) {
   }
   const displayName = String(material.name || file.originalname || "本地素材");
   const bytes = fileBytes(file);
+  if (config.adapter === "ziyuai") {
+    const kind = ["image", "audio", "video"].includes(material.kind) ? material.kind : "image";
+    const data = `data:${file.mimetype || "application/octet-stream"};base64,${bytes.toString("base64")}`;
+    const response = await upstream(config.mediaUploadUrl, {
+      method: "POST",
+      headers: authHeaders(config, { "Content-Type": "application/json" }),
+      body: JSON.stringify({ files: [{ type: kind, name: displayName, data }] }),
+    }, 180_000);
+    const body = await readJson(response);
+    const value = body?.assets?.[0]?.url || body?.data?.assets?.[0]?.url;
+    if (!value) throw httpError(502, `紫域 AI 素材上传成功但没有返回 URL：${displayName}`);
+    return publicUrl(value, "紫域 AI 素材 URL").toString();
+  }
+  if (config.adapter === "globalaiopc") {
+    const response = await upstream(`${config.baseUrl}${globalAiOpcCreatePath(config.model)}`, {
+      method: "POST",
+      headers: authHeaders(config, { "Content-Type": "application/json" }),
+      body: JSON.stringify(globalAiOpcPayload(config.model, input)),
+    }, 180_000);
+    const body = await readJson(response);
+    const taskId = taskIdFrom(body);
+    if (!taskId) throw httpError(502, "全球 AI 创建成功但没有返回任务 ID");
+    return {
+      adapter: "globalaiopc",
+      baseUrl: config.baseUrl,
+      taskId,
+      statusPath: globalAiOpcStatusPath(config.model, taskId),
+      model: config.model,
+    };
+  }
   const form = new FormData();
   form.set("file", new Blob([bytes], { type: file.mimetype || "application/octet-stream" }), displayName);
   const headers = { Authorization: `Bearer ${config.mediaUploadKey}` };
@@ -565,7 +633,7 @@ function paipuPayload(config, input) {
   if (model === "lec-seedance-2-0" || model === "lec-dj-video-v1" || model === "lec-ac-seedance-900-720p") {
     payload.duration = input.duration;
     payload.aspect_ratio = input.aspectRatio;
-    attachImages();
+    attachMixed();
     return payload;
   }
 
@@ -615,8 +683,11 @@ function viraleePayload(config, input) {
   } else if (model.startsWith("viraldance921")) {
     payload.duration = input.duration;
     payload.ratio = input.aspectRatio;
-    if (images.length)
-      payload.content = images.map((item) => ({ type: "image_url", image_url: { url: item.url }, sub_type: "reference" }));
+    payload.content = [
+      ...images.map((item) => ({ type: "image_url", image_url: { url: item.url }, sub_type: "reference" })),
+      ...videos.map((item) => ({ type: "video_url", video_url: { url: item.url }, sub_type: "reference" })),
+      ...audios.map((item) => ({ type: "audio_url", audio_url: { url: item.url }, sub_type: "reference" })),
+    ];
   } else if (model === "viraldance933" || model === "viraldance933-fast") {
     payload.duration = input.duration;
     payload.ratio = input.aspectRatio;
@@ -900,6 +971,23 @@ async function createVideo(config, input) {
       model: config.model,
     };
   }
+  if (config.adapter === "ziyuai") {
+    const response = await upstream(`${config.baseUrl}/api/v1/jobs`, {
+      method: "POST",
+      headers: authHeaders(config, { "Content-Type": "application/json" }),
+      body: JSON.stringify(ziyuJobPayload(config.model, input)),
+    }, 180_000);
+    const body = await readJson(response);
+    const taskId = ziyuTaskId(body);
+    if (!taskId) throw httpError(502, "紫域 AI 创建成功但没有返回任务 ID");
+    return {
+      adapter: "ziyuai",
+      baseUrl: config.baseUrl,
+      taskId,
+      statusPath: `/api/v1/jobs/${encodeURIComponent(taskId)}`,
+      model: config.model,
+    };
+  }
   const payload =
     config.adapter === "paipu"
       ? paipuPayload(config, input)
@@ -934,17 +1022,17 @@ async function pollJob(config, job) {
   const response = await upstream(`${config.baseUrl}${job.statusPath}`, {
     headers: authHeaders(config),
   });
-  const body = await readJson(response);
+  const responseBody = await readJson(response);
+  const body = config.adapter === "ziyuai" ? ziyuJobFrom(responseBody) : responseBody;
+  const status = normalizeStatus(
+    body?.status || body?.state || body?.task_status || body?.data?.status || body?.data?.state,
+  );
   const result = {
     body,
-    status: normalizeStatus(
-      body?.status || body?.state || body?.task_status || body?.data?.status || body?.data?.state,
-    ),
-    progress: safeNumber(
+    status,
+    progress: normalizedTaskProgress(
+      status,
       body?.progress ?? body?.percentage ?? body?.data?.progress ?? body?.data?.percentage ?? 0,
-      0,
-      0,
-      100,
     ),
     videoUrl: videoUrlFrom(body, config.baseUrl),
   };
@@ -966,6 +1054,14 @@ function streamResponse(response, res) {
   }
   if (!response.body) return res.end();
   Readable.fromWeb(response.body).pipe(res);
+}
+
+function sameSiteHost(leftUrl, rightUrl) {
+  const left = leftUrl.hostname.toLowerCase();
+  const right = rightUrl.hostname.toLowerCase();
+  if (left === right) return true;
+  const site = (host) => host.split(".").slice(-2).join(".");
+  return site(left) === site(right);
 }
 
 app.use((req, _res, next) => {
@@ -1080,6 +1176,13 @@ app.get("/api/config/models", async (req, res, next) => {
       }
       return res.json({ models: Object.keys(capabilities), capabilities, labels });
     }
+    if (config.adapter === "ziyuai") {
+      const response = await upstream(`${config.baseUrl}/api/v1/models`, { headers: authHeaders(config) });
+      const body = await readJson(response);
+      const catalog = ziyuModels(body);
+      if (!catalog.models.length) throw httpError(502, "紫域 AI 当前没有返回可用视频模型");
+      return res.json(catalog);
+    }
     const response = await upstream(`${config.baseUrl}/v1/models`, { headers: authHeaders(config) });
     if (!response.ok && [404, 405, 501].includes(response.status)) {
       const fallback = fallbackModels(config.adapter);
@@ -1102,6 +1205,37 @@ app.get("/api/config/models", async (req, res, next) => {
     const fallback = fallbackModels(adapter);
     if (fallback.length && error.status >= 500) return res.json({ models: fallback, warning: error.message });
     next(error);
+  }
+});
+
+app.post("/api/materials", upload.array("references", 50), async (req, res, next) => {
+  const files = Array.isArray(req.files) ? req.files : [];
+  try {
+    for (const file of files) fileBytes(file);
+    const config = providerConfig(req, false);
+    let meta;
+    try {
+      meta = JSON.parse(req.body.referenceMeta || "[]");
+    } catch {
+      throw httpError(400, "预上传素材信息无效");
+    }
+    if (!Array.isArray(meta) || meta.length !== files.length || meta.length > 50)
+      throw httpError(400, "预上传素材数量无效");
+    const materials = await prepareMaterials(config, files, meta);
+    res.json({
+      materials: materials.map((item) => ({
+        key: item.projectAssetKey || item.key || item.tag,
+        kind: item.kind,
+        name: item.name,
+        url: item.url,
+        durationSeconds: item.durationSeconds || null,
+      })),
+      expiresAt: Date.now() + 50 * 60 * 1000,
+    });
+  } catch (error) {
+    next(error);
+  } finally {
+    cleanupFiles(files);
   }
 });
 
@@ -1188,7 +1322,7 @@ app.get("/api/tasks/:id/content", async (req, res, next) => {
     const job = decodeJob(req.params.id);
     verifyJobConfig(config, job);
     const range = req.get("range");
-    if (config.adapter !== "canseedream" && config.adapter !== "meaicc") {
+    if (config.adapter !== "canseedream" && config.adapter !== "meaicc" && config.adapter !== "ziyuai" && config.adapter !== "globalaiopc") {
       const fixedResponse = await upstream(
         `${config.baseUrl}/v1/videos/${encodeURIComponent(job.taskId)}/content`,
         { headers: authHeaders(config, range ? { Range: range } : {}) },
@@ -1202,14 +1336,60 @@ app.get("/api/tasks/:id/content", async (req, res, next) => {
       ? { status: "completed", videoUrl: cachedVideoUrl }
       : await pollJob(config, job);
     if (result.status !== "completed") throw httpError(409, "视频尚未生成完成");
-    if (!result.videoUrl) throw httpError(502, "任务已完成但没有返回视频地址");
-    const resultUrl = publicUrl(result.videoUrl, "视频地址");
-    const sameProvider = resultUrl.origin === config.baseUrl;
-    const headers = { Accept: "video/*,*/*", ...(range ? { Range: range } : {}) };
-    if (sameProvider) headers.Authorization = `Bearer ${config.apiKey}`;
-    const response = await upstream(resultUrl, { headers }, 1_800_000);
-    if (!response.ok) throw httpError(response.status, "读取生成视频失败");
-    return streamResponse(response, res);
+    const candidateUrls = cachedVideoUrl
+      ? [cachedVideoUrl]
+      : videoUrlsFrom(result.body, config.baseUrl);
+    if (result.videoUrl && !candidateUrls.includes(result.videoUrl)) candidateUrls.unshift(result.videoUrl);
+    if (!candidateUrls.length) throw httpError(502, "任务已完成但没有返回视频地址");
+    const providerUrl = new URL(config.baseUrl);
+    let lastStatus = 502;
+    let attemptedUrls = 0;
+    const tryCandidateUrls = async (urls) => {
+      for (const candidateUrl of urls) {
+        attemptedUrls += 1;
+        const resultUrl = publicUrl(candidateUrl, "视频地址");
+        const sameProvider = resultUrl.origin === providerUrl.origin || sameSiteHost(resultUrl, providerUrl);
+        const headers = {
+          Accept: "video/*,*/*",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140.0 Safari/537.36",
+          Referer: `${providerUrl.origin}/`,
+          ...(range ? { Range: range } : {}),
+        };
+        let response = await upstream(resultUrl, { headers }, 1_800_000);
+        if (!response.ok && sameProvider) {
+          await response.body?.cancel().catch(() => {});
+          response = await upstream(resultUrl, {
+            headers: { ...headers, Authorization: `Bearer ${config.apiKey}` },
+          }, 1_800_000);
+        }
+        if (response.ok) {
+          streamResponse(response, res);
+          return true;
+        }
+        lastStatus = response.status;
+        await response.body?.cancel().catch(() => {});
+      }
+      return false;
+    };
+    if (await tryCandidateUrls(candidateUrls)) return;
+
+    // MEAICC 的 object 字段通常是带有效期签名的 OSS 地址。缓存地址失效时，
+    // 重新查询任务可以取得一条新的签名地址，再继续本次下载。
+    if (config.adapter === "meaicc" && cachedVideoUrl) {
+      completedVideoUrls.delete(`${config.baseUrl}\n${job.taskId}`);
+      const refreshed = await pollJob(config, job);
+      if (refreshed.status === "completed") {
+        const refreshedUrls = videoUrlsFrom(refreshed.body, config.baseUrl)
+          .filter((url) => !candidateUrls.includes(url));
+        if (refreshed.videoUrl && !refreshedUrls.includes(refreshed.videoUrl) && !candidateUrls.includes(refreshed.videoUrl))
+          refreshedUrls.unshift(refreshed.videoUrl);
+        if (await tryCandidateUrls(refreshedUrls)) return;
+      }
+    }
+    if (config.adapter === "viralee" && lastStatus === 404) {
+      throw httpError(410, "ViralE 返回的视频结果地址已经失效（上游 HTTP 404），请让中转站刷新下载地址或到中转站任务记录中下载");
+    }
+    throw httpError(lastStatus, `读取生成视频失败：已尝试 ${attemptedUrls} 个结果地址（最后 HTTP ${lastStatus}）`);
   } catch (error) {
     next(error);
   }

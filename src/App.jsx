@@ -29,6 +29,8 @@ import {
   readCredentials,
   saveCredentials,
 } from "./credentialStore.js";
+import { normalizedTaskProgress } from "./taskProgress.js";
+import BatchPanel from "./BatchPanel.jsx";
 
 const PROFILE_KEY = "video-workbench-profiles-v2";
 const ACTIVE_KEY = "video-workbench-active-profile-v2";
@@ -214,6 +216,7 @@ export default function App() {
 }
 
 function Workbench({ onLogout }) {
+  const [workMode, setWorkMode] = useState(() => localStorage.getItem("video-workbench-mode-v1") || "single");
   const [profiles, setProfiles] = useState(() => {
     const saved = loadJson(PROFILE_KEY, null);
     if (!Array.isArray(saved) || !saved.length) return DEFAULT_PROFILES;
@@ -227,7 +230,6 @@ function Workbench({ onLogout }) {
     () => localStorage.getItem(ACTIVE_KEY) || profiles[0].id,
   );
   const [tasks, setTasks] = useState([]);
-  const [taskCount, setTaskCount] = useState(0);
   const [taskDatabaseReady, setTaskDatabaseReady] = useState(false);
   const [taskRefreshVersion, setTaskRefreshVersion] = useState(0);
   const [taskStatusFilter, setTaskStatusFilter] = useState("all");
@@ -246,7 +248,7 @@ function Workbench({ onLogout }) {
   const [ratio, setRatio] = useState("16:9");
   const [seed, setSeed] = useState("");
   const [quantity, setQuantity] = useState(1);
-  const [syncAudio, setSyncAudio] = useState(false);
+  const [syncAudio, setSyncAudio] = useState(true);
   const [autoReference, setAutoReference] = useState(true);
   const [notice, setNotice] = useState("请选择中转站并完成 API 配置");
   const [submitting, setSubmitting] = useState(false);
@@ -263,6 +265,8 @@ function Workbench({ onLogout }) {
   const [urlKind, setUrlKind] = useState("image");
   const [page, setPage] = useState(1);
   const [expandedTaskId, setExpandedTaskId] = useState(null);
+  const [expandedBatchId, setExpandedBatchId] = useState(null);
+  const [downloadingBatchId, setDownloadingBatchId] = useState(null);
   const [videoBlob, setVideoBlob] = useState(null);
   const [mention, setMention] = useState(null);
   const [mentionIndex, setMentionIndex] = useState(0);
@@ -292,8 +296,31 @@ function Workbench({ onLogout }) {
     (counts, item) => ({ ...counts, [item.kind]: counts[item.kind] + 1 }),
     { image: 0, audio: 0, video: 0 },
   );
+  const taskEntries = useMemo(() => {
+    const entries = [];
+    const batches = new Map();
+    for (const task of tasks) {
+      if (!task.batchId) {
+        entries.push({ type: "task", id: task.id, createdAtMs: task.createdAtMs || 0, task });
+        continue;
+      }
+      if (!batches.has(task.batchId)) {
+        const entry = { type: "batch", id: task.batchId, createdAtMs: task.createdAtMs || 0, tasks: [], title: task.batchTitle || "批量生成任务" };
+        batches.set(task.batchId, entry);
+        entries.push(entry);
+      }
+      const batch = batches.get(task.batchId);
+      batch.tasks.push(task);
+      batch.createdAtMs = Math.max(batch.createdAtMs, task.createdAtMs || 0);
+    }
+    for (const batch of batches.values()) {
+      batch.tasks.sort((a, b) => (a.batchOrder ?? a.batchSection ?? 0) - (b.batchOrder ?? b.batchSection ?? 0));
+    }
+    return entries.sort((a, b) => b.createdAtMs - a.createdAtMs);
+  }, [tasks]);
+  const taskCount = taskEntries.length;
   const pageCount = Math.max(1, Math.ceil(taskCount / PAGE_SIZE));
-  const visibleTasks = tasks;
+  const visibleEntries = taskEntries.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
   const mentionSuggestions = useMemo(() => {
     if (!mention) return [];
     const query = mention.query.toLowerCase();
@@ -311,6 +338,7 @@ function Workbench({ onLogout }) {
   }, [profiles]);
   useEffect(() => localStorage.setItem(ACTIVE_KEY, activeId), [activeId]);
   useEffect(() => localStorage.setItem(FIXED_CONTENT_KEY, fixedContent), [fixedContent]);
+  useEffect(() => localStorage.setItem("video-workbench-mode-v1", workMode), [workMode]);
   useEffect(() => () => {
     if (videoBlob?.url) URL.revokeObjectURL(videoBlob.url);
   }, [videoBlob]);
@@ -336,8 +364,8 @@ function Workbench({ onLogout }) {
     (async () => {
       try {
         const result = await listTasks({
-          page,
-          pageSize: PAGE_SIZE,
+          page: 1,
+          pageSize: 100000,
           status: taskStatusFilter,
           query: taskQuery,
           projectName: taskProjectFilter,
@@ -345,7 +373,6 @@ function Workbench({ onLogout }) {
         const names = await getTaskProjectNames();
         if (!cancelled) {
           setTasks(result.items);
-          setTaskCount(result.total);
           setTaskProjectOptions(names);
         }
       } catch (error) {
@@ -353,13 +380,15 @@ function Workbench({ onLogout }) {
       }
     })();
     return () => { cancelled = true; };
-  }, [taskDatabaseReady, taskRefreshVersion, page, taskStatusFilter, taskProjectFilter, taskQuery]);
+  }, [taskDatabaseReady, taskRefreshVersion, taskStatusFilter, taskProjectFilter, taskQuery]);
   useEffect(() => {
     setPage(1);
     setExpandedTaskId(null);
+    setExpandedBatchId(null);
   }, [taskStatusFilter, taskProjectFilter, taskQuery]);
   useEffect(() => {
     setExpandedTaskId(null);
+    setExpandedBatchId(null);
     setVideoBlob(null);
   }, [page]);
   useEffect(() => {
@@ -973,6 +1002,48 @@ function Workbench({ onLogout }) {
     }
   }
 
+  async function downloadBatch(batch) {
+    const completed = batch.tasks.filter((task) => task.status === "completed" && task.videoUrl);
+    if (!completed.length) return setNotice("该批次目前还没有可下载的成功视频");
+    const skipped = batch.tasks.length - completed.length;
+    setDownloadingBatchId(batch.id);
+    let downloaded = 0;
+    let unavailable = 0;
+    try {
+      for (let index = 0; index < completed.length; index += 1) {
+        const task = completed[index];
+        try {
+          const profile = profiles.find((item) => item.id === task.profileId);
+          if (!profile || !keyFor(profile)) throw new Error("所属中转站缺少 API Key");
+          setNotice(`正在逐条尝试下载：${index + 1}/${completed.length} · 已成功 ${downloaded} · 不可用 ${unavailable}`);
+          const response = await fetch(task.videoUrl, { headers: headersFor(profile) });
+          if (!response.ok) {
+            const body = await response.json().catch(() => ({}));
+            throw new Error(body.message || `HTTP ${response.status}`);
+          }
+          const url = URL.createObjectURL(await response.blob());
+          const order = String(index + 1).padStart(2, "0");
+          const safeTitle = String(task.title || `视频-${order}`).replace(/[\\/:*?"<>|]/g, "_");
+          const link = document.createElement("a");
+          link.href = url;
+          link.download = `${order}-${safeTitle}.mp4`;
+          document.body.appendChild(link);
+          link.click();
+          link.remove();
+          window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+          downloaded += 1;
+        } catch {
+          unavailable += 1;
+        }
+      }
+      setNotice(`批次下载尝试完成：实际开始下载 ${downloaded} 个，结果地址不可用 ${unavailable} 个${skipped ? `，另跳过生成失败或未完成任务 ${skipped} 条` : ""}`);
+    } catch (error) {
+      setNotice(error.message || "批次下载失败");
+    } finally {
+      setDownloadingBatchId(null);
+    }
+  }
+
   function toggleTask(task) {
     const next = expandedTaskId === task.id ? null : task.id;
     if (!next || videoBlob?.taskId !== next) setVideoBlob(null);
@@ -1077,6 +1148,45 @@ function Workbench({ onLogout }) {
             <h2>生成参数</h2>
             <span className="idle-pill">● IDLE</span>
           </div>
+          <div className="work-mode-switch" role="tablist" aria-label="工作模式">
+            <button className={workMode === "single" ? "active" : ""} onClick={() => setWorkMode("single")}>单条生成</button>
+            <button className={workMode === "batch" ? "active" : ""} onClick={() => setWorkMode("batch")}>批量生成</button>
+          </div>
+          {workMode === "batch" ? (
+            <BatchPanel
+              activeProfile={activeProfile}
+              apiKey={keyFor(activeProfile)}
+              autoReference={autoReference}
+              capability={capability}
+              duration={duration}
+              fixedContent={fixedContent}
+              headers={headersFor(activeProfile)}
+              notice={notice}
+              onNotice={setNotice}
+              onProjectFolder={selectProjectFolder}
+              onTasksAdded={() => {
+                setTaskPage(1);
+                setTaskStatusFilter("all");
+                setTaskProjectFilter("all");
+                setTaskRefreshVersion((value) => value + 1);
+              }}
+              projectAssets={projectAssets}
+              projectName={projectName}
+              quantity={quantity}
+              ratio={ratio}
+              readMediaDuration={readMediaDuration}
+              resolution={resolution}
+              seed={seed}
+              setDuration={setDuration}
+              setFixedContent={setFixedContent}
+              setQuantity={setQuantity}
+              setRatio={setRatio}
+              setResolution={setResolution}
+              setSeed={setSeed}
+              setSyncAudio={setSyncAudio}
+              syncAudio={syncAudio}
+            />
+          ) : (
           <div className="panel-body">
             <div className="project-bar">
               <div>
@@ -1264,8 +1374,8 @@ function Workbench({ onLogout }) {
               <label><span>生成数量</span><select value={quantity} onChange={(event) => setQuantity(Number(event.target.value))}>{[1, 2, 3, 4].map((value) => <option key={value}>{value}</option>)}</select></label>
             </div>
             <label className="check-row">
-              <input type="checkbox" checked={syncAudio} disabled={capability.syncAudioFixed || !capability.syncAudio} onChange={(event) => setSyncAudio(event.target.checked)} />
-              生成同步音频{capability.syncAudioFixed ? "（当前模型固定开启）" : !capability.syncAudio ? "（当前模型不支持）" : ""}
+                        <input type="checkbox" checked={syncAudio} disabled={capability.syncAudioFixed} onChange={(event) => setSyncAudio(event.target.checked)} />
+                        生成同步音频{capability.syncAudioFixed ? "（当前模型固定开启）" : ""}
             </label>
             <div className="notice" role="status">ⓘ {notice}</div>
             <div className="submit-row">
@@ -1273,6 +1383,7 @@ function Workbench({ onLogout }) {
             <button className="secondary-button" onClick={() => { setTaskRefreshVersion((value) => value + 1); setNotice("任务列表已刷新；生成中任务会按各中转站要求分批查询"); }}>刷新任务</button>
             </div>
           </div>
+          )}
         </section>
 
         <aside className="panel task-panel">
@@ -1310,11 +1421,62 @@ function Workbench({ onLogout }) {
             </div>
           </div>
           <div className="task-list">
-            {!visibleTasks.length && (
+            {!visibleEntries.length && (
               <div className="empty-tasks"><span>▶</span><h3>{taskDatabaseReady ? "没有符合条件的任务" : "正在读取任务记录"}</h3><p>任务记录保存在本机浏览器数据库中，不保存视频文件。</p></div>
             )}
-            {visibleTasks.map((task) => {
+            {visibleEntries.map((entry) => {
+              if (entry.type === "batch") {
+                const batchExpanded = expandedBatchId === entry.id;
+                const completedCount = entry.tasks.filter((task) => task.status === "completed").length;
+                const failedCount = entry.tasks.filter((task) => task.status === "failed").length;
+                const progress = entry.tasks.length
+                  ? Math.round(entry.tasks.reduce((total, task) => total + normalizedTaskProgress(task.status, task.progress), 0) / entry.tasks.length)
+                  : 0;
+                return (
+                  <article className={`batch-task-group ${batchExpanded ? "expanded" : ""}`} key={entry.id}>
+                    <div className="batch-task-group-head" onClick={() => setExpandedBatchId(batchExpanded ? null : entry.id)}>
+                      <div>
+                        <strong>▸ 批量任务｜{entry.title}</strong>
+                        <span>共 {entry.tasks.length} 条 · 已生成 {completedCount} · 生成中 {entry.tasks.length - completedCount - failedCount} · 失败 {failedCount}</span>
+                      </div>
+                      <button
+                        className="batch-download-button"
+                        disabled={!completedCount || downloadingBatchId === entry.id}
+                        onClick={(event) => { event.stopPropagation(); downloadBatch(entry); }}
+                      >{downloadingBatchId === entry.id ? "下载中…" : `一键下载（${completedCount}）`}</button>
+                    </div>
+                    <div className="progress-row batch-group-progress"><div className="progress-track"><span style={{ width: `${progress}%` }} /></div><b>{progress}%</b></div>
+                    {batchExpanded && (
+                      <div className="batch-task-children">
+                        {entry.tasks.map((task) => {
+                          const childExpanded = expandedTaskId === task.id;
+                          const shownProgress = normalizedTaskProgress(task.status, task.progress);
+                          return (
+                            <article className={`task-card batch-child-task ${childExpanded ? "expanded" : ""}`} key={task.id} onClick={() => toggleTask(task)}>
+                              <div className="task-topline"><code>#{task.title || task.id}</code><span className={`task-status ${task.status}`}>● {statusLabel(task.status)}</span></div>
+                              <div className="progress-row"><div className="progress-track"><span style={{ width: `${shownProgress}%` }} /></div><b>{shownProgress}%</b></div>
+                              {task.error && <p className="task-error">错误：{task.error}</p>}
+                              {childExpanded && (
+                                <div className="task-details" onClick={(event) => event.stopPropagation()}>
+                                  {task.status === "completed" ? (
+                                    videoBlob?.taskId === task.id
+                                      ? <><video src={videoBlob.url} controls /><a className="download-button" href={videoBlob.url} download={`${task.title || "video"}.mp4`}>下载视频</a></>
+                                      : <button className="secondary-button" onClick={() => loadVideo(task)}>加载视频</button>
+                                  ) : <p>{task.status === "failed" ? "该任务生成失败" : "视频生成完成后可在这里播放"}</p>}
+                                  <details><summary>查看提示词</summary><pre>{task.prompt}</pre></details>
+                                </div>
+                              )}
+                            </article>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </article>
+                );
+              }
+              const task = entry.task;
               const expanded = expandedTaskId === task.id;
+              const shownProgress = normalizedTaskProgress(task.status, task.progress);
               return (
                 <article className={`task-card ${expanded ? "expanded" : ""}`} key={task.id} onClick={() => toggleTask(task)}>
                   <div className="task-topline">
@@ -1325,7 +1487,7 @@ function Workbench({ onLogout }) {
                       {task.status === "failed" && <button className="delete-button" onClick={(event) => { event.stopPropagation(); deleteTask(task); }}>删除</button>}
                     </div>
                   </div>
-                  <div className="progress-row"><div className="progress-track"><span style={{ width: `${task.progress || 0}%` }} /></div><b>{task.progress || 0}%</b></div>
+                  <div className="progress-row"><div className="progress-track"><span style={{ width: `${shownProgress}%` }} /></div><b>{shownProgress}%</b></div>
                   {task.cost != null && <p>本次消耗：{task.cost}</p>}
                   <p>项目：{task.projectName || "未归类"}</p>
                   <p>中转站：{task.providerName} · 模型：{task.model}</p>
@@ -1365,7 +1527,7 @@ function Workbench({ onLogout }) {
               <div className="config-form">
                 <label><span>配置名称</span><input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="例如：主力 API" /></label>
                 <label><span>Base URL</span><input value={draft.baseUrl} onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value, adapter: inferAdapter(event.target.value) })} placeholder="https://api.example.com" /></label>
-                <label><span>接口类型</span><select value={draft.adapter} onChange={(event) => setDraft({ ...draft, adapter: event.target.value })}><option value="fmgo">FMGO / 飞猫</option><option value="paipu">Paipu / Lec</option><option value="viralee">ViralE</option><option value="canseedream">CanSeeDream / 看见梦想</option><option value="lwaigc">LWAIGC 官方统一接口</option><option value="meaicc">MEAICC / 林木森AI</option><option value="newapi">New API 通用</option></select></label>
+                <label><span>接口类型</span><select value={draft.adapter} onChange={(event) => setDraft({ ...draft, adapter: event.target.value })}><option value="fmgo">FMGO / 飞猫</option><option value="paipu">Paipu / Lec</option><option value="viralee">ViralE</option><option value="canseedream">CanSeeDream / 看见梦想</option><option value="lwaigc">LWAIGC 官方统一接口</option><option value="meaicc">MEAICC / 林木森AI</option><option value="ziyuai">Ziyu AI / 紫域AI</option><option value="globalaiopc">GlobalAiOpc / 全球AI</option><option value="newapi">New API 通用</option></select></label>
                 <label><span>API Key</span><input type="password" value={draftKey} onChange={(event) => setDraftKey(event.target.value)} placeholder="sk-••••••••" /><small>{rememberKey ? "将保存在此浏览器；公共电脑请勿启用。" : "仅保存在当前浏览器会话，不写入源码。"}</small></label>
                 <label className="remember-key-row"><input type="checkbox" checked={rememberKey} onChange={(event) => setRememberKey(event.target.checked)} /><span>在这台浏览器记住当前中转站的 Key</span></label>
                 <label>

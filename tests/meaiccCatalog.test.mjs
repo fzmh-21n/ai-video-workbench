@@ -147,13 +147,19 @@ test("rejects unsupported MEAICC duration and an empty model", () => {
 
 test("accepts the exact MEAICC route model selected from the live model list", () => {
   assert.equal(meaiccLimitIssue("sd-2-c5", [], 15), "");
-  assert.equal(meaiccVideoPayload("sd-2-c5", {
+  const payload = meaiccVideoPayload("sd-2-c5", {
     prompt: "线路模型测试",
     duration: 15,
     resolution: "720p",
     aspectRatio: "9:16",
     materials: [],
-  }).model, "sd-2-c5");
+  });
+  assert.equal(payload.model, "sd-2-c5");
+  assert.equal(payload.parameters.duration, 15);
+  assert.deepEqual(Object.keys(payload).sort(), ["input", "model", "parameters"]);
+  assert.equal("duration" in payload, false);
+  assert.equal("seconds" in payload, false);
+  assert.equal("aspect_ratio" in payload, false);
 });
 
 test("repairs an older MEAICC profile with an invalid saved model", () => {

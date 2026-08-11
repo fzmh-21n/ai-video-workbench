@@ -1,5 +1,11 @@
 import { LWAIGC_VIDEO_MODELS, lwaigcCapability } from "./lwaigcCatalog.js";
 import { MEAICC_VIDEO_MODELS, meaiccCapability } from "./meaiccCatalog.js";
+import { ZIYU_BASE_URL, ziyuCapability } from "./ziyuCatalog.js";
+import {
+  GLOBAL_AIOPC_BASE_URL,
+  GLOBAL_AIOPC_MODELS,
+  globalAiOpcCapability,
+} from "./globalAiOpcCatalog.js";
 
 export const DEFAULT_PROFILES = [
   {
@@ -48,6 +54,22 @@ export const DEFAULT_PROFILES = [
     baseUrl: "https://api.meaicc.com",
     adapter: "meaicc",
     model: "seedance-2.0",
+    mediaUploadUrl: "",
+  },
+  {
+    id: "ziyuai",
+    name: "Ziyu AI / 紫域AI",
+    baseUrl: ZIYU_BASE_URL,
+    adapter: "ziyuai",
+    model: "",
+    mediaUploadUrl: `${ZIYU_BASE_URL}/api/v1/uploads`,
+  },
+  {
+    id: "globalaiopc",
+    name: "GlobalAiOpc / 全球AI",
+    baseUrl: GLOBAL_AIOPC_BASE_URL,
+    adapter: "globalaiopc",
+    model: "sd_2.0_fast_discount_720p",
     mediaUploadUrl: "",
   },
 ];
@@ -110,6 +132,7 @@ export const FALLBACK_MODELS = {
   canseedream: ["kele_pool", "tc_pool", "shutiao_pool", "lajiao_pool", "yingtao_pool"],
   lwaigc: LWAIGC_VIDEO_MODELS,
   meaicc: MEAICC_VIDEO_MODELS,
+  globalaiopc: GLOBAL_AIOPC_MODELS,
 };
 
 export const FALLBACK_MODEL_LABELS = {
@@ -119,6 +142,9 @@ export const FALLBACK_MODEL_LABELS = {
     shutiao_pool: "香蕉线路 · 720P · 15秒 · 768积分",
     lajiao_pool: "辣椒 SD2.5 满血 · 720P · 4–30秒 · 1190积分",
     yingtao_pool: "樱桃 SD2.5 满血 · 720P · 30秒 · 2990积分",
+  },
+  globalaiopc: {
+    sd20: "sd_2.0_fast_discount_720p",
   },
 };
 
@@ -145,7 +171,7 @@ export function preferredModelForSdVersion(adapter, version) {
 }
 
 export function pollDelayForAdapter(adapter) {
-  return adapter === "meaicc" ? 21_000 : 10_000;
+  return adapter === "meaicc" || adapter === "globalaiopc" ? 21_000 : 10_000;
 }
 
 export function sdVersionForModel(modelName) {
@@ -153,7 +179,7 @@ export function sdVersionForModel(modelName) {
   return /(?:seedance|sd)[-.]?2[.-]?5|sd25/.test(model) ? "sd25" : "sd20";
 }
 
-export function capabilityFor(profile) {
+function rawCapabilityFor(profile) {
   const model = String(profile?.model || "").toLowerCase();
   const adapter = profile?.adapter;
   const base = {
@@ -386,13 +412,34 @@ export function capabilityFor(profile) {
 
   if (adapter === "lwaigc") return lwaigcCapability(profile?.model);
   if (adapter === "meaicc") return meaiccCapability();
+  if (adapter === "ziyuai") {
+    const live = profile?.routeCapabilities?.[profile?.model];
+    return live ? { ...ziyuCapability(), ...live } : ziyuCapability();
+  }
+  if (adapter === "globalaiopc") return globalAiOpcCapability(profile?.model);
 
   return base;
 }
 
+export function capabilityFor(profile) {
+  const capability = rawCapabilityFor(profile);
+  const version = profile?.adapter === "canseedream"
+    ? (
+        capability.images > 9 || capability.videos > 3 || capability.audios > 3 ||
+        capability.durations.some((value) => typeof value === "number" && value > 15)
+          ? "sd25"
+          : "sd20"
+      )
+    : capability._sdVersion || sdVersionForModel(profile?.model);
+  if (version !== "sd25") {
+    return { ...capability, images: 9, audios: 3, videos: 3 };
+  }
+  return capability;
+}
+
 export function sdVersionForProfile(profile) {
   if (profile?.adapter === "canseedream") {
-    const capability = capabilityFor(profile);
+    const capability = rawCapabilityFor(profile);
     const numericDurations = capability.durations.filter((value) => typeof value === "number");
     const exceedsSd20Limits =
       capability.images > 9 ||
@@ -400,6 +447,9 @@ export function sdVersionForProfile(profile) {
       capability.audios > 3 ||
       (numericDurations.length > 0 && Math.max(...numericDurations) > 15);
     return exceedsSd20Limits ? "sd25" : "sd20";
+  }
+  if (profile?.adapter === "ziyuai") {
+    return rawCapabilityFor(profile)._sdVersion || "sd20";
   }
   return sdVersionForModel(profile?.model);
 }
@@ -429,6 +479,8 @@ export function inferAdapter(baseUrl) {
     if (host === "canseedream.com" || host === "see.ximeiedu.org") return "canseedream";
     if (host === "ai.lwaigc.cn") return "lwaigc";
     if (host === "api.meaicc.com") return "meaicc";
+    if (host === "ziyuai.vip" || host === "www.ziyuai.vip") return "ziyuai";
+    if (host === "zcbservice.aizfw.cn" || host === "docs.globalaiopc.com" || host === "api.globalaiopc.com") return "globalaiopc";
   } catch {}
   return "newapi";
 }
@@ -458,6 +510,27 @@ export function migrateSavedProfile(profile) {
       baseUrl: officialMeaicc ? "https://api.meaicc.com" : profile.baseUrl,
       adapter: "meaicc",
       model: String(profile.model || "").trim() || "seedance-2.0",
+    };
+  }
+  const officialZiyu = profile.id === "ziyuai" || inferredAdapter === "ziyuai";
+  if (officialZiyu || profile.adapter === "ziyuai") {
+    return {
+      ...profile,
+      baseUrl: officialZiyu ? ZIYU_BASE_URL : profile.baseUrl,
+      adapter: "ziyuai",
+      mediaUploadUrl: `${ZIYU_BASE_URL}/api/v1/uploads`,
+    };
+  }
+  const officialGlobalAiOpc = profile.id === "globalaiopc" || inferredAdapter === "globalaiopc";
+  if (officialGlobalAiOpc || profile.adapter === "globalaiopc") {
+    return {
+      ...profile,
+      baseUrl: officialGlobalAiOpc ? GLOBAL_AIOPC_BASE_URL : profile.baseUrl,
+      adapter: "globalaiopc",
+      model: GLOBAL_AIOPC_MODELS.includes(profile.model)
+        ? profile.model
+        : "sd_2.0_fast_discount_720p",
+      mediaUploadUrl: "",
     };
   }
 

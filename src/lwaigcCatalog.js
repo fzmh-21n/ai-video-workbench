@@ -109,7 +109,10 @@ export function lwaigcVideoPayload(model, input, clientTaskId) {
 
 export function lwaigcLimitIssue(model, materials, duration) {
   if (!LWAIGC_VIDEO_MODELS.includes(model)) return "请选择 LWAIGC 视频模型";
-  const capability = lwaigcCapability(model);
+  const detected = lwaigcCapability(model);
+  const capability = /(?:seedance|sd)[-.]?2[.-]?5|sd25/i.test(model)
+    ? detected
+    : { ...detected, images: 9, audios: 3, videos: 3 };
   const counts = (materials || []).reduce(
     (result, item) => {
       const kind = ["image", "audio", "video"].includes(item?.kind) ? item.kind : "image";

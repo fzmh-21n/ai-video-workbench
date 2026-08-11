@@ -30,6 +30,12 @@ import {
   saveCredentials,
 } from "./credentialStore.js";
 import { normalizedTaskProgress } from "./taskProgress.js";
+import {
+  filesFromProjectDirectory,
+  loadProjectDirectory,
+  projectDirectoryPermission,
+  saveProjectDirectory,
+} from "./projectFolderStore.js";
 import BatchPanel from "./BatchPanel.jsx";
 
 const PROFILE_KEY = "video-workbench-profiles-v2";
@@ -70,7 +76,8 @@ function formatBytes(bytes) {
 
 function kindFromFile(file) {
   const name = file.name.toLowerCase();
-  if (file.type.startsWith("image/")) return "image";
+  if (file.type.startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|avif|heic|heif)$/.test(name))
+    return "image";
   if (file.type.startsWith("audio/") || /\.(mp3|wav|m4a|aac|flac|ogg)$/.test(name))
     return "audio";
   if (file.type.startsWith("video/") || /\.(mp4|mov|webm|mkv)$/.test(name))
@@ -242,8 +249,10 @@ function Workbench({ onLogout }) {
   );
   const [projectName, setProjectName] = useState("");
   const [projectAssets, setProjectAssets] = useState([]);
+  const [projectDirectoryHandle, setProjectDirectoryHandle] = useState(null);
+  const [projectNeedsPermission, setProjectNeedsPermission] = useState(false);
   const [references, setReferences] = useState([]);
-  const [duration, setDuration] = useState(10);
+  const [duration, setDuration] = useState(15);
   const [resolution, setResolution] = useState("720p");
   const [ratio, setRatio] = useState("16:9");
   const [seed, setSeed] = useState("");
@@ -339,6 +348,18 @@ function Workbench({ onLogout }) {
   useEffect(() => localStorage.setItem(ACTIVE_KEY, activeId), [activeId]);
   useEffect(() => localStorage.setItem(FIXED_CONTENT_KEY, fixedContent), [fixedContent]);
   useEffect(() => localStorage.setItem("video-workbench-mode-v1", workMode), [workMode]);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const handle = await loadProjectDirectory();
+        if (!cancelled && handle) await openRememberedProject(handle, false);
+      } catch (error) {
+        if (!cancelled) setNotice(`恢复已保存项目失败：${error.message}`);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
   useEffect(() => () => {
     if (videoBlob?.url) URL.revokeObjectURL(videoBlob.url);
   }, [videoBlob]);
@@ -395,7 +416,9 @@ function Workbench({ onLogout }) {
     if (page > pageCount) setPage(pageCount);
   }, [page, pageCount]);
   useEffect(() => {
-    if (!capability.durations.includes(Number(duration)))
+    if (sdVersion === "sd20" && capability.durations.includes(15))
+      setDuration(15);
+    else if (!capability.durations.includes(Number(duration)))
       setDuration(capability.durations[0]);
     if (!capability.resolutions.includes(resolution))
       setResolution(capability.resolutions[0]);
@@ -632,22 +655,25 @@ function Workbench({ onLogout }) {
     }
   }
 
-  function selectProjectFolder(fileList) {
-    const files = Array.from(fileList || []);
-    const assets = files
-      .map((file) => {
+  function selectProjectFolder(fileList, explicitRootName = "") {
+    const entries = Array.from(fileList || []);
+    const assets = entries
+      .map((entry) => {
+        const file = entry?.file || entry;
+        const relativePath = entry?.relativePath || file?.webkitRelativePath || file?.name;
         const kind = kindFromFile(file);
         if (!kind) return null;
         return {
-          key: `${kind}:${file.webkitRelativePath || file.name}:${file.size}:${file.lastModified}`,
+          key: `${kind}:${relativePath}:${file.size}:${file.lastModified}`,
           file,
           kind,
           stem: fileStem(file.name),
-          relativePath: file.webkitRelativePath || file.name,
+          relativePath,
         };
       })
       .filter(Boolean);
-    const rootName = files[0]?.webkitRelativePath?.split("/")[0] || "已选项目";
+    const firstFile = entries[0]?.file || entries[0];
+    const rootName = explicitRootName || firstFile?.webkitRelativePath?.split("/")[0] || "已选项目";
     setProjectName(rootName);
     setProjectAssets(assets);
     const counts = assets.reduce(
@@ -657,6 +683,43 @@ function Workbench({ onLogout }) {
     setNotice(
       `项目“${rootName}”已读取：图片 ${counts.image}、音频 ${counts.audio}、视频 ${counts.video}。现在可以点击一键参考。`,
     );
+  }
+
+  async function openRememberedProject(handle, requestPermission = false) {
+    const permission = await projectDirectoryPermission(handle, requestPermission);
+    setProjectDirectoryHandle(handle);
+    setProjectName(handle.name || "已保存项目");
+    if (permission !== "granted") {
+      setProjectNeedsPermission(true);
+      setNotice(`已记住项目“${handle.name || "已保存项目"}”，点击“恢复项目”即可继续使用`);
+      return false;
+    }
+    const files = await filesFromProjectDirectory(handle);
+    setProjectNeedsPermission(false);
+    selectProjectFolder(files, handle.name);
+    return true;
+  }
+
+  async function chooseProjectFolder() {
+    if (!window.showDirectoryPicker) {
+      projectFolderInput.current?.click();
+      return;
+    }
+    try {
+      const handle = await window.showDirectoryPicker({ mode: "read" });
+      await saveProjectDirectory(handle);
+      await openRememberedProject(handle, true);
+    } catch (error) {
+      if (error?.name !== "AbortError") setNotice(`项目文件夹读取失败：${error.message}`);
+    }
+  }
+
+  async function restoreProjectFolder() {
+    try {
+      await openRememberedProject(projectDirectoryHandle, true);
+    } catch (error) {
+      setNotice(`恢复项目文件夹失败：${error.message}`);
+    }
   }
 
   async function runOneClickReference() {
@@ -1164,6 +1227,8 @@ function Workbench({ onLogout }) {
               notice={notice}
               onNotice={setNotice}
               onProjectFolder={selectProjectFolder}
+              onChooseProjectFolder={chooseProjectFolder}
+              onRestoreProjectFolder={restoreProjectFolder}
               onTasksAdded={() => {
                 setTaskPage(1);
                 setTaskStatusFilter("all");
@@ -1171,6 +1236,7 @@ function Workbench({ onLogout }) {
                 setTaskRefreshVersion((value) => value + 1);
               }}
               projectAssets={projectAssets}
+              projectNeedsPermission={projectNeedsPermission}
               projectName={projectName}
               quantity={quantity}
               ratio={ratio}
@@ -1194,12 +1260,17 @@ function Workbench({ onLogout }) {
                 <span>
                   {projectAssets.length
                     ? `已读取 ${projectAssets.length} 个可用素材；本地文件只会在开始生成时上传`
-                    : "网页版刷新后需要重新选择；安装版会记住项目位置"}
+                    : projectNeedsPermission
+                      ? "项目位置已保留；浏览器需要确认后即可继续读取"
+                      : "选择后会记住项目位置，重启工作台后自动恢复"}
                 </span>
               </div>
               <div>
-                <button className="secondary-button" onClick={() => projectFolderInput.current?.click()}>
-                  选择项目文件夹
+                <button
+                  className="secondary-button"
+                  onClick={projectNeedsPermission ? restoreProjectFolder : chooseProjectFolder}
+                >
+                  {projectNeedsPermission ? "恢复项目" : projectName ? "更换项目" : "选择项目文件夹"}
                 </button>
                 <button className="one-click-button" disabled={!projectAssets.length} onClick={runOneClickReference}>
                   一键参考

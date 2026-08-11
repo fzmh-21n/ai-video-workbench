@@ -68,8 +68,11 @@ export default function BatchPanel({
   notice,
   onNotice,
   onProjectFolder,
+  onChooseProjectFolder,
+  onRestoreProjectFolder,
   onTasksAdded,
   projectAssets,
+  projectNeedsPermission,
   projectName,
   quantity,
   ratio,
@@ -493,7 +496,16 @@ export default function BatchPanel({
       <div className="project-bar">
         <div><strong>{projectName ? `当前项目：${projectName}` : "当前未选择项目文件夹"}</strong><span>批量匹配只读取文件名；预上传或提交时才发送素材</span></div>
         <div>
-          <label className="secondary-button file-button">选择项目文件夹<input type="file" multiple hidden webkitdirectory="" directory="" onChange={(event) => { onProjectFolder(event.target.files); event.target.value = ""; }} /></label>
+          {window.showDirectoryPicker ? (
+            <button
+              className="secondary-button"
+              onClick={projectNeedsPermission ? onRestoreProjectFolder : onChooseProjectFolder}
+            >
+              {projectNeedsPermission ? "恢复项目" : projectName ? "更换项目" : "选择项目文件夹"}
+            </button>
+          ) : (
+            <label className="secondary-button file-button">选择项目文件夹<input type="file" multiple hidden webkitdirectory="" directory="" onChange={(event) => { onProjectFolder(event.target.files); event.target.value = ""; }} /></label>
+          )}
           <button className="secondary-button" onClick={() => textInput.current?.click()}>导入批量 TXT</button>
           <button className="secondary-button batch-clear-button" disabled={!items.length || !!busy} onClick={clearBatch}>一键清空</button>
           <input ref={textInput} type="file" hidden accept="text/plain,.txt" onChange={(event) => { importText(event.target.files?.[0]); event.target.value = ""; }} />

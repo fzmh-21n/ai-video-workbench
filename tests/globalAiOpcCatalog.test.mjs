@@ -59,3 +59,37 @@ test("全球 AI 完整版支持首尾帧及 9 图 3 音频 3 视频", () => {
   assert.deepEqual([capability.images, capability.audios, capability.videos], [9, 3, 3]);
   assert.deepEqual(capability.resolutions, ["4K"]);
 });
+
+test("Global AI videos_933_c1 uses the V2 model-center payload", () => {
+  const payload = globalAiOpcPayload("videos_933_c1", {
+    prompt: "test",
+    duration: 15,
+    aspectRatio: "9:16",
+    resolution: "720p",
+    syncAudio: true,
+    materials: [
+      { kind: "image", url: "https://example.com/a.png" },
+      { kind: "audio", url: "https://example.com/a.wav" },
+      { kind: "video", url: "https://example.com/a.mp4" },
+    ],
+  });
+  assert.ok(GLOBAL_AIOPC_MODELS.includes("videos_933_c1"));
+  assert.equal(globalAiOpcCreatePath("videos_933_c1"), "/v2/model-center/tasks");
+  assert.equal(globalAiOpcStatusPath("videos_933_c1", "task/a"), "/v2/model-center/tasks/task%2Fa");
+  assert.deepEqual(payload, {
+    model: "videos_933_c1",
+    prompt: "test",
+    reference_images: ["https://example.com/a.png"],
+    reference_videos: ["https://example.com/a.mp4"],
+    reference_audios: ["https://example.com/a.wav"],
+    duration: 15,
+    aspect_ratio: "9:16",
+    resolution: "720p",
+    face_processing: true,
+    generate_audio: true,
+    reference_mode: "image",
+  });
+  assert.deepEqual(globalAiOpcCapability("videos_933_c1").ratios, [
+    "21:9", "16:9", "4:3", "1:1", "3:4", "9:16",
+  ]);
+});

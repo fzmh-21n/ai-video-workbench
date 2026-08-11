@@ -53,6 +53,39 @@ test("matches exactly after removing only the asset extension", () => {
   assert.equal(plan.annotatedPrompt, "【本节出场的所有人物】\n@011_人物1=011_人物1");
 });
 
+test("ignores parenthesized descriptions after real people and scene asset names", () => {
+  const prompt = [
+    "【本节出场的所有人物】",
+    "001_孙桂兰冬季采药版（雪夜站雪防寒服，托扶重伤的陈卫东）",
+    "009_靠山村村民群体（手持登记表、手电和猎叉，堵住下山路）",
+    "011_何志勇（站在伤员与村民之间维持隔离）",
+    "【本节的所有背景】",
+    "015_三号瞭望屋围堵雪夜版（木屋门前与南侧下山路被村民围堵的雪夜状态）",
+  ].join("\n");
+  const result = planProjectReferences(prompt, [
+    image("001_孙桂兰冬季采药版.png"),
+    image("009_靠山村村民群体.png"),
+    image("011_何志勇.png"),
+    image("015_三号瞭望屋围堵雪夜版.png"),
+  ]);
+
+  assert.deepEqual(result.matches.map((item) => item.requested), [
+    "001_孙桂兰冬季采药版",
+    "009_靠山村村民群体",
+    "011_何志勇",
+    "015_三号瞭望屋围堵雪夜版",
+  ]);
+  assert.equal(result.missing.length, 0);
+  assert.match(
+    result.annotatedPrompt,
+    /@001_孙桂兰冬季采药版=001_孙桂兰冬季采药版（雪夜站雪防寒服，托扶重伤的陈卫东）/,
+  );
+  assert.match(
+    result.annotatedPrompt,
+    /@015_三号瞭望屋围堵雪夜版=015_三号瞭望屋围堵雪夜版（木屋门前与南侧下山路被村民围堵的雪夜状态）/,
+  );
+});
+
 test("keeps the numeric prefix and normalizes full-width match characters", () => {
   const plan = planProjectReferences(
     "【本节出场的所有人物】\n０１１＿人物１",

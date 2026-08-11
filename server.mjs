@@ -511,23 +511,6 @@ async function uploadMedia(config, file, material = {}) {
     if (!value) throw httpError(502, `紫域 AI 素材上传成功但没有返回 URL：${displayName}`);
     return publicUrl(value, "紫域 AI 素材 URL").toString();
   }
-  if (config.adapter === "globalaiopc") {
-    const response = await upstream(`${config.baseUrl}${globalAiOpcCreatePath(config.model)}`, {
-      method: "POST",
-      headers: authHeaders(config, { "Content-Type": "application/json" }),
-      body: JSON.stringify(globalAiOpcPayload(config.model, input)),
-    }, 180_000);
-    const body = await readJson(response);
-    const taskId = taskIdFrom(body);
-    if (!taskId) throw httpError(502, "全球 AI 创建成功但没有返回任务 ID");
-    return {
-      adapter: "globalaiopc",
-      baseUrl: config.baseUrl,
-      taskId,
-      statusPath: globalAiOpcStatusPath(config.model, taskId),
-      model: config.model,
-    };
-  }
   const form = new FormData();
   form.set("file", new Blob([bytes], { type: file.mimetype || "application/octet-stream" }), displayName);
   const headers = { Authorization: `Bearer ${config.mediaUploadKey}` };
@@ -951,6 +934,23 @@ async function createLwaigc(config, input) {
 async function createVideo(config, input) {
   if (config.adapter === "fmgo") return createFmgo(config, input);
   if (config.adapter === "lwaigc") return createLwaigc(config, input);
+  if (config.adapter === "globalaiopc") {
+    const response = await upstream(`${config.baseUrl}${globalAiOpcCreatePath(config.model)}`, {
+      method: "POST",
+      headers: authHeaders(config, { "Content-Type": "application/json" }),
+      body: JSON.stringify(globalAiOpcPayload(config.model, input)),
+    }, 180_000);
+    const body = await readJson(response);
+    const taskId = taskIdFrom(body);
+    if (!taskId) throw httpError(502, "全球 AI 创建成功但没有返回任务 ID");
+    return {
+      adapter: "globalaiopc",
+      baseUrl: config.baseUrl,
+      taskId,
+      statusPath: globalAiOpcStatusPath(config.model, taskId),
+      model: config.model,
+    };
+  }
   if (config.adapter === "canseedream") {
     const response = await upstream(`${config.baseUrl}/api/v3/contents/generations/tasks`, {
       method: "POST",
@@ -1194,6 +1194,9 @@ app.get("/api/config/models", async (req, res, next) => {
     if (config.adapter === "lwaigc") {
       const documentedVideoModels = new Set(LWAIGC_VIDEO_MODELS);
       models = models.filter((model) => documentedVideoModels.has(model));
+    }
+    if (config.adapter === "globalaiopc") {
+      models = [...new Set([...models, ...GLOBAL_AIOPC_MODELS])];
     }
     res.json({
       models: config.adapter === "lwaigc" ? models : models.length ? models : fallbackModels(config.adapter),

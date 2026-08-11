@@ -44,6 +44,28 @@ function cleanRequestedName(value) {
   return { source, requested: cleanMatchValue(requestedSource) };
 }
 
+function splitOutsideParentheses(value) {
+  const parts = [];
+  let current = "";
+  let depth = 0;
+  for (const character of String(value)) {
+    if (character === "（" || character === "(") depth += 1;
+    if (character === "）" || character === ")") depth = Math.max(0, depth - 1);
+    if (depth === 0 && /[、，,；;]/.test(character)) {
+      if (current.trim()) parts.push(current.trim());
+      current = "";
+    } else {
+      current += character;
+    }
+  }
+  if (current.trim()) parts.push(current.trim());
+  return parts;
+}
+
+function withoutParenthesizedDescription(value) {
+  return String(value).replace(/\s*[（(][\s\S]*[）)]\s*$/, "").trim();
+}
+
 function requestedNames(content, role) {
   const meaningfulLines = content.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   if (role === "voice") {
@@ -60,7 +82,9 @@ function requestedNames(content, role) {
   if (role === "people") {
     return uniqueEntries(
       meaningfulLines.flatMap((line) =>
-        line.split(/[、，,；;]/).map((part) => cleanRequestedName(part.split(/[：:]/, 1)[0])),
+        splitOutsideParentheses(line).map((part) =>
+          cleanRequestedName(part.split(/[：:]/, 1)[0]),
+        ),
       ),
     );
   }
@@ -68,7 +92,9 @@ function requestedNames(content, role) {
   // 背景模块的每一行都可能是独立场景；每个词条必须与文件名精准匹配。
   return uniqueEntries(
     meaningfulLines.flatMap((line) =>
-      line.split(/[、，,；;]/).map((part) => cleanRequestedName(part)),
+      splitOutsideParentheses(line).map((part) =>
+        cleanRequestedName(part),
+      ),
     ),
   );
 }
@@ -95,10 +121,13 @@ function annotateContent(content, matches) {
   for (const match of ordered) {
     const imageName = fileStem(assetFileName(match.asset));
     const visible = `@${imageName}=${match.requested}`;
+    const suffix = match.source.startsWith(match.requested)
+      ? match.source.slice(match.requested.length)
+      : "";
     if (next.indexOf(visible) >= 0) continue;
     const index = next.indexOf(match.source);
     if (index < 0 || next.slice(Math.max(0, index - imageName.length - 2), index).indexOf("@") >= 0) continue;
-    next = `${next.slice(0, index)}${visible}${next.slice(index + match.source.length)}`;
+    next = `${next.slice(0, index)}${visible}${suffix}${next.slice(index + match.source.length)}`;
   }
   return next;
 }
@@ -111,9 +140,17 @@ export function planProjectReferences(prompt, assets) {
     if (!range) continue;
     const names = requestedNames(range.content, rule.role);
     for (const entry of names) {
-      const asset = bestAsset(entry.requested, rule.kind, assets);
-      if (asset) matches.push({ ...rule, ...entry, asset });
-      else if (entry.requested) missing.push({ ...rule, ...entry });
+      let requested = entry.requested;
+      let asset = bestAsset(requested, rule.kind, assets);
+      if (!asset && rule.kind === "image") {
+        const withoutDescription = withoutParenthesizedDescription(requested);
+        if (withoutDescription !== requested) {
+          asset = bestAsset(withoutDescription, rule.kind, assets);
+          if (asset) requested = withoutDescription;
+        }
+      }
+      if (asset) matches.push({ ...rule, ...entry, requested, asset });
+      else if (requested) missing.push({ ...rule, ...entry, requested });
     }
   }
 

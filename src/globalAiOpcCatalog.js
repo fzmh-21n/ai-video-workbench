@@ -1,6 +1,7 @@
 export const GLOBAL_AIOPC_BASE_URL = "https://zcbservice.aizfw.cn/kyyReactApiServer";
 
 export const GLOBAL_AIOPC_MODELS = [
+  "videos_933_c1",
   "seedance_2_0",
   "seedance_2_0_fast",
   "seedance_2_0_pro",
@@ -33,6 +34,19 @@ const urlsFor = (materials, kind) => (materials || [])
 
 export function globalAiOpcCapability(modelName) {
   const model = String(modelName || "").toLowerCase();
+  if (model === "videos_933_c1") {
+    return {
+      images: 9,
+      videos: 3,
+      audios: 3,
+      durations: Array.from({ length: 12 }, (_, index) => index + 4),
+      resolutions: ["480p", "720p", "1080p"],
+      ratios: ["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"],
+      seed: false,
+      syncAudio: true,
+      syncAudioFixed: false,
+    };
+  }
   const resolution = model.includes("_480p") ? "480p"
     : model.includes("_720p") ? "720p"
       : model.includes("_1080p") ? "1080p"
@@ -54,6 +68,7 @@ export function globalAiOpcCapability(modelName) {
 
 export function globalAiOpcCreatePath(modelName) {
   const model = String(modelName || "").toLowerCase();
+  if (model === "videos_933_c1") return "/v2/model-center/tasks";
   if (model.includes("_discount_")) return "/v1/seedance-discount/videos";
   if (model.includes("_special_")) return "/v1/seedance-special/videos";
   return "/v1/kyyvideo2/videos";
@@ -61,6 +76,9 @@ export function globalAiOpcCreatePath(modelName) {
 
 export function globalAiOpcStatusPath(modelName, taskId) {
   const id = encodeURIComponent(taskId);
+  if (String(modelName || "").toLowerCase() === "videos_933_c1") {
+    return `/v2/model-center/tasks/${id}`;
+  }
   return globalAiOpcCreatePath(modelName) === "/v1/kyyvideo2/videos"
     ? `/v1/kyyvideo2/videos/${id}`
     : `/v1/result/${id}`;
@@ -69,6 +87,23 @@ export function globalAiOpcStatusPath(modelName, taskId) {
 export function globalAiOpcPayload(modelName, input = {}) {
   const model = String(modelName || "");
   const materials = input.materials || [];
+  if (model.toLowerCase() === "videos_933_c1") {
+    const images = materials.filter((item) => item.kind === "image" && item.url);
+    const hasFrame = images.some((item) => ["first_frame", "last_frame"].includes(item.subType));
+    return {
+      model,
+      prompt: input.prompt || "",
+      reference_images: images.map((item) => item.url),
+      reference_videos: urlsFor(materials, "video"),
+      reference_audios: urlsFor(materials, "audio"),
+      duration: Number(input.duration),
+      aspect_ratio: input.aspectRatio,
+      resolution: input.resolution,
+      face_processing: true,
+      generate_audio: Boolean(input.syncAudio),
+      reference_mode: hasFrame ? "frame" : "image",
+    };
+  }
   if (globalAiOpcCreatePath(model) === "/v1/kyyvideo2/videos") {
     const images = materials.filter((item) => item.kind === "image" && item.url);
     const first = images.find((item) => item.subType === "first_frame");

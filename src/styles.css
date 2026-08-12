@@ -334,10 +334,12 @@ input, select {
 .batch-card-body { padding: 12px 14px 14px; border-top: 1px solid #eee0ca; }
 .batch-card-body > textarea { width: 100%; min-height: 220px; resize: vertical; }
 .batch-reference-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
-.batch-reference-list span { padding: 5px 8px; border-radius: 7px; background: #f5efe5; color: #765f42; font-size: 12px; }
+.batch-reference-list span { position: relative; padding: 5px 25px 5px 8px; border-radius: 7px; background: #f5efe5; color: #765f42; font-size: 12px; }
 .batch-reference-list span.image { background: #fff0cd; }
 .batch-reference-list span.audio { background: #edf1ff; }
 .batch-reference-list span.video { background: #e9f7f2; }
+.batch-reference-list .batch-reference-remove { position: absolute; top: 1px; right: 3px; min-width: 18px; padding: 0; border: 0; background: transparent; color: #b96758; font-size: 17px; line-height: 18px; }
+.batch-reference-list .batch-reference-remove:hover { color: #d43e2c; background: transparent; }
 .batch-card-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .override-toggle { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; }
 .batch-overrides { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 10px; }

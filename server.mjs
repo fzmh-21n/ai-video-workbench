@@ -38,6 +38,7 @@ import {
   globalAiOpcPayload,
   globalAiOpcStatusPath,
 } from "./src/globalAiOpcCatalog.js";
+import { MAXFORAI_VIDEO_MODELS, maxforaiVideoPayload } from "./src/maxforaiCatalog.js";
 import { normalizedTaskProgress } from "./src/taskProgress.js";
 import { friendlyUpstreamError } from "./src/upstreamError.js";
 
@@ -201,15 +202,18 @@ function inferAdapter(url) {
   if (host === "api.meaicc.com") return "meaicc";
   if (host === "ziyuai.vip" || host === "www.ziyuai.vip") return "ziyuai";
   if (host === "zcbservice.aizfw.cn" || host === "docs.globalaiopc.com" || host === "api.globalaiopc.com") return "globalaiopc";
+  if (host === "maxforai.top" || host === "www.maxforai.top") return "maxforai";
   return "newapi";
 }
 
 function providerConfig(req, requireModel = true) {
   let resolvedBaseUrl = baseUrl(req.get("x-api-base-url"));
   const apiKey = String(req.get("x-api-key") || "").trim();
-  const model = String(req.get("x-api-model") || "").trim();
+  const encodedModel = String(req.get("x-api-model") || "").trim();
+  let model = encodedModel;
+  try { model = decodeURIComponent(encodedModel); } catch {}
   const requestedAdapter = String(req.get("x-api-adapter") || "").trim();
-  const adapter = ["fmgo", "paipu", "viralee", "canseedream", "lwaigc", "meaicc", "ziyuai", "globalaiopc", "newapi"].includes(requestedAdapter)
+  const adapter = ["fmgo", "paipu", "viralee", "canseedream", "lwaigc", "meaicc", "ziyuai", "globalaiopc", "maxforai", "newapi"].includes(requestedAdapter)
     ? requestedAdapter
     : inferAdapter(resolvedBaseUrl);
   // canseedream.com 目前会 301 跳转至 see.ximeiedu.org。跨域跳转会按
@@ -225,6 +229,8 @@ function providerConfig(req, requireModel = true) {
       ? `${resolvedBaseUrl}/v1/assets`
       : adapter === "ziyuai"
         ? `${resolvedBaseUrl}/api/v1/uploads`
+        : adapter === "maxforai"
+          ? `${resolvedBaseUrl}/v1/assets`
       : "";
   const mediaUploadKey = String(req.get("x-media-upload-key") || "").trim() || apiKey;
   if (!apiKey) throw httpError(400, "请填写 API Key");
@@ -301,6 +307,8 @@ function fallbackModels(adapter) {
               ? MEAICC_VIDEO_MODELS
               : adapter === "globalaiopc"
                 ? GLOBAL_AIOPC_MODELS
+                : adapter === "maxforai"
+                  ? MAXFORAI_VIDEO_MODELS
         : [];
 }
 
@@ -995,6 +1003,8 @@ async function createVideo(config, input) {
         ? viraleePayload(config, input)
         : config.adapter === "meaicc"
           ? meaiccVideoPayload(config.model, input)
+        : config.adapter === "maxforai"
+          ? maxforaiVideoPayload(config.model, input)
         : genericPayload(config, input);
   const response = await upstream(`${config.baseUrl}/v1/videos`, {
     method: "POST",
@@ -1198,6 +1208,10 @@ app.get("/api/config/models", async (req, res, next) => {
     if (config.adapter === "globalaiopc") {
       models = [...new Set([...models, ...GLOBAL_AIOPC_MODELS])];
     }
+    if (config.adapter === "maxforai") {
+      const allowed = new Set(MAXFORAI_VIDEO_MODELS);
+      models = [...new Set([...models.filter((model) => allowed.has(model)), ...MAXFORAI_VIDEO_MODELS])];
+    }
     res.json({
       models: config.adapter === "lwaigc" ? models : models.length ? models : fallbackModels(config.adapter),
     });
@@ -1296,6 +1310,37 @@ app.post("/api/tasks", upload.array("references", 50), async (req, res, next) =>
     next(error);
   } finally {
     cleanupFiles(files);
+  }
+});
+
+app.post("/api/tasks/recover", async (req, res, next) => {
+  try {
+    const config = providerConfig(req);
+    if (config.adapter !== "meaicc") throw httpError(400, "当前仅支持找回 MEAICC 任务");
+    const taskIds = Array.isArray(req.body?.taskIds)
+      ? req.body.taskIds.map((value) => String(value || "").trim()).filter(Boolean)
+      : [];
+    if (!taskIds.length || taskIds.length > 50) throw httpError(400, "请输入 1—50 个 MEAICC 任务 ID");
+    if (taskIds.some((taskId) => !/^wr_[0-9a-f-]+$/i.test(taskId)))
+      throw httpError(400, "MEAICC 任务 ID 格式不正确");
+    const createdAt = new Date().toLocaleString("zh-CN", { hour12: false });
+    res.json({
+      tasks: taskIds.map((taskId) => ({
+        id: encodeJob({
+          adapter: config.adapter,
+          baseUrl: config.baseUrl,
+          taskId,
+          statusPath: `/v1/videos/${encodeURIComponent(taskId)}`,
+          model: config.model,
+        }),
+        upstreamTaskId: taskId,
+        status: "queued",
+        progress: 0,
+        createdAt,
+      })),
+    });
+  } catch (error) {
+    next(error);
   }
 });
 
@@ -1403,7 +1448,23 @@ if (!process.argv.includes("--api-only")) {
   app.get("*", (_req, res) => res.sendFile(path.join(rootDir, "dist", "index.html")));
 }
 
-app.use((error, _req, res, _next) => {
+function isAmbiguousMeaiccSubmission(error, req) {
+  if (req.method !== "POST" || req.path !== "/api/tasks") return false;
+  if (String(req.get("x-api-adapter") || "").toLowerCase() !== "meaicc") return false;
+  const status = Number(error?.status || 0);
+  const message = String(error?.message || "");
+  return [408, 502, 504, 520, 522, 523, 524].includes(status)
+    || /fetch failed|timeout|timed out|network|socket|ECONNRESET|UND_ERR/i.test(message);
+}
+
+app.use((error, req, res, _next) => {
+  if (isAmbiguousMeaiccSubmission(error, req)) {
+    return res.status(502).json({
+      code: "SUBMISSION_UNKNOWN",
+      submissionUnknown: true,
+      message: "MEAICC 可能已经收到任务，但连接超时，工作台没有拿到任务 ID。请先到中转后台核对；为避免重复扣费，本条不会自动重试。",
+    });
+  }
   const status = Number(
     error?.status ||
       (error instanceof multer.MulterError ? (error.code === "LIMIT_FILE_SIZE" ? 413 : 400) : 0) ||

@@ -462,7 +462,8 @@ function Workbench({ onLogout }) {
     return {
       "x-api-base-url": profile.baseUrl.trim(),
       "x-api-key": (explicitKey ?? keyFor(profile)).trim(),
-      "x-api-model": profile.model.trim(),
+      // HTTP 请求头只允许 Latin-1；中文模型名先编码，服务端再还原。
+      "x-api-model": encodeURIComponent(profile.model.trim()),
       "x-api-adapter": profile.adapter,
       "x-media-upload-url": (profile.mediaUploadUrl || "").trim(),
       "x-media-upload-key":
@@ -649,7 +650,11 @@ function Workbench({ onLogout }) {
           : `连接成功，读取到 ${models.length} 个模型`,
       );
     } catch (error) {
-      setConfigStatus(error.message || "连接失败");
+      setConfigStatus(
+        error instanceof TypeError && /failed to fetch/i.test(error.message || "")
+          ? "无法连接本地工作台服务，请双击桌面的“一键启动工作台”后再试"
+          : error.message || "连接失败",
+      );
     } finally {
       setTesting(false);
     }
@@ -1016,7 +1021,13 @@ function Workbench({ onLogout }) {
         body: form,
       });
       const body = await response.json();
-      if (!response.ok) throw new Error(body.message || "任务提交失败");
+      if (!response.ok) {
+        const message = body.message || "任务提交失败";
+        if (body.submissionUnknown || body.code === "SUBMISSION_UNKNOWN") {
+          throw new Error(`${message} 请不要立即再次点击生成。`);
+        }
+        throw new Error(message);
+      }
       const created = Array.isArray(body.tasks) ? body.tasks : [body];
       const createdAtMs = Date.now();
       const taskRecords = created.map((task, index) => ({
@@ -1072,13 +1083,14 @@ function Workbench({ onLogout }) {
     setDownloadingBatchId(batch.id);
     let downloaded = 0;
     let unavailable = 0;
+    let nextIndex = 0;
     try {
-      for (let index = 0; index < completed.length; index += 1) {
+      const downloadOne = async (index) => {
         const task = completed[index];
         try {
           const profile = profiles.find((item) => item.id === task.profileId);
           if (!profile || !keyFor(profile)) throw new Error("所属中转站缺少 API Key");
-          setNotice(`正在逐条尝试下载：${index + 1}/${completed.length} · 已成功 ${downloaded} · 不可用 ${unavailable}`);
+          setNotice(`正在并行下载（最多3条）：已处理 ${downloaded + unavailable}/${completed.length} · 已成功 ${downloaded} · 不可用 ${unavailable}`);
           const response = await fetch(task.videoUrl, { headers: headersFor(profile) });
           if (!response.ok) {
             const body = await response.json().catch(() => ({}));
@@ -1098,7 +1110,16 @@ function Workbench({ onLogout }) {
         } catch {
           unavailable += 1;
         }
-      }
+        setNotice(`正在并行下载（最多3条）：已处理 ${downloaded + unavailable}/${completed.length} · 已成功 ${downloaded} · 不可用 ${unavailable}`);
+      };
+      const worker = async () => {
+        while (nextIndex < completed.length) {
+          const index = nextIndex;
+          nextIndex += 1;
+          await downloadOne(index);
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(3, completed.length) }, worker));
       setNotice(`批次下载尝试完成：实际开始下载 ${downloaded} 个，结果地址不可用 ${unavailable} 个${skipped ? `，另跳过生成失败或未完成任务 ${skipped} 条` : ""}`);
     } catch (error) {
       setNotice(error.message || "批次下载失败");
@@ -1230,7 +1251,7 @@ function Workbench({ onLogout }) {
               onChooseProjectFolder={chooseProjectFolder}
               onRestoreProjectFolder={restoreProjectFolder}
               onTasksAdded={() => {
-                setTaskPage(1);
+                setPage(1);
                 setTaskStatusFilter("all");
                 setTaskProjectFilter("all");
                 setTaskRefreshVersion((value) => value + 1);
@@ -1598,7 +1619,7 @@ function Workbench({ onLogout }) {
               <div className="config-form">
                 <label><span>配置名称</span><input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="例如：主力 API" /></label>
                 <label><span>Base URL</span><input value={draft.baseUrl} onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value, adapter: inferAdapter(event.target.value) })} placeholder="https://api.example.com" /></label>
-                <label><span>接口类型</span><select value={draft.adapter} onChange={(event) => setDraft({ ...draft, adapter: event.target.value })}><option value="fmgo">FMGO / 飞猫</option><option value="paipu">Paipu / Lec</option><option value="viralee">ViralE</option><option value="canseedream">CanSeeDream / 看见梦想</option><option value="lwaigc">LWAIGC 官方统一接口</option><option value="meaicc">MEAICC / 林木森AI</option><option value="ziyuai">Ziyu AI / 紫域AI</option><option value="globalaiopc">GlobalAiOpc / 全球AI</option><option value="newapi">New API 通用</option></select></label>
+                <label><span>接口类型</span><select value={draft.adapter} onChange={(event) => setDraft({ ...draft, adapter: event.target.value })}><option value="fmgo">FMGO / 飞猫</option><option value="paipu">Paipu / Lec</option><option value="viralee">ViralE</option><option value="canseedream">CanSeeDream / 看见梦想</option><option value="lwaigc">LWAIGC 官方统一接口</option><option value="meaicc">MEAICC / 林木森AI</option><option value="ziyuai">Ziyu AI / 紫域AI</option><option value="globalaiopc">GlobalAiOpc / 全球AI</option><option value="maxforai">MaxForAI</option><option value="newapi">New API 通用</option></select></label>
                 <label><span>API Key</span><input type="password" value={draftKey} onChange={(event) => setDraftKey(event.target.value)} placeholder="sk-••••••••" /><small>{rememberKey ? "将保存在此浏览器；公共电脑请勿启用。" : "仅保存在当前浏览器会话，不写入源码。"}</small></label>
                 <label className="remember-key-row"><input type="checkbox" checked={rememberKey} onChange={(event) => setRememberKey(event.target.checked)} /><span>在这台浏览器记住当前中转站的 Key</span></label>
                 <label>

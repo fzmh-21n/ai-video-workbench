@@ -36,6 +36,16 @@ export function batchSerializable(items) {
   }));
 }
 
+const BUSY_OR_DONE = new Set(["submitting", "submitted", "generating", "generated", "submission_unknown"]);
+
+export function canBatchMatch(item) {
+  return !BUSY_OR_DONE.has(item?.status);
+}
+
+export function canBatchSubmit(item) {
+  return ["matched", "failed", "generation_failed"].includes(item?.status);
+}
+
 export async function runWithConcurrency(values, concurrency, worker) {
   const queue = [...values];
   const limit = Math.max(1, Math.min(20, Number(concurrency) || 1));

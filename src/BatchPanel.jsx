@@ -1,5 +1,11 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { batchSerializable, runWithConcurrency, splitBatchPrompts } from "./batchPrompts.js";
+import {
+  batchSerializable,
+  canBatchMatch,
+  canBatchSubmit,
+  runWithConcurrency,
+  splitBatchPrompts,
+} from "./batchPrompts.js";
 import { internalizeProjectAliases, planProjectReferences } from "./projectReferences.js";
 import { allTasks, putTasks } from "./taskStore.js";
 import { pollDelayForAdapter } from "./providerCatalog.js";
@@ -18,6 +24,7 @@ const STATUS_LABELS = {
   generated: "已生成",
   failed: "提交失败",
   generation_failed: "生成失败",
+  submission_unknown: "结果待确认",
 };
 
 function uid(prefix) {
@@ -96,6 +103,8 @@ export default function BatchPanel({
   const [uploaded, setUploaded] = useState(restored?.uploaded || {});
   const [uploadedProfileId, setUploadedProfileId] = useState(restored?.uploadedProfileId || "");
   const [busy, setBusy] = useState("");
+  const [recoverOpen, setRecoverOpen] = useState(false);
+  const [recoverText, setRecoverText] = useState("");
   const textInput = useRef(null);
   const recoveredBatchRef = useRef("");
 
@@ -213,12 +222,16 @@ export default function BatchPanel({
       onNotice("没有识别到“数字.（标题）”格式的章节，请检查 TXT 文件");
       return;
     }
-    if (items.length && !window.confirm(`当前已有 ${items.length} 节批量内容，确定用新 TXT 替换吗？`)) return;
-    setItems(parsed);
+    const importedAt = Date.now();
+    const additions = parsed.map((item, index) => ({
+      ...item,
+      id: `${item.id}-${importedAt}-${index}`,
+      sourceName: file.name,
+      expanded: index === 0,
+    }));
+    setItems((current) => [...current, ...additions]);
     setSourceName(file.name);
-    setUploaded({});
-    setUploadedProfileId("");
-    onNotice(`批量 TXT 已导入：识别到 ${parsed.length} 节（第 ${parsed[0].section}–${parsed.at(-1).section} 节）`);
+    onNotice(`批量 TXT 已追加：新增 ${parsed.length} 节（第 ${parsed[0].section}–${parsed.at(-1).section} 节）；正在提交和生成中的章节保持不动`);
   }
 
   function clearBatch() {
@@ -275,12 +288,14 @@ export default function BatchPanel({
 
   async function matchAll() {
     if (!projectAssets.length) return onNotice("请先选择项目文件夹");
-    if (!items.length) return onNotice("请先导入批量 TXT");
+    const candidates = items.filter(canBatchMatch);
+    if (!candidates.length) return onNotice("没有需要匹配的新章节；提交中、生成中和已生成章节已自动跳过");
     setBusy("matching");
     try {
       const matched = [];
-      for (const item of items) matched.push(await matchItem(item));
-      setItems(matched);
+      for (const item of candidates) matched.push(await matchItem(item));
+      const byId = new Map(matched.map((item) => [item.id, item]));
+      setItems((values) => values.map((item) => byId.get(item.id) || item));
       const refs = matched.reduce((total, item) => total + item.references.length, 0);
       onNotice(`全部一键参考完成：${matched.length} 节，共匹配 ${refs} 个素材；缺少音频已自动忽略`);
     } finally {
@@ -305,6 +320,20 @@ export default function BatchPanel({
     setItems((values) => values.map((item) => item.id === id
       ? { ...item, references: reindex([...(item.references || []), ...additions]) }
       : item));
+  }
+
+  function removeItemReference(itemId, referenceId) {
+    setItems((values) => values.map((item) => {
+      if (item.id !== itemId) return item;
+      const removed = (item.references || []).find((reference) => reference.id === referenceId);
+      const references = reindex((item.references || []).filter((reference) => reference.id !== referenceId));
+      let prompt = item.prompt;
+      if (removed?.alias) {
+        const escaped = removed.alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        prompt = prompt.replace(new RegExp(`@${escaped}=${escaped}`, "g"), removed.alias);
+      }
+      return { ...item, prompt, references };
+    }));
   }
 
   function resolveFile(reference) {
@@ -419,7 +448,11 @@ export default function BatchPanel({
     form.set("referenceMeta", JSON.stringify(referenceMeta));
     const response = await fetch("/api/tasks", { method: "POST", headers, body: form });
     const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(body.message || "任务提交失败");
+    if (!response.ok) {
+      const error = new Error(body.message || "任务提交失败");
+      error.submissionUnknown = Boolean(body.submissionUnknown || body.code === "SUBMISSION_UNKNOWN");
+      throw error;
+    }
     const created = Array.isArray(body.tasks) ? body.tasks : [body];
     const createdAtMs = Date.now();
     const records = created.map((task, index) => ({
@@ -431,7 +464,9 @@ export default function BatchPanel({
       prompt: submittedPrompt,
       projectName: projectName || "未归类",
       batchId,
-      batchTitle: sourceName ? sourceName.replace(/\.txt$/i, "") : `批量任务 ${new Date(createdAtMs).toLocaleString("zh-CN")}`,
+      batchTitle: item.sourceName
+        ? item.sourceName.replace(/\.txt$/i, "")
+        : sourceName ? sourceName.replace(/\.txt$/i, "") : `批量任务 ${new Date(createdAtMs).toLocaleString("zh-CN")}`,
       batchSection: item.section,
       batchOrder: Number(item.section) * 10 + index,
       createdAtMs: createdAtMs + index,
@@ -443,10 +478,10 @@ export default function BatchPanel({
 
   async function submitSelected(selectedItems, confirmAll = false) {
     if (!apiKey) return onNotice("请先配置当前中转站的 API Key");
-    const candidates = selectedItems.filter((item) => !["submitted", "submitting", "generating", "generated"].includes(item.status));
+    const candidates = selectedItems.filter(canBatchSubmit);
     const blocked = candidates.filter(issueFor);
     const ready = candidates.filter((item) => !issueFor(item));
-    if (!ready.length) return onNotice(blocked.length ? "没有可提交章节，请先处理标红问题" : "没有待提交章节");
+    if (!ready.length) return onNotice(blocked.length ? "没有可提交章节，请先处理标红问题" : "没有已匹配且待提交的新章节；提交中和生成中的章节已自动跳过");
     const totalTasks = ready.reduce((total, item) => total + Number(parametersFor(item).quantity || 1), 0);
     if (confirmAll && !window.confirm(`准备提交 ${ready.length} 节，共创建 ${totalTasks} 条任务。\n中转站：${activeProfile.name}\n模型：${activeProfile.model}\n同时提交：${concurrency} 节\n\n确认开始吗？`)) return;
     setBusy("submitting");
@@ -476,13 +511,69 @@ export default function BatchPanel({
       } catch (error) {
         failures += 1;
         setItems((values) => values.map((value) => value.id === item.id
-          ? { ...value, status: "failed", error: error.message || "提交失败", expanded: true }
+          ? {
+              ...value,
+              status: error.submissionUnknown ? "submission_unknown" : "failed",
+              error: error.message || "提交失败",
+              expanded: true,
+            }
           : value));
       }
     });
     setBusy("");
     onTasksAdded();
     onNotice(`批量提交完成：成功 ${successes} 节，失败 ${failures} 节${blocked.length ? `，另有 ${blocked.length} 节因缺图或素材超限未提交` : ""}`);
+  }
+
+  async function recoverMeaiccTasks() {
+    const value = recoverText;
+    if (!value?.trim()) return;
+    const taskIds = [...new Set(value.match(/wr_[0-9a-f-]+/gi) || [])];
+    if (!taskIds.length) return onNotice("没有识别到 MEAICC 任务 ID");
+    const chapters = [...items].sort((a, b) => Number(a.section) - Number(b.section));
+    if (taskIds.length !== chapters.length) {
+      return onNotice(`识别到 ${taskIds.length} 个任务 ID，但当前有 ${chapters.length} 节。为避免挂错章节，本次没有导入。`);
+    }
+    setBusy("recovering");
+    try {
+      const response = await fetch("/api/tasks/recover", {
+        method: "POST",
+        headers: { ...headers, "Content-Type": "application/json" },
+        body: JSON.stringify({ taskIds }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.message || "找回任务失败");
+      const batchId = uid("recovered-batch");
+      const createdAtMs = Date.now();
+      const records = body.tasks.map((task, index) => ({
+        ...task,
+        profileId: activeProfile.id,
+        providerName: activeProfile.name,
+        model: activeProfile.model,
+        title: `第${String(chapters[index].section).padStart(2, "0")}节-${activeProfile.model}`,
+        prompt: chapters[index].prompt,
+        projectName: projectName || "未归类",
+        batchId,
+        batchTitle: `${(sourceName || "批量任务").replace(/\.txt$/i, "")}（找回）`,
+        batchSection: chapters[index].section,
+        batchOrder: Number(chapters[index].section) * 10,
+        createdAtMs: createdAtMs + index,
+        nextPollAt: Date.now(),
+      }));
+      await putTasks(records);
+      setItems((values) => values.map((item) => {
+        const index = chapters.findIndex((chapter) => chapter.id === item.id);
+        return index < 0 ? item : { ...item, status: "generating", progress: 0, error: "", taskIds: [records[index].id] };
+      }));
+      setRecoverOpen(false);
+      setRecoverText("");
+      onTasksAdded();
+      onNotice(`已找回 ${records.length} 条 MEAICC 任务，正在按中转后台状态查询；没有重新提交。`);
+    } catch (error) {
+      onNotice(error.message || "找回任务失败");
+    } finally {
+      setBusy("");
+    }
   }
 
   function updateItem(id, patch) {
@@ -519,9 +610,21 @@ export default function BatchPanel({
         <div><strong>{sourceName || "尚未导入 TXT"}</strong><span>{items.length} 节 · 已匹配 {summary.matched || 0} · 生成中 {(summary.generating || 0) + (summary.submitted || 0) + (summary.submitting || 0)} · 已生成 {summary.generated || 0} · 失败 {(summary.failed || 0) + (summary.generation_failed || 0)}</span></div>
         <button disabled={!!busy || !items.length} onClick={matchAll}>{busy === "matching" ? "匹配中…" : "全部一键参考"}</button>
         <button disabled={!!busy || !items.length} onClick={preuploadAll}>{busy === "uploading" ? "上传中…" : `预上传全部素材${validUploaded ? `（${validUploaded}）` : ""}`}</button>
+        {activeProfile.adapter === "meaicc" && (
+          <button disabled={!!busy || !items.length} onClick={() => setRecoverOpen((value) => !value)}>{busy === "recovering" ? "找回中…" : "找回MEAICC任务"}</button>
+        )}
         <label><span>同时提交</span><select value={concurrency} onChange={(event) => setConcurrency(Number(event.target.value))}>{CONCURRENCY_OPTIONS.map((value) => <option key={value} value={value}>{value} 条</option>)}</select></label>
         <button className="primary-button" disabled={!!busy || !items.length} onClick={() => submitSelected(items, true)}>{busy === "submitting" ? "批量提交中…" : "一键并发提交"}</button>
       </div>
+
+      {recoverOpen && activeProfile.adapter === "meaicc" && (
+        <div className="notice">
+          <label><span>按提交先后顺序粘贴任务 ID（每行一个）</span>
+            <textarea aria-label="MEAICC任务ID" value={recoverText} onChange={(event) => setRecoverText(event.target.value)} />
+          </label>
+          <button disabled={!!busy || !recoverText.trim()} onClick={recoverMeaiccTasks}>确认找回，不重新生成</button>
+        </div>
+      )}
 
       <div className="settings-grid batch-common-settings">
         <label><span>公共时长</span><select value={duration} onChange={(event) => setDuration(event.target.value === "auto" ? "auto" : Number(event.target.value))}>{capability.durations.map((value) => <option key={value} value={value}>{value === "auto" ? "自动" : `${value} 秒`}</option>)}</select></label>
@@ -558,11 +661,33 @@ export default function BatchPanel({
               {item.expanded && (
                 <div className="batch-card-body">
                   <textarea value={item.prompt} onChange={(event) => updateItem(item.id, { prompt: event.target.value })} />
-                  <div className="batch-reference-list">{(item.references || []).map((reference) => <span key={reference.id} className={reference.kind}>{reference.tag} {reference.name}{reference.source === "manual" ? "（手动）" : ""}</span>)}</div>
+                  <div className="batch-reference-list">{(item.references || []).map((reference) => (
+                    <span key={reference.id} className={reference.kind}>
+                      {reference.tag} {reference.name}{reference.source === "manual" ? "（手动）" : ""}
+                      <button
+                        type="button"
+                        className="batch-reference-remove"
+                        title="删除这个素材"
+                        aria-label={`删除素材 ${reference.name}`}
+                        onClick={() => removeItemReference(item.id, reference.id)}
+                      >×</button>
+                    </span>
+                  ))}</div>
                   <div className="batch-card-actions">
                     <button disabled={!!busy} onClick={() => matchOne(item.id)}>本节一键参考</button>
                     <label className="secondary-button file-button">手动添加素材<input type="file" multiple hidden accept="image/*,audio/*,video/*,.mov,.mp4" onChange={(event) => { addManualFiles(item.id, event.target.files); event.target.value = ""; }} /></label>
                     <button disabled={!!busy || !!issue} onClick={() => submitSelected([item])}>开始生成本节</button>
+                    {item.status === "submission_unknown" && (
+                      <button
+                        type="button"
+                        disabled={!!busy}
+                        onClick={() => {
+                          if (window.confirm("请确认你已经在 MEAICC 后台核对过，本条确实没有创建任务。继续后，本条才会恢复为可提交状态。")) {
+                            updateItem(item.id, { status: "matched", error: "" });
+                          }
+                        }}
+                      >确认后台无任务，允许重试</button>
+                    )}
                     <label className="override-toggle"><input type="checkbox" checked={item.overrideEnabled} onChange={(event) => updateItem(item.id, { overrideEnabled: event.target.checked })} />本节单独设置</label>
                   </div>
                   {item.overrideEnabled && (

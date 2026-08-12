@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { runWithConcurrency, splitBatchPrompts } from "../src/batchPrompts.js";
+import {
+  canBatchMatch,
+  canBatchSubmit,
+  runWithConcurrency,
+  splitBatchPrompts,
+} from "../src/batchPrompts.js";
 
 test("splits numbered Chinese prompt sections without splitting SC markers", () => {
   const items = splitBatchPrompts(`3.（第三节，总时长15秒 / 共3镜）\n【本节出场的所有人物】\n001_甲\n镜头1 / SC1\n内容\n\n4.（第四节，总时长15秒 / 共4镜）\n镜头1 / SC1\n内容`);
@@ -29,4 +34,16 @@ test("runs every batch item while respecting the selected concurrency", async ()
   });
   assert.equal(maximum, 2);
   assert.deepEqual(completed.sort(), [1, 2, 3, 4, 5]);
+});
+
+test("skips active and completed chapters during later batch operations", () => {
+  for (const status of ["submitting", "submitted", "generating", "generated"]) {
+    assert.equal(canBatchMatch({ status }), false);
+    assert.equal(canBatchSubmit({ status }), false);
+  }
+  assert.equal(canBatchMatch({ status: "unmatched" }), true);
+  assert.equal(canBatchMatch({ status: "failed" }), true);
+  assert.equal(canBatchSubmit({ status: "unmatched" }), false);
+  assert.equal(canBatchSubmit({ status: "matched" }), true);
+  assert.equal(canBatchSubmit({ status: "failed" }), true);
 });

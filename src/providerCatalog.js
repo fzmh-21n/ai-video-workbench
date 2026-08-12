@@ -6,6 +6,7 @@ import {
   GLOBAL_AIOPC_MODELS,
   globalAiOpcCapability,
 } from "./globalAiOpcCatalog.js";
+import { MAXFORAI_BASE_URL, MAXFORAI_VIDEO_MODELS, maxforaiCapability } from "./maxforaiCatalog.js";
 
 export const DEFAULT_PROFILES = [
   {
@@ -72,6 +73,14 @@ export const DEFAULT_PROFILES = [
     model: "sd_2.0_fast_discount_720p",
     mediaUploadUrl: "",
   },
+  {
+    id: "maxforai",
+    name: "MaxForAI",
+    baseUrl: MAXFORAI_BASE_URL,
+    adapter: "maxforai",
+    model: "firefly-seedance2-720p",
+    mediaUploadUrl: `${MAXFORAI_BASE_URL}/v1/assets`,
+  },
 ];
 
 export const FALLBACK_MODELS = {
@@ -133,6 +142,7 @@ export const FALLBACK_MODELS = {
   lwaigc: LWAIGC_VIDEO_MODELS,
   meaicc: MEAICC_VIDEO_MODELS,
   globalaiopc: GLOBAL_AIOPC_MODELS,
+  maxforai: MAXFORAI_VIDEO_MODELS,
 };
 
 export const FALLBACK_MODEL_LABELS = {
@@ -142,6 +152,10 @@ export const FALLBACK_MODEL_LABELS = {
     shutiao_pool: "香蕉线路 · 720P · 15秒 · 768积分",
     lajiao_pool: "辣椒 SD2.5 满血 · 720P · 4–30秒 · 1190积分",
     yingtao_pool: "樱桃 SD2.5 满血 · 720P · 30秒 · 2990积分",
+  },
+  maxforai: {
+    sd20: "firefly-seedance2-720p",
+    sd25: "mg-seedance-2.5",
   },
   globalaiopc: {
     sd20: "sd_2.0_fast_discount_720p",
@@ -417,6 +431,7 @@ function rawCapabilityFor(profile) {
     return live ? { ...ziyuCapability(), ...live } : ziyuCapability();
   }
   if (adapter === "globalaiopc") return globalAiOpcCapability(profile?.model);
+  if (adapter === "maxforai") return maxforaiCapability(profile?.model);
 
   return base;
 }
@@ -481,6 +496,7 @@ export function inferAdapter(baseUrl) {
     if (host === "api.meaicc.com") return "meaicc";
     if (host === "ziyuai.vip" || host === "www.ziyuai.vip") return "ziyuai";
     if (host === "zcbservice.aizfw.cn" || host === "docs.globalaiopc.com" || host === "api.globalaiopc.com") return "globalaiopc";
+    if (host === "maxforai.top" || host === "www.maxforai.top") return "maxforai";
   } catch {}
   return "newapi";
 }
@@ -488,6 +504,16 @@ export function inferAdapter(baseUrl) {
 export function migrateSavedProfile(profile) {
   if (!profile || typeof profile !== "object") return profile;
   const inferredAdapter = inferAdapter(profile.baseUrl);
+  const officialMaxForAI = profile.id === "maxforai" || inferredAdapter === "maxforai";
+  if (officialMaxForAI || profile.adapter === "maxforai") {
+    return {
+      ...profile,
+      baseUrl: officialMaxForAI ? MAXFORAI_BASE_URL : profile.baseUrl,
+      adapter: "maxforai",
+      model: MAXFORAI_VIDEO_MODELS.includes(profile.model) ? profile.model : "firefly-seedance2-720p",
+      mediaUploadUrl: officialMaxForAI ? `${MAXFORAI_BASE_URL}/v1/assets` : profile.mediaUploadUrl || "",
+    };
+  }
   const officialLwaigc = profile.id === "lwaigc" || inferredAdapter === "lwaigc";
   if (officialLwaigc || profile.adapter === "lwaigc") {
     return {

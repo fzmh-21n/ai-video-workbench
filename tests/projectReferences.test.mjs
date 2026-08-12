@@ -40,7 +40,7 @@ test("matches a complete filename exactly before extension fallback", () => {
   );
 
   assert.equal(plan.matches.length, 1);
-  assert.equal(plan.annotatedPrompt, "【本节出场的所有人物】\n@011_人物1=011_人物1.jpg");
+  assert.equal(plan.annotatedPrompt, "【本节出场的所有人物】\n@011_人物1=011_人物1.jpg，");
 });
 
 test("matches exactly after removing only the asset extension", () => {
@@ -50,7 +50,7 @@ test("matches exactly after removing only the asset extension", () => {
   );
 
   assert.equal(plan.matches.length, 1);
-  assert.equal(plan.annotatedPrompt, "【本节出场的所有人物】\n@011_人物1=011_人物1");
+  assert.equal(plan.annotatedPrompt, "【本节出场的所有人物】\n@011_人物1=011_人物1，");
 });
 
 test("ignores parenthesized descriptions after real people and scene asset names", () => {
@@ -78,12 +78,46 @@ test("ignores parenthesized descriptions after real people and scene asset names
   assert.equal(result.missing.length, 0);
   assert.match(
     result.annotatedPrompt,
-    /@001_孙桂兰冬季采药版=001_孙桂兰冬季采药版（雪夜站雪防寒服，托扶重伤的陈卫东）/,
+    /@001_孙桂兰冬季采药版=001_孙桂兰冬季采药版（雪夜站雪防寒服，托扶重伤的陈卫东），/,
   );
   assert.match(
     result.annotatedPrompt,
-    /@015_三号瞭望屋围堵雪夜版=015_三号瞭望屋围堵雪夜版（木屋门前与南侧下山路被村民围堵的雪夜状态）/,
+    /@015_三号瞭望屋围堵雪夜版=015_三号瞭望屋围堵雪夜版，(?:\n|$)/,
   );
+  assert.doesNotMatch(result.annotatedPrompt, /@015_[^\n]+（/);
+});
+
+test("does not report background narrative as a missing image", () => {
+  const prompt = [
+    "【本节的所有背景】",
+    "015_三号瞭望屋围堵雪夜版（木屋门前与南侧下山路被村民围堵的雪夜状态）",
+    "深夜，承接陈卫东说‘娘，由孙桂兰托扶，村民堵住下山路，何志勇隔在双方中间。",
+    "【本节光影基准】",
+    "冷蓝色雪夜环境光。",
+  ].join("\n");
+  const result = planProjectReferences(prompt, [image("015_三号瞭望屋围堵雪夜版.png")]);
+  assert.equal(result.matches.length, 1);
+  assert.equal(result.missing.length, 0);
+  assert.match(result.annotatedPrompt, /@015_三号瞭望屋围堵雪夜版=015_三号瞭望屋围堵雪夜版，\n深夜/);
+});
+
+test("repairs previously annotated people commas and removes old scene descriptions", () => {
+  const prompt = [
+    "【本节出场的所有人物】",
+    "@001_孙桂兰冬季采药版=001_孙桂兰冬季采药版（托扶陈卫东）",
+    "@011_何志勇=011_何志勇（维持隔离），",
+    "【本节的所有背景】",
+    "@015_三号瞭望屋围堵雪夜版=015_三号瞭望屋围堵雪夜版（雪夜状态）",
+  ].join("\n");
+  const result = planProjectReferences(prompt, [
+    image("001_孙桂兰冬季采药版.png"),
+    image("011_何志勇.png"),
+    image("015_三号瞭望屋围堵雪夜版.png"),
+  ]);
+  assert.match(result.annotatedPrompt, /（托扶陈卫东），\n/);
+  assert.match(result.annotatedPrompt, /（维持隔离），\n/);
+  assert.match(result.annotatedPrompt, /@015_三号瞭望屋围堵雪夜版=015_三号瞭望屋围堵雪夜版，$/);
+  assert.doesNotMatch(result.annotatedPrompt, /雪夜状态/);
 });
 
 test("keeps the numeric prefix and normalizes full-width match characters", () => {
@@ -93,7 +127,7 @@ test("keeps the numeric prefix and normalizes full-width match characters", () =
   );
 
   assert.equal(plan.matches.length, 1);
-  assert.equal(plan.annotatedPrompt, "【本节出场的所有人物】\n@011_人物1=011_人物1");
+  assert.equal(plan.annotatedPrompt, "【本节出场的所有人物】\n@011_人物1=011_人物1，");
 });
 
 test("does not use contains or similarity matching", () => {
@@ -137,8 +171,8 @@ test("matches every scene listed on separate background lines", () => {
     plan.annotatedPrompt,
     [
       "【本节的所有背景】",
-      "@013_三号防火瞭望屋外雪夜=013_三号防火瞭望屋外雪夜",
-      "@014_三号防火瞭望屋内困守版=014_三号防火瞭望屋内困守版",
+      "@013_三号防火瞭望屋外雪夜=013_三号防火瞭望屋外雪夜，",
+      "@014_三号防火瞭望屋内困守版=014_三号防火瞭望屋内困守版，",
       "【本节背景说明】",
       "后续说明不属于场景名称。",
     ].join("\n"),

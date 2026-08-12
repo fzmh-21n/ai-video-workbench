@@ -115,16 +115,40 @@ function bestAsset(requested, kind, assets) {
   return stemMatches.length === 1 ? stemMatches[0] : null;
 }
 
-function annotateContent(content, matches) {
+function annotateContent(content, matches, role) {
   let next = content;
   const ordered = [...matches].sort((a, b) => b.requested.length - a.requested.length);
   for (const match of ordered) {
     const imageName = fileStem(assetFileName(match.asset));
     const visible = `@${imageName}=${match.requested}`;
-    const suffix = match.source.startsWith(match.requested)
+    let suffix = match.source.startsWith(match.requested)
       ? match.source.slice(match.requested.length)
       : "";
-    if (next.indexOf(visible) >= 0) continue;
+    if (role === "background") suffix = "，";
+    if (role === "people") suffix = `${suffix.replace(/[，,]\s*$/, "")}，`;
+    const existingIndex = next.indexOf(visible);
+    if (existingIndex >= 0) {
+      if (role === "people") {
+        const lineEnd = next.indexOf("\n", existingIndex);
+        const end = lineEnd < 0 ? next.length : lineEnd;
+        const line = next.slice(existingIndex, end).replace(/[，,]\s*$/, "");
+        next = `${next.slice(0, existingIndex)}${line}，${next.slice(end)}`;
+      }
+      if (role === "background") {
+        const afterVisible = existingIndex + visible.length;
+        const trailingDescription = next.slice(afterVisible).match(/^\s*[（(][^\r\n）)]*[）)]/);
+        if (trailingDescription) {
+          next = `${next.slice(0, afterVisible)}${next.slice(afterVisible + trailingDescription[0].length)}`;
+        }
+        const currentAfterVisible = next.slice(afterVisible);
+        if (!/^[，,]/.test(currentAfterVisible)) {
+          next = `${next.slice(0, afterVisible)}，${next.slice(afterVisible)}`;
+        } else if (currentAfterVisible.startsWith(",")) {
+          next = `${next.slice(0, afterVisible)}，${next.slice(afterVisible + 1)}`;
+        }
+      }
+      continue;
+    }
     const index = next.indexOf(match.source);
     if (index < 0 || next.slice(Math.max(0, index - imageName.length - 2), index).indexOf("@") >= 0) continue;
     next = `${next.slice(0, index)}${visible}${suffix}${next.slice(index + match.source.length)}`;
@@ -150,7 +174,9 @@ export function planProjectReferences(prompt, assets) {
         }
       }
       if (asset) matches.push({ ...rule, ...entry, requested, asset });
-      else if (requested) missing.push({ ...rule, ...entry, requested });
+      else if (requested && (rule.role !== "background" || /^\d{3}[_-]/.test(requested))) {
+        missing.push({ ...rule, ...entry, requested });
+      }
     }
   }
 
@@ -161,7 +187,7 @@ export function planProjectReferences(prompt, assets) {
     .sort((a, b) => b.range.contentStart - a.range.contentStart);
   for (const { rule, range } of ranges) {
     const sectionMatches = matches.filter((match) => match.heading === rule.heading);
-    const content = annotateContent(range.content, sectionMatches);
+    const content = annotateContent(range.content, sectionMatches, rule.role);
     annotatedPrompt = `${annotatedPrompt.slice(0, range.contentStart)}${content}${annotatedPrompt.slice(range.end)}`;
   }
   return { annotatedPrompt, matches, missing };

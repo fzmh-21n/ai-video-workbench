@@ -153,13 +153,6 @@ export const FALLBACK_MODEL_LABELS = {
     lajiao_pool: "辣椒 SD2.5 满血 · 720P · 4–30秒 · 1190积分",
     yingtao_pool: "樱桃 SD2.5 满血 · 720P · 30秒 · 2990积分",
   },
-  maxforai: {
-    sd20: "firefly-seedance2-720p",
-    sd25: "mg-seedance-2.5",
-  },
-  globalaiopc: {
-    sd20: "sd_2.0_fast_discount_720p",
-  },
 };
 
 const SD_VERSION_MODELS = {
@@ -178,6 +171,13 @@ const SD_VERSION_MODELS = {
     sd20: "kele_pool",
     sd25: "lajiao_pool",
   },
+  maxforai: {
+    sd20: "firefly-seedance2-720p",
+    sd25: "mg-seedance-2.5",
+  },
+  globalaiopc: {
+    sd20: "sd_2.0_fast_discount_720p",
+  },
 };
 
 export function preferredModelForSdVersion(adapter, version) {
@@ -186,6 +186,10 @@ export function preferredModelForSdVersion(adapter, version) {
 
 export function pollDelayForAdapter(adapter) {
   return adapter === "meaicc" || adapter === "globalaiopc" ? 21_000 : 10_000;
+}
+
+export function submissionTimeoutForAdapter(adapter) {
+  return adapter === "meaicc" ? 600_000 : 180_000;
 }
 
 export function sdVersionForModel(modelName) {
@@ -259,7 +263,7 @@ function rawCapabilityFor(profile) {
         images: 30,
         videos: 10,
         audios: 10,
-        durations: Array.from({ length: 26 }, (_, index) => index + 4),
+        durations: Array.from({ length: 27 }, (_, index) => index + 4),
         resolutions: ["480p", "720p"],
       };
     }
@@ -428,7 +432,9 @@ function rawCapabilityFor(profile) {
   if (adapter === "meaicc") return meaiccCapability();
   if (adapter === "ziyuai") {
     const live = profile?.routeCapabilities?.[profile?.model];
-    return live ? { ...ziyuCapability(), ...live } : ziyuCapability();
+    return live
+      ? { ...ziyuCapability({ id: profile?.model }), ...live }
+      : ziyuCapability({ id: profile?.model });
   }
   if (adapter === "globalaiopc") return globalAiOpcCapability(profile?.model);
   if (adapter === "maxforai") return maxforaiCapability(profile?.model);
@@ -450,6 +456,27 @@ export function capabilityFor(profile) {
     return { ...capability, images: 9, audios: 3, videos: 3 };
   }
   return capability;
+}
+
+export function capabilityLimitIssue(profile, materials, duration) {
+  const capability = capabilityFor(profile);
+  const counts = (materials || []).reduce((result, item) => {
+    const kind = ["image", "audio", "video"].includes(item?.kind) ? item.kind : "image";
+    result[kind] += 1;
+    return result;
+  }, { image: 0, audio: 0, video: 0 });
+  for (const kind of ["image", "audio", "video"]) {
+    const limit = Number(capability[`${kind}s`] || 0);
+    if (counts[kind] > limit) {
+      const label = kind === "image" ? "图片" : kind === "audio" ? "音频" : "视频";
+      return `${profile?.model || "当前模型"} 的${label}参考最多 ${limit} 个，当前提交了 ${counts[kind]} 个`;
+    }
+  }
+  const numericDurations = capability.durations.filter((value) => typeof value === "number");
+  if (numericDurations.length && !numericDurations.includes(duration)) {
+    return `${profile?.model || "当前模型"} 不支持 ${duration} 秒`;
+  }
+  return "";
 }
 
 export function sdVersionForProfile(profile) {
@@ -474,11 +501,11 @@ export function modelForSdVersion(profile, version, availableModels) {
   if (currentModel && sdVersionForProfile(profile) === version) return currentModel;
 
   const preferred = preferredModelForSdVersion(profile?.adapter, version);
-  if (profile?.adapter !== "canseedream") return preferred;
-
+  const dynamicAdapters = new Set(["canseedream", "ziyuai", "maxforai"]);
+  if (!dynamicAdapters.has(profile?.adapter)) return preferred;
   const candidates = Array.isArray(availableModels) && availableModels.length
     ? availableModels
-    : FALLBACK_MODELS.canseedream;
+    : FALLBACK_MODELS[profile?.adapter] || [];
   if (preferred && candidates.includes(preferred)) return preferred;
   return candidates.find((model) => (
     sdVersionForProfile({ ...profile, model }) === version

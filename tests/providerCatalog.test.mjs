@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   DEFAULT_PROFILES,
+  capabilityLimitIssue,
   capabilityFor,
   inferAdapter,
   migrateSavedProfile,
@@ -17,6 +18,13 @@ import {
   lwaigcLimitIssue,
   lwaigcVideoPayload,
 } from "../src/lwaigcCatalog.js";
+
+test("applies server-usable hard limits to additional built-in relay adapters", () => {
+  const max25 = { adapter: "maxforai", model: "mg-seedance-2.5" };
+  assert.equal(capabilityLimitIssue(max25, materials(30, 10, 10), 30), "");
+  assert.match(capabilityLimitIssue(max25, materials(31, 10, 10), 30), /图片参考最多 30 个/);
+  assert.match(capabilityLimitIssue({ adapter: "globalaiopc", model: "seedance_2_0" }, materials(10, 3, 3), 15), /图片参考最多 9 个/);
+});
 
 function materials(images, audios, videos) {
   return [

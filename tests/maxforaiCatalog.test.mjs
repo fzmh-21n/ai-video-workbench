@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { DEFAULT_PROFILES, FALLBACK_MODELS, capabilityFor, inferAdapter } from "../src/providerCatalog.js";
+import { DEFAULT_PROFILES, FALLBACK_MODELS, capabilityFor, inferAdapter, modelForSdVersion } from "../src/providerCatalog.js";
 import { MAXFORAI_VIDEO_MODELS, maxforaiVideoPayload } from "../src/maxforaiCatalog.js";
 
 test("includes MaxForAI with its official base URL and video catalog", () => {
@@ -39,4 +39,10 @@ test("exposes SD2.0 and SD2.5 workbench capacities", () => {
   const sd25 = capabilityFor({ adapter: "maxforai", model: "mg-seedance-2.5" });
   assert.equal(sd20.images, 9); assert.equal(sd20.audios, 3); assert.equal(sd20.videos, 3);
   assert.equal(sd25.images, 30); assert.equal(sd25.audios, 10); assert.equal(sd25.videos, 10);
+});
+
+test("top model switch selects the documented MaxForAI SD2.5 route", () => {
+  const profile = DEFAULT_PROFILES.find((item) => item.id === "maxforai");
+  assert.equal(modelForSdVersion(profile, "sd25", MAXFORAI_VIDEO_MODELS), "mg-seedance-2.5");
+  assert.equal(modelForSdVersion({ ...profile, model: "mg-seedance-2.5" }, "sd20", MAXFORAI_VIDEO_MODELS), "firefly-seedance2-720p");
 });

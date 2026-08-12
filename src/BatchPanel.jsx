@@ -3,13 +3,15 @@ import {
   batchSerializable,
   canBatchMatch,
   canBatchSubmit,
-  runWithConcurrency,
+  parseRecoveredTaskIds,
+  runOrderedStaggered,
   splitBatchPrompts,
 } from "./batchPrompts.js";
 import { internalizeProjectAliases, planProjectReferences } from "./projectReferences.js";
 import { allTasks, putTasks } from "./taskStore.js";
 import { pollDelayForAdapter } from "./providerCatalog.js";
 import { normalizedTaskProgress } from "./taskProgress.js";
+import { diagnosticHeaders, recordDiagnostic } from "./diagnostics.js";
 
 const STORAGE_KEY = "video-workbench-batch-v1";
 const CONCURRENCY_OPTIONS = [1, 2, 3, 5, 10, 20];
@@ -99,6 +101,7 @@ export default function BatchPanel({
   const [items, setItems] = useState(restored?.items || []);
   const [sourceName, setSourceName] = useState(restored?.sourceName || "");
   const [concurrency, setConcurrency] = useState(restored?.concurrency || 3);
+  const [submissionMode, setSubmissionMode] = useState(restored?.submissionMode || "ordered_rush");
   const [allowMissingImages, setAllowMissingImages] = useState(false);
   const [uploaded, setUploaded] = useState(restored?.uploaded || {});
   const [uploadedProfileId, setUploadedProfileId] = useState(restored?.uploadedProfileId || "");
@@ -113,10 +116,11 @@ export default function BatchPanel({
       items: batchSerializable(items),
       sourceName,
       concurrency,
+      submissionMode,
       uploaded,
       uploadedProfileId,
     }));
-  }, [items, sourceName, concurrency, uploaded, uploadedProfileId]);
+  }, [items, sourceName, concurrency, submissionMode, uploaded, uploadedProfileId]);
 
   useEffect(() => {
     if (uploadedProfileId && uploadedProfileId !== activeProfile.id) {
@@ -345,364 +349,77 @@ export default function BatchPanel({
     return reference.projectAssetKey || `manual:${item.id}:${reference.id}`;
   }
 
-  async function preuploadAll() {
-    if (!apiKey) return onNotice("请先配置当前中转站的 API Key");
+  async function preuploadItems(targetItems, quiet = false) {
     const unique = new Map();
-    for (const item of items) {
+    const nextUploaded = uploadedProfileId === activeProfile.id ? { ...uploaded } : {};
+    for (const item of targetItems) {
       for (const reference of item.references || []) {
         const key = uploadKey(item, reference);
         const file = resolveFile(reference);
-        if (file && (!uploaded[key] || Number(uploaded[key].expiresAt) <= Date.now())) {
+        if (file && (!nextUploaded[key] || Number(nextUploaded[key].expiresAt) <= Date.now())) {
           unique.set(key, { item, reference, file });
         }
       }
     }
-    if (!unique.size) return onNotice("没有需要预上传的本地素材；可能尚未匹配，或全部已经预上传");
-    setBusy("uploading");
-    try {
-      const entries = [...unique.entries()];
-      const nextUploaded = { ...uploaded };
-      for (let offset = 0; offset < entries.length; offset += 50) {
-        const chunk = entries.slice(offset, offset + 50);
-        const form = new FormData();
-        const meta = chunk.map(([key, value], fileIndex) => {
-          form.append("references", value.file, value.file.name);
-          return {
-            projectAssetKey: key,
-            tag: key,
-            kind: value.reference.kind,
-            name: value.reference.name,
-            durationSeconds: value.reference.durationSeconds || null,
-            fileIndex,
-          };
-        });
-        form.set("referenceMeta", JSON.stringify(meta));
-        const response = await fetch("/api/materials", { method: "POST", headers, body: form });
-        const body = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(body.message || "素材预上传失败");
-        for (const material of body.materials || []) {
-          nextUploaded[material.key] = { url: material.url, expiresAt: body.expiresAt };
-        }
-        onNotice(`正在预上传素材：${Math.min(offset + chunk.length, entries.length)}/${entries.length}`);
-      }
-      setUploaded(nextUploaded);
-      setUploadedProfileId(activeProfile.id);
-      onNotice(`预上传完成：${entries.length} 个唯一素材。相同素材在不同章节中会复用；建议50分钟内提交`);
-    } catch (error) {
-      onNotice(error.message || "预上传失败");
-    } finally {
-      setBusy("");
+    if (!unique.size) {
+      if (!quiet) onNotice("没有需要预上传的本地素材；可能尚未匹配，或全部已经预上传");
+      return nextUploaded;
     }
-  }
-
-  function parametersFor(item) {
-    const override = item.overrideEnabled ? item.overrides || {} : {};
-    return {
-      duration: override.duration ?? duration,
-      resolution: override.resolution ?? resolution,
-      ratio: override.ratio ?? ratio,
-      seed: override.seed ?? seed,
-      syncAudio: override.syncAudio ?? syncAudio,
-      quantity: override.quantity ?? quantity,
-    };
-  }
-
-  function issueFor(item) {
-    const counts = countsFor(item.references || []);
-    const exceeded = KINDS.filter((kind) => counts[kind] > (capability[`${kind}s`] || 0));
-    if (exceeded.length) return exceeded.map((kind) => `${LABELS[kind]} ${counts[kind]}/${capability[`${kind}s`] || 0}`).join("、");
-    if (item.missingImages?.length && !allowMissingImages) return `缺少图片：${item.missingImages.join("、")}`;
-    return "";
-  }
-
-  async function submitOne(item, batchId) {
-    const params = parametersFor(item);
-    const references = reindex(item.references || []);
-    const translated = internalizeProjectAliases(item.prompt.trim(), references);
-    const submittedPrompt = [fixedContent.trim(), translated].filter(Boolean).join("\n\n");
-    const form = new FormData();
-    form.set("prompt", submittedPrompt);
-    form.set("duration", String(params.duration));
-    form.set("resolution", params.resolution);
-    form.set("aspectRatio", params.ratio);
-    form.set("seed", params.seed || "");
-    form.set("quantity", String(params.quantity));
-    form.set("syncAudio", String(params.syncAudio));
-    form.set("autoReference", String(autoReference));
-    let fileIndex = 0;
-    const referenceMeta = references.map((reference) => {
-      const cached = uploaded[uploadKey(item, reference)];
-      const file = cached?.url ? null : resolveFile(reference);
-      const meta = {
-        tag: reference.tag,
-        kind: reference.kind,
-        name: reference.name,
-        subType: reference.subType || "reference",
-        durationSeconds: reference.durationSeconds || null,
-        url: cached?.url || "",
-        fileIndex: file ? fileIndex++ : null,
-      };
-      if (file) form.append("references", file, file.name);
-      return meta;
-    });
-    form.set("referenceMeta", JSON.stringify(referenceMeta));
-    const response = await fetch("/api/tasks", { method: "POST", headers, body: form });
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      const error = new Error(body.message || "任务提交失败");
-      error.submissionUnknown = Boolean(body.submissionUnknown || body.code === "SUBMISSION_UNKNOWN");
-      throw error;
-    }
-    const created = Array.isArray(body.tasks) ? body.tasks : [body];
-    const createdAtMs = Date.now();
-    const records = created.map((task, index) => ({
-      ...task,
-      profileId: activeProfile.id,
-      providerName: activeProfile.name,
-      model: activeProfile.model,
-      title: `第${String(item.section).padStart(2, "0")}节-${activeProfile.model}${created.length > 1 ? `-${index + 1}` : ""}`,
-      prompt: submittedPrompt,
-      projectName: projectName || "未归类",
-      batchId,
-      batchTitle: item.sourceName
-        ? item.sourceName.replace(/\.txt$/i, "")
-        : sourceName ? sourceName.replace(/\.txt$/i, "") : `批量任务 ${new Date(createdAtMs).toLocaleString("zh-CN")}`,
-      batchSection: item.section,
-      batchOrder: Number(item.section) * 10 + index,
-      createdAtMs: createdAtMs + index,
-      nextPollAt: createdAtMs + pollDelayForAdapter(activeProfile.adapter),
-    }));
-    await putTasks(records);
-    return records;
-  }
-
-  async function submitSelected(selectedItems, confirmAll = false) {
-    if (!apiKey) return onNotice("请先配置当前中转站的 API Key");
-    const candidates = selectedItems.filter(canBatchSubmit);
-    const blocked = candidates.filter(issueFor);
-    const ready = candidates.filter((item) => !issueFor(item));
-    if (!ready.length) return onNotice(blocked.length ? "没有可提交章节，请先处理标红问题" : "没有已匹配且待提交的新章节；提交中和生成中的章节已自动跳过");
-    const totalTasks = ready.reduce((total, item) => total + Number(parametersFor(item).quantity || 1), 0);
-    if (confirmAll && !window.confirm(`准备提交 ${ready.length} 节，共创建 ${totalTasks} 条任务。\n中转站：${activeProfile.name}\n模型：${activeProfile.model}\n同时提交：${concurrency} 节\n\n确认开始吗？`)) return;
-    setBusy("submitting");
-    setItems((values) => values.map((item) => ready.some((candidate) => candidate.id === item.id)
-      ? { ...item, status: "submitting", error: "" }
-      : item));
-    let successes = 0;
-    let failures = 0;
-    const batchId = uid("batch");
-    await runWithConcurrency(ready, concurrency, async (item) => {
-      try {
-        const records = await submitOne(item, batchId);
-        successes += 1;
-        setItems((values) => values.map((value) => value.id === item.id
-          ? {
-              ...value,
-              status: records.every((record) => record.status === "completed") ? "generated" : "generating",
-              progress: records.every((record) => record.status === "completed") ? 100 : Math.round(records.reduce(
-                (total, record) => total + normalizedTaskProgress(record.status, record.progress),
-                0,
-              ) / records.length),
-              error: "",
-              taskIds: records.map((record) => record.id),
-              expanded: false,
-            }
-          : value));
-      } catch (error) {
-        failures += 1;
-        setItems((values) => values.map((value) => value.id === item.id
-          ? {
-              ...value,
-              status: error.submissionUnknown ? "submission_unknown" : "failed",
-              error: error.message || "提交失败",
-              expanded: true,
-            }
-          : value));
-      }
-    });
-    setBusy("");
-    onTasksAdded();
-    onNotice(`批量提交完成：成功 ${successes} 节，失败 ${failures} 节${blocked.length ? `，另有 ${blocked.length} 节因缺图或素材超限未提交` : ""}`);
-  }
-
-  async function recoverMeaiccTasks() {
-    const value = recoverText;
-    if (!value?.trim()) return;
-    const taskIds = [...new Set(value.match(/wr_[0-9a-f-]+/gi) || [])];
-    if (!taskIds.length) return onNotice("没有识别到 MEAICC 任务 ID");
-    const chapters = [...items].sort((a, b) => Number(a.section) - Number(b.section));
-    if (taskIds.length !== chapters.length) {
-      return onNotice(`识别到 ${taskIds.length} 个任务 ID，但当前有 ${chapters.length} 节。为避免挂错章节，本次没有导入。`);
-    }
-    setBusy("recovering");
-    try {
-      const response = await fetch("/api/tasks/recover", {
-        method: "POST",
-        headers: { ...headers, "Content-Type": "application/json" },
-        body: JSON.stringify({ taskIds }),
+    const entries = [...unique.entries()];
+    for (let offset = 0; offset < entries.length; offset += 50) {
+      const chunk = entries.slice(offset, offset + 50);
+      const form = new FormData();
+      const meta = chunk.map(([key, value], fileIndex) => {
+        form.append("references", value.file, value.file.name);
+        return {
+          projectAssetKey: key,
+          tag: key,
+          kind: value.reference.kind,
+          name: value.reference.name,
+          durationSeconds: value.reference.durationSeconds || null,
+          fileIndex,
+        };
       });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(body.message || "找回任务失败");
-      const batchId = uid("recovered-batch");
-      const createdAtMs = Date.now();
-      const records = body.tasks.map((task, index) => ({
-        ...task,
-        profileId: activeProfile.id,
+      form.set("referenceMeta", JSON.stringify(meta));
+      const requestId = uid("material-upload");
+      const startedAt = performance.now();
+      recordDiagnostic({
+        adapter: activeProfile.adapter,
         providerName: activeProfile.name,
         model: activeProfile.model,
-        title: `第${String(chapters[index].section).padStart(2, "0")}节-${activeProfile.model}`,
-        prompt: chapters[index].prompt,
-        projectName: projectName || "未归类",
-        batchId,
-        batchTitle: `${(sourceName || "批量任务").replace(/\.txt$/i, "")}（找回）`,
-        batchSection: chapters[index].section,
-        batchOrder: Number(chapters[index].section) * 10,
-        createdAtMs: createdAtMs + index,
-        nextPollAt: Date.now(),
-      }));
-      await putTasks(records);
-      setItems((values) => values.map((item) => {
-        const index = chapters.findIndex((chapter) => chapter.id === item.id);
-        return index < 0 ? item : { ...item, status: "generating", progress: 0, error: "", taskIds: [records[index].id] };
-      }));
-      setRecoverOpen(false);
-      setRecoverText("");
-      onTasksAdded();
-      onNotice(`已找回 ${records.length} 条 MEAICC 任务，正在按中转后台状态查询；没有重新提交。`);
-    } catch (error) {
-      onNotice(error.message || "找回任务失败");
-    } finally {
-      setBusy("");
-    }
-  }
-
-  function updateItem(id, patch) {
-    setItems((values) => values.map((item) => item.id === id ? { ...item, ...patch } : item));
-  }
-
-  const validUploaded = Object.values(uploaded).filter((value) => Number(value.expiresAt) > Date.now()).length;
-
-  return (
-    <div className="batch-panel">
-      <div className="project-bar">
-        <div><strong>{projectName ? `当前项目：${projectName}` : "当前未选择项目文件夹"}</strong><span>批量匹配只读取文件名；预上传或提交时才发送素材</span></div>
-        <div>
-          {window.showDirectoryPicker ? (
-            <button
-              className="secondary-button"
-              onClick={projectNeedsPermission ? onRestoreProjectFolder : onChooseProjectFolder}
-            >
-              {projectNeedsPermission ? "恢复项目" : projectName ? "更换项目" : "选择项目文件夹"}
-            </button>
-          ) : (
-            <label className="secondary-button file-button">选择项目文件夹<input type="file" multiple hidden webkitdirectory="" directory="" onChange={(event) => { onProjectFolder(event.target.files); event.target.value = ""; }} /></label>
-          )}
-          <button className="secondary-button" onClick={() => textInput.current?.click()}>导入批量 TXT</button>
-          <button className="secondary-button batch-clear-button" disabled={!items.length || !!busy} onClick={clearBatch}>一键清空</button>
-          <input ref={textInput} type="file" hidden accept="text/plain,.txt" onChange={(event) => { importText(event.target.files?.[0]); event.target.value = ""; }} />
-        </div>
-      </div>
-
-      <label className="field-label fixed-label">固定内容<span>提交每一节时自动放在最前方</span></label>
-      <textarea className="fixed-content" value={fixedContent} onChange={(event) => setFixedContent(event.target.value)} />
-
-      <div className="batch-toolbar">
-        <div><strong>{sourceName || "尚未导入 TXT"}</strong><span>{items.length} 节 · 已匹配 {summary.matched || 0} · 生成中 {(summary.generating || 0) + (summary.submitted || 0) + (summary.submitting || 0)} · 已生成 {summary.generated || 0} · 失败 {(summary.failed || 0) + (summary.generation_failed || 0)}</span></div>
-        <button disabled={!!busy || !items.length} onClick={matchAll}>{busy === "matching" ? "匹配中…" : "全部一键参考"}</button>
-        <button disabled={!!busy || !items.length} onClick={preuploadAll}>{busy === "uploading" ? "上传中…" : `预上传全部素材${validUploaded ? `（${validUploaded}）` : ""}`}</button>
-        {activeProfile.adapter === "meaicc" && (
-          <button disabled={!!busy || !items.length} onClick={() => setRecoverOpen((value) => !value)}>{busy === "recovering" ? "找回中…" : "找回MEAICC任务"}</button>
-        )}
-        <label><span>同时提交</span><select value={concurrency} onChange={(event) => setConcurrency(Number(event.target.value))}>{CONCURRENCY_OPTIONS.map((value) => <option key={value} value={value}>{value} 条</option>)}</select></label>
-        <button className="primary-button" disabled={!!busy || !items.length} onClick={() => submitSelected(items, true)}>{busy === "submitting" ? "批量提交中…" : "一键并发提交"}</button>
-      </div>
-
-      {recoverOpen && activeProfile.adapter === "meaicc" && (
-        <div className="notice">
-          <label><span>按提交先后顺序粘贴任务 ID（每行一个）</span>
-            <textarea aria-label="MEAICC任务ID" value={recoverText} onChange={(event) => setRecoverText(event.target.value)} />
-          </label>
-          <button disabled={!!busy || !recoverText.trim()} onClick={recoverMeaiccTasks}>确认找回，不重新生成</button>
-        </div>
-      )}
-
-      <div className="settings-grid batch-common-settings">
-        <label><span>公共时长</span><select value={duration} onChange={(event) => setDuration(event.target.value === "auto" ? "auto" : Number(event.target.value))}>{capability.durations.map((value) => <option key={value} value={value}>{value === "auto" ? "自动" : `${value} 秒`}</option>)}</select></label>
-        <label><span>公共清晰度</span><select value={resolution} onChange={(event) => setResolution(event.target.value)}>{capability.resolutions.map((value) => <option key={value}>{value}</option>)}</select></label>
-        <label><span>公共比例</span><select value={ratio} onChange={(event) => setRatio(event.target.value)}>{capability.ratios.map((value) => <option key={value}>{value}</option>)}</select></label>
-        <label><span>生成数量</span><select value={quantity} onChange={(event) => setQuantity(Number(event.target.value))}>{[1, 2, 3, 4].map((value) => <option key={value}>{value}</option>)}</select></label>
-        <label><span>随机种子</span><input value={seed} onChange={(event) => setSeed(event.target.value)} disabled={!capability.seed} /></label>
-      </div>
-        <label className="check-row"><input type="checkbox" checked={syncAudio} disabled={capability.syncAudioFixed} onChange={(event) => setSyncAudio(event.target.checked)} />生成同步音频</label>
-      <label className="check-row warning-check"><input type="checkbox" checked={allowMissingImages} onChange={(event) => setAllowMissingImages(event.target.checked)} />仍然提交缺少图片的章节</label>
-      <div className="notice" role="status">ⓘ {onNotice && notice}</div>
-
-      <div className="batch-list">
-        {items.map((item) => {
-          const counts = countsFor(item.references || []);
-          const issue = issueFor(item);
-          return (
-            <article className={`batch-card ${issue ? "has-issue" : ""}`} key={item.id}>
-              <button className="batch-card-head" onClick={() => updateItem(item.id, { expanded: !item.expanded })}>
-                <strong>第{item.section}节｜{item.title}</strong>
-                <span className="batch-card-summary">
-                  <span>图{counts.image} · 音{counts.audio} · 视{counts.video}</span>
-                  <span className={`batch-status batch-status-${item.status || "pending"}`}>{STATUS_LABELS[item.status] || "待匹配"}</span>
-                </span>
-              </button>
-              {["submitted", "submitting", "generating"].includes(item.status) && (
-                <div className="batch-item-progress">
-                  <div className="progress-track"><span style={{ width: `${Number(item.progress) || 0}%` }} /></div>
-                  <b>{Number(item.progress) || 0}%</b>
-                </div>
-              )}
-              {issue && <div className="batch-issue">{issue}</div>}
-              {item.error && <div className="batch-error">{item.error}</div>}
-              {item.expanded && (
-                <div className="batch-card-body">
-                  <textarea value={item.prompt} onChange={(event) => updateItem(item.id, { prompt: event.target.value })} />
-                  <div className="batch-reference-list">{(item.references || []).map((reference) => (
-                    <span key={reference.id} className={reference.kind}>
-                      {reference.tag} {reference.name}{reference.source === "manual" ? "（手动）" : ""}
-                      <button
-                        type="button"
-                        className="batch-reference-remove"
-                        title="删除这个素材"
-                        aria-label={`删除素材 ${reference.name}`}
-                        onClick={() => removeItemReference(item.id, reference.id)}
-                      >×</button>
-                    </span>
-                  ))}</div>
-                  <div className="batch-card-actions">
-                    <button disabled={!!busy} onClick={() => matchOne(item.id)}>本节一键参考</button>
-                    <label className="secondary-button file-button">手动添加素材<input type="file" multiple hidden accept="image/*,audio/*,video/*,.mov,.mp4" onChange={(event) => { addManualFiles(item.id, event.target.files); event.target.value = ""; }} /></label>
-                    <button disabled={!!busy || !!issue} onClick={() => submitSelected([item])}>开始生成本节</button>
-                    {item.status === "submission_unknown" && (
-                      <button
-                        type="button"
-                        disabled={!!busy}
-                        onClick={() => {
-                          if (window.confirm("请确认你已经在 MEAICC 后台核对过，本条确实没有创建任务。继续后，本条才会恢复为可提交状态。")) {
-                            updateItem(item.id, { status: "matched", error: "" });
-                          }
-                        }}
-                      >确认后台无任务，允许重试</button>
-                    )}
-                    <label className="override-toggle"><input type="checkbox" checked={item.overrideEnabled} onChange={(event) => updateItem(item.id, { overrideEnabled: event.target.checked })} />本节单独设置</label>
-                  </div>
-                  {item.overrideEnabled && (
-                    <div className="batch-overrides">
-                      <select value={item.overrides.duration ?? duration} onChange={(event) => updateItem(item.id, { overrides: { ...item.overrides, duration: Number(event.target.value) } })}>{capability.durations.filter((value) => typeof value === "number").map((value) => <option key={value}>{value}</option>)}</select>
-                      <select value={item.overrides.resolution ?? resolution} onChange={(event) => updateItem(item.id, { overrides: { ...item.overrides, resolution: event.target.value } })}>{capability.resolutions.map((value) => <option key={value}>{value}</option>)}</select>
-                      <select value={item.overrides.ratio ?? ratio} onChange={(event) => updateItem(item.id, { overrides: { ...item.overrides, ratio: event.target.value } })}>{capability.ratios.map((value) => <option key={value}>{value}</option>)}</select>
-                    </div>
-                  )}
-                </div>
-              )}
-            </article>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
+        requestId,
+        stage: "client_materials_upload_started",
+        fileCount: chunk.length,
+        totalBytes: chunk.reduce((total, [, value]) => total + Number(value.file?.size || 0), 0),
+      });
+      let response;
+      try {
+        response = await fetch("/api/materials", {
+          method: "POST",
+          headers: { ...headers, ...diagnosticHeaders({ requestId }) },
+          body: form,
+        });
+      } catch (error) {
+        recordDiagnostic({
+          adapter: activeProfile.adapter,
+          providerName: activeProfile.name,
+          model: activeProfile.model,
+          requestId,
+          stage: "client_materials_upload_exception",
+          durationMs: Math.round(performance.now() - startedAt),
+          error: error.message || "素材预上传连接失败",
+        });
+        throw error;
+      }
+      const body = await response.json().catch(() => ({}));
+      recordDiagnostic({
+        adapter: activeProfile.adapter,
+        providerName: activeProfile.name,
+        model: activeProfile.model,
+        requestId,
+        stage: response.ok ? "client_materials_upload_completed" : "client_materials_upload_failed",
+        durationMs: Math.round(performance.now() - startedAt),
+        status: response.status,
+        materialCount: body.materials?.length || 0,
+        error: response.ok ? "" : body.message || "素材预上传失败",
+      

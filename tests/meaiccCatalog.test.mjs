@@ -15,6 +15,7 @@ import {
   migrateSavedProfile,
   pollDelayForAdapter,
   preferredModelForSdVersion,
+  submissionTimeoutForAdapter,
   sdVersionForModel,
 } from "../src/providerCatalog.js";
 
@@ -76,6 +77,11 @@ test("maps MEAICC only to the SD2.0 switch", () => {
 test("keeps every MEAICC status query more than 20 seconds apart", () => {
   assert.ok(pollDelayForAdapter("meaicc") > 20_000);
   assert.equal(pollDelayForAdapter("lwaigc"), 10_000);
+});
+
+test("waits up to ten minutes for an ambiguous MEAICC task ID response", () => {
+  assert.equal(submissionTimeoutForAdapter("meaicc"), 600_000);
+  assert.equal(submissionTimeoutForAdapter("maxforai"), 180_000);
 });
 
 test("builds the exact nested MEAICC text-to-video payload", () => {

@@ -1,26 +1,24 @@
 export const ZIYU_BASE_URL = "https://ziyuai.vip";
 
 export function ziyuCapability(live = {}) {
+  const sd25 = /(?:seedance|sd)[-. ]?2[.-]?5|sd25/i.test(String(live.name || live.id || ""));
   const durations = Array.isArray(live.allowedDurations) && live.allowedDurations.length
     ? live.allowedDurations.map(Number).filter(Number.isFinite)
-    : [5, 10, 15];
+    : sd25 ? Array.from({ length: 27 }, (_, index) => index + 4) : [5, 10, 15];
   const ratios = Array.isArray(live.allowedRatios) && live.allowedRatios.length
     ? live.allowedRatios
     : ["16:9", "9:16", "1:1", "3:4", "4:3"];
   return {
-    // 工作台不预判 SD2.0 上游素材限制，统一按 9/3/3 放行。
-    images: 9,
-    videos: 3,
-    audios: 3,
+    images: sd25 ? 30 : 9,
+    videos: sd25 ? 10 : 3,
+    audios: sd25 ? 10 : 3,
     durations,
     resolutions: [String(live.resolution || "720p")],
     ratios,
     seed: false,
     syncAudio: true,
     syncAudioFixed: false,
-    _sdVersion: /(?:seedance|sd)[-. ]?2[.-]?5|sd25/i.test(String(live.name || live.id || ""))
-      ? "sd25"
-      : "sd20",
+    _sdVersion: sd25 ? "sd25" : "sd20",
   };
 }
 

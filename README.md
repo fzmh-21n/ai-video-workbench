@@ -11,6 +11,8 @@
 - LWAIGC
 - MEAICC / 林木森AI
 - Ziyu AI / 紫域AI
+- GlobalAiOpc / 全球AI
+- MaxForAI
 - 通用 New API 中转站
 
 ## 主要功能
@@ -29,6 +31,8 @@
 - 同一时间只加载一个视频，收起、切换任务或翻页后立即释放视频内存。
 - 支持任务记录 JSON 备份的导出和导入；备份不包含视频文件和 API Key。
 - 创建任务的 POST 请求不会在结果不明时自动重发，避免重复扣费。
+- 批量模式会先复用预上传素材，再按章节号使用“有序抢位”或“严格顺序”提交；任务中心始终按章节号排列。
+- 支持按当前中转站导出浏览器与本地服务的分阶段诊断日志；日志不会保存 API Key、密码、提示词正文或素材 URL。
 
 ## 下载源码
 
@@ -105,6 +109,15 @@ http://localhost:8787/
 9. 点击“开始生成”。只有这一步才会上传本次使用的本地素材并创建中转任务。
 10. 在右侧任务中心查看进度，点击任务后加载、播放或手动下载视频。
 
+## 批量提交与诊断日志
+
+- “有序抢位”会先按章节号排序，以短间隔发出请求，并受“最大同时在途”限制；速度优先，但中转站内部仍可能自行重新排队。
+- “严格顺序”会等上一节拿到任务 ID 后才提交下一节，顺序最可靠但速度较慢。
+- 开始批量提交前会自动预上传本批次的唯一素材，相同素材在不同章节中复用；也可以提前点击“预上传全部素材”。
+- MEAICC 创建任务最长等待 10 分钟。结果不明时不会自动重试，避免重复扣费；可用“章节号=任务ID”找回 `wr_...` 或 UUID 任务。
+- 测试某家中转前可点击“清空本次日志”，测试结束后点击“导出当前中转日志”，在 Chrome 保存对话框中选择桌面或其他文件夹。
+- 日志中的 `materials_*` / `*_upload_*` 表示素材阶段，`provider_submit_started` 到 `provider_task_ids_received` 表示等待中转返回任务 ID 的阶段。
+
 ## 一键参考的提示词格式
 
 人物图片：
@@ -159,6 +172,9 @@ http://localhost:8787/
 - CanSeeDream：`https://see.ximeiedu.org`
 - LWAIGC：`https://ai.lwaigc.cn`
 - MEAICC / 林木森AI：`https://api.meaicc.com`
+- Ziyu AI：`https://ziyuai.vip`
+- GlobalAiOpc：`https://zcbservice.aizfw.cn/kyyReactApiServer`
+- MaxForAI：`https://maxforai.top`
 
 CanSeeDream 的旧地址 `https://canseedream.com` 会自动迁移到当前接口域名，避免跨域跳转导致 Bearer Key 丢失。
 
@@ -177,6 +193,7 @@ CanSeeDream 的旧地址 `https://canseedream.com` 会自动迁移到当前接�
 - 中转站普通配置、固定内容和任务记录保存在本机浏览器中。
 - `.workbench-data`、运行密钥、临时上传文件、日志和 `node_modules` 不应上传 GitHub。
 - 不要在截图、聊天或公开仓库中泄露 API Key。
+- 工作台不会继承 `HTTP_PROXY` 等环境变量代理；系统网卡/TUN/VPN 仍可能接管本机 Node 服务的网络请求。
 
 ## 源码结构
 
@@ -191,4 +208,4 @@ README.md            下载、启动和使用说明
 
 ## 当前版本说明
 
-目前是网页版测试版本。受浏览器安全限制，刷新页面后需要重新选择项目文件夹。后续可封装为 Windows 安装版，并加入原生项目路径记忆和本地 SQLite 任务数据库。
+目前是网页版测试版本。Chromium 浏览器可以记住最近选择的项目目录；刷新后如果权限未自动恢复，点击“恢复项目”重新授权即可。后续可封装为 Windows 安装版，并加入原生项目路径记忆和本地 SQLite 任务数据库。

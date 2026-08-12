@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { DEFAULT_PROFILES, capabilityFor, inferAdapter, migrateSavedProfile } from "../src/providerCatalog.js";
+import { DEFAULT_PROFILES, capabilityFor, inferAdapter, migrateSavedProfile, modelForSdVersion } from "../src/providerCatalog.js";
 import { ziyuJobFrom, ziyuJobPayload, ziyuModels, ziyuTaskId } from "../src/ziyuCatalog.js";
 
 test("includes Ziyu AI as a built-in dedicated provider", () => {
@@ -59,6 +59,24 @@ test("builds the exact Ziyu jobs request", () => {
       video: [{ url: "https://example.com/a.mp4" }],
     },
   });
+});
+
+test("recognizes and switches a live Ziyu SD2.5 model at full capacity", () => {
+  const catalog = ziyuModels({ models: [
+    { id: "model_sd20", name: "Seedance 2.0", type: "video" },
+    { id: "model_sd25", name: "Seedance 2.5", type: "video" },
+  ] });
+  const profile = {
+    adapter: "ziyuai",
+    model: "model_sd20",
+    routeCapabilities: catalog.capabilities,
+  };
+  assert.equal(modelForSdVersion(profile, "sd25", catalog.models), "model_sd25");
+  const capability = capabilityFor({ ...profile, model: "model_sd25" });
+  assert.deepEqual(
+    { images: capability.images, audios: capability.audios, videos: capability.videos, maxDuration: Math.max(...capability.durations) },
+    { images: 30, audios: 10, videos: 10, maxDuration: 30 },
+  );
 });
 
 test("reads the nested job returned by the official Ziyu API", () => {

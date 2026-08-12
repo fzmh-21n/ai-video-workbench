@@ -35,7 +35,7 @@ export function maxforaiCapability(model) {
       ? [15]
       : imageOnly
         ? [5, 10, 15]
-        : Array.from({ length: sd25 ? 26 : 12 }, (_, index) => index + 4),
+        : Array.from({ length: sd25 ? 27 : 12 }, (_, index) => index + 4),
     resolutions: resolutionFor(model),
     ratios: h3
       ? ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9", "auto"]

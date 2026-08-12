@@ -143,6 +143,16 @@ export async function getPendingTasks(limit = 10) {
   return [...queued, ...processing];
 }
 
+export async function getFailedTasks(limit = 10) {
+  const database = await openTaskDatabase();
+  const transaction = database.transaction(STORE_NAME, "readonly");
+  const index = transaction.objectStore(STORE_NAME).index("status");
+  const items = await requestResult(index.getAll(IDBKeyRange.only("failed")));
+  return items
+    .sort((left, right) => Number(right.createdAtMs || 0) - Number(left.createdAtMs || 0))
+    .slice(0, limit);
+}
+
 export async function allTasks() {
   const database = await openTaskDatabase();
   const transaction = database.transaction(STORE_NAME, "readonly");

@@ -173,7 +173,7 @@ export default function BatchPanel({
   }, [items, sourceName]);
 
   useEffect(() => {
-    const hasTrackedTasks = items.some((item) => item.taskIds?.length && ["submitted", "generating", "submitting"].includes(item.status));
+    const hasTrackedTasks = items.some((item) => item.taskIds?.length && ["submitted", "generating", "submitting", "generation_failed"].includes(item.status));
     if (!hasTrackedTasks) return undefined;
     let cancelled = false;
     async function syncGeneratedStatuses() {
@@ -182,7 +182,7 @@ export default function BatchPanel({
         if (cancelled) return;
         const byId = new Map(stored.map((task) => [task.id, task]));
         setItems((values) => values.map((item) => {
-          if (!item.taskIds?.length || !["submitted", "generating", "submitting"].includes(item.status)) return item;
+          if (!item.taskIds?.length || !["submitted", "generating", "submitting", "generation_failed"].includes(item.status)) return item;
           const tracked = item.taskIds.map((id) => byId.get(id)).filter(Boolean);
           if (!tracked.length) return item;
           const progress = Math.round(tracked.reduce(
@@ -208,7 +208,7 @@ export default function BatchPanel({
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [items.some((item) => item.taskIds?.length && ["submitted", "generating", "submitting"].includes(item.status))]);
+  }, [items.some((item) => item.taskIds?.length && ["submitted", "generating", "submitting", "generation_failed"].includes(item.status))]);
 
   const summary = useMemo(() => items.reduce((value, item) => {
     value[item.status] = (value[item.status] || 0) + 1;

@@ -17,6 +17,7 @@ import {
 } from "./projectReferences.js";
 import {
   allTasks,
+  getFailedTasks,
   getPendingTasks,
   listTasks,
   projectNames as getTaskProjectNames,
@@ -476,7 +477,18 @@ function Workbench({ onLogout }) {
     if (!taskDatabaseReady) return undefined;
     const interval = window.setInterval(async () => {
       if (pollingRef.current) return;
-      const pending = await getPendingTasks(10).catch(() => []);
+      const activePending = await getPendingTasks(10).catch(() => []);
+      const failedCandidates = activePending.length < 10
+        ? await getFailedTasks(50).catch(() => [])
+        : [];
+      const recoverableMeaicc = failedCandidates.filter((task) => {
+        const profile = profilesRef.current.find((item) => item.id === task.profileId);
+        const genericFailure = /^(视频生成失败|video generation failed)$/i.test(String(task.error || "").trim());
+        return profile?.adapter === "meaicc"
+          && genericFailure
+          && Number(task.meaiccFailureChecks || 0) < 30;
+      });
+      const pending = [...activePending, ...recoverableMeaicc].slice(0, 10);
       if (!pending.length) return;
       pollingRef.current = true;
       try {
@@ -491,7 +503,27 @@ function Workbench({ onLogout }) {
                 headers: headersFor(profile),
               });
               const body = await response.json().catch(() => ({}));
-              if (response.ok) return { ...body, networkWarning: "", nextPollAt };
+              if (response.ok) {
+                const genericMeaiccFailure = profile.adapter === "meaicc"
+                  && body.status === "failed"
+                  && /^(视频生成失败|video generation failed)$/i.test(String(body.error || "").trim());
+                if (genericMeaiccFailure) {
+                  const checks = Number(task.meaiccFailureChecks || 0) + 1;
+                  if (checks < 30) {
+                    return {
+                      id: task.id,
+                      status: "processing",
+                      progress: Math.max(Number(task.progress || 0), 30),
+                      error: "",
+                      meaiccFailureChecks: checks,
+                      nextPollAt,
+                      networkWarning: `MEAICC 暂时返回了无原因失败，工作台正在自动复核（${checks}/30）`,
+                    };
+                  }
+                  return { ...body, meaiccFailureChecks: checks, networkWarning: "", nextPollAt };
+                }
+                return { ...body, meaiccFailureChecks: 0, networkWarning: "", nextPollAt };
+              }
               if (TRANSIENT_NETWORK_STATUSES.has(response.status)) {
                 return {
                   id: task.id,

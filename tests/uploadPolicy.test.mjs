@@ -1,7 +1,25 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { mediaUploadMode, tmpfilesDirectUrl } from "../src/uploadPolicy.js";
+import {
+  AUTOMATIC_UPLOAD_SERVICES,
+  createUploadCircuitBreaker,
+  mediaUploadMode,
+  tmpfilesDirectUrl,
+} from "../src/uploadPolicy.js";
+
+test("tries Uguu before Litterbox and Tmpfiles", () => {
+  assert.deepEqual(AUTOMATIC_UPLOAD_SERVICES, ["Uguu", "Litterbox", "Tmpfiles"]);
+});
+
+test("opens the Litterbox circuit after consecutive failures in this server run", () => {
+  const circuit = createUploadCircuitBreaker({ failureThreshold: 2 });
+  assert.equal(circuit.recordFailure("Litterbox"), false);
+  assert.equal(circuit.isOpen("Litterbox"), false);
+  assert.equal(circuit.recordFailure("Litterbox"), true);
+  assert.equal(circuit.isOpen("Litterbox"), true);
+  assert.equal(circuit.isOpen("Uguu"), false);
+});
 
 test("uses Paipu's configured upload endpoint for local images", () => {
   assert.equal(mediaUploadMode({ mediaUploadUrl: "https://api.paipu.net/v1/media/upload" }, "image/png"), "configured");

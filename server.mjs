@@ -31,7 +31,12 @@ import {
   meaiccLimitIssue,
   meaiccVideoPayload,
 } from "./src/meaiccCatalog.js";
-import { mediaUploadMode, tmpfilesDirectUrl } from "./src/uploadPolicy.js";
+import {
+  AUTOMATIC_UPLOAD_SERVICES,
+  createUploadCircuitBreaker,
+  mediaUploadMode,
+  tmpfilesDirectUrl,
+} from "./src/uploadPolicy.js";
 import { ziyuJobFrom, ziyuJobPayload, ziyuModels, ziyuTaskId } from "./src/ziyuCatalog.js";
 import {
   GLOBAL_AIOPC_BASE_URL,
@@ -42,6 +47,7 @@ import {
 } from "./src/globalAiOpcCatalog.js";
 import { MAXFORAI_VIDEO_MODELS, maxforaiVideoPayload } from "./src/maxforaiCatalog.js";
 import { normalizedTaskProgress } from "./src/taskProgress.js";
+import { taskFailureDetails } from "./src/upstreamTaskFailure.js";
 import { friendlyUpstreamError } from "./src/upstreamError.js";
 import {
   diagnosticIdentity,
@@ -65,7 +71,8 @@ const port = Number(process.env.PORT || 8787);
 const dataDir = path.join(rootDir, ".workbench-data");
 const uploadDir = path.join(dataDir, "uploads");
 const diagnosticLogPath = path.join(dataDir, "diagnostics.jsonl");
-const automaticUploadServices = ["Litterbox", "Uguu", "Tmpfiles"];
+const automaticUploadServices = AUTOMATIC_UPLOAD_SERVICES;
+const automaticUploadCircuit = createUploadCircuitBreaker({ failureThreshold: 2 });
 mkdirSync(dataDir, { recursive: true });
 mkdirSync(uploadDir, { recursive: true });
 
@@ -447,11 +454,6 @@ function videoUrlFrom(body, base) {
   return videoUrlsFrom(body, base)[0] || null;
 }
 
-function errorFrom(body) {
-  const statusError = /^failed:\s*(.+)$/i.exec(String(body?.status || ""))?.[1];
-  return String(body?.failureReason || body?.data?.failureReason || body?.error?.message || body?.message || statusError || body?.error || "视频生成失败");
-}
-
 function dateText(value) {
   if (!value) return undefined;
   const date = typeof value === "number" ? new Date(value > 1e12 ? value : value * 1000) : new Date(value);
@@ -503,18 +505,26 @@ function fileBytes(file) {
   return bytes;
 }
 
-async function uploadTemporaryMedia(file, material = {}, req) {
-  const displayName = String(material.name || file.originalname || "本地素材");
-  const bytes = fileBytes(file);
-  const errors = [];
-
-  let attemptStartedAt = Date.now();
-  writeDiagnostic(req, "temporary_upload_attempt_started", { service: "Litterbox", fileName: displayName, bytes: bytes.length });
-  try {
+async function temporaryUploadAttempt(service, bytes, file, displayName) {
+  const mimeType = file.mimetype || "application/octet-stream";
+  if (service === "Uguu") {
+    const form = new FormData();
+    form.set("files[]", new Blob([bytes], { type: mimeType }), displayName);
+    const response = await upstream("https://uguu.se/upload", { method: "POST", body: form }, 180_000);
+    const text = await response.text();
+    let body = {};
+    try { body = JSON.parse(text); } catch {}
+    const value = body?.files?.[0]?.url;
+    if (response.ok && body?.success && /^https:\/\/[^/]+\.uguu\.se\//i.test(String(value || ""))) {
+      return { status: response.status, url: publicUrl(value, "自动素材 URL").toString() };
+    }
+    throw Object.assign(new Error(`HTTP ${response.status}${body?.description ? ` ${body.description}` : ""}`), { status: response.status });
+  }
+  if (service === "Litterbox") {
     const form = new FormData();
     form.set("reqtype", "fileupload");
     form.set("time", "1h");
-    form.set("fileToUpload", new Blob([bytes], { type: file.mimetype || "application/octet-stream" }), displayName);
+    form.set("fileToUpload", new Blob([bytes], { type: mimeType }), displayName);
     const response = await upstream(
       "https://litterbox.catbox.moe/resources/internals/api.php",
       { method: "POST", body: form },
@@ -522,56 +532,62 @@ async function uploadTemporaryMedia(file, material = {}, req) {
     );
     const value = (await response.text()).trim();
     if (response.ok && /^https:\/\/litter\.catbox\.moe\//i.test(value)) {
-      writeDiagnostic(req, "temporary_upload_attempt_completed", { service: "Litterbox", fileName: displayName, durationMs: Date.now() - attemptStartedAt, status: response.status });
-      return publicUrl(value, "自动素材 URL").toString();
+      return { status: response.status, url: publicUrl(value, "自动素材 URL").toString() };
     }
-    writeDiagnostic(req, "temporary_upload_attempt_failed", { service: "Litterbox", fileName: displayName, durationMs: Date.now() - attemptStartedAt, status: response.status });
-    errors.push(`Litterbox: HTTP ${response.status}`);
-  } catch (error) {
-    writeDiagnostic(req, "temporary_upload_attempt_failed", { service: "Litterbox", fileName: displayName, durationMs: Date.now() - attemptStartedAt, error: error?.message || "连接失败" });
-    errors.push(`Litterbox: ${error?.message || "连接失败"}`);
+    throw Object.assign(new Error(`HTTP ${response.status}`), { status: response.status });
   }
-
-  attemptStartedAt = Date.now();
-  writeDiagnostic(req, "temporary_upload_attempt_started", { service: "Uguu", fileName: displayName, bytes: bytes.length });
-  try {
-    const form = new FormData();
-    form.set("files[]", new Blob([bytes], { type: file.mimetype || "application/octet-stream" }), displayName);
-    const response = await upstream("https://uguu.se/upload", { method: "POST", body: form }, 180_000);
-    const text = await response.text();
-    let body = {};
-    try { body = JSON.parse(text); } catch {}
-    const value = body?.files?.[0]?.url;
-    if (response.ok && body?.success && /^https:\/\/[^/]+\.uguu\.se\//i.test(String(value || ""))) {
-      writeDiagnostic(req, "temporary_upload_attempt_completed", { service: "Uguu", fileName: displayName, durationMs: Date.now() - attemptStartedAt, status: response.status });
-      return publicUrl(value, "自动素材 URL").toString();
-    }
-    writeDiagnostic(req, "temporary_upload_attempt_failed", { service: "Uguu", fileName: displayName, durationMs: Date.now() - attemptStartedAt, status: response.status });
-    errors.push(`Uguu: HTTP ${response.status}${body?.description ? ` ${body.description}` : ""}`);
-  } catch (error) {
-    writeDiagnostic(req, "temporary_upload_attempt_failed", { service: "Uguu", fileName: displayName, durationMs: Date.now() - attemptStartedAt, error: error?.message || "连接失败" });
-    errors.push(`Uguu: ${error?.message || "连接失败"}`);
+  const form = new FormData();
+  form.set("file", new Blob([bytes], { type: mimeType }), displayName);
+  const response = await upstream("https://tmpfiles.org/api/v1/upload", { method: "POST", body: form }, 180_000);
+  const text = await response.text();
+  let body = {};
+  try { body = JSON.parse(text); } catch {}
+  const value = body?.data?.url;
+  if (response.ok && /^https:\/\/tmpfiles\.org\//i.test(String(value || ""))) {
+    return { status: response.status, url: publicUrl(tmpfilesDirectUrl(value), "自动素材 URL").toString() };
   }
+  throw Object.assign(new Error(`HTTP ${response.status}${body?.status ? ` ${body.status}` : ""}`), { status: response.status });
+}
 
-  attemptStartedAt = Date.now();
-  writeDiagnostic(req, "temporary_upload_attempt_started", { service: "Tmpfiles", fileName: displayName, bytes: bytes.length });
-  try {
-    const form = new FormData();
-    form.set("file", new Blob([bytes], { type: file.mimetype || "application/octet-stream" }), displayName);
-    const response = await upstream("https://tmpfiles.org/api/v1/upload", { method: "POST", body: form }, 180_000);
-    const text = await response.text();
-    let body = {};
-    try { body = JSON.parse(text); } catch {}
-    const value = body?.data?.url;
-    if (response.ok && /^https:\/\/tmpfiles\.org\//i.test(String(value || ""))) {
-      writeDiagnostic(req, "temporary_upload_attempt_completed", { service: "Tmpfiles", fileName: displayName, durationMs: Date.now() - attemptStartedAt, status: response.status });
-      return publicUrl(tmpfilesDirectUrl(value), "自动素材 URL").toString();
+async function uploadTemporaryMedia(file, material = {}, req) {
+  const displayName = String(material.name || file.originalname || "本地素材");
+  const bytes = fileBytes(file);
+  const errors = [];
+
+  for (const service of automaticUploadServices) {
+    if (automaticUploadCircuit.isOpen(service)) {
+      writeDiagnostic(req, "temporary_upload_service_skipped", {
+        service,
+        fileName: displayName,
+        reason: "本次服务运行中连续失败，已自动熔断",
+      });
+      errors.push(`${service}: 已熔断跳过`);
+      continue;
     }
-    writeDiagnostic(req, "temporary_upload_attempt_failed", { service: "Tmpfiles", fileName: displayName, durationMs: Date.now() - attemptStartedAt, status: response.status });
-    errors.push(`Tmpfiles: HTTP ${response.status}${body?.status ? ` ${body.status}` : ""}`);
-  } catch (error) {
-    writeDiagnostic(req, "temporary_upload_attempt_failed", { service: "Tmpfiles", fileName: displayName, durationMs: Date.now() - attemptStartedAt, error: error?.message || "连接失败" });
-    errors.push(`Tmpfiles: ${error?.message || "连接失败"}`);
+    const attemptStartedAt = Date.now();
+    writeDiagnostic(req, "temporary_upload_attempt_started", { service, fileName: displayName, bytes: bytes.length });
+    try {
+      const result = await temporaryUploadAttempt(service, bytes, file, displayName);
+      automaticUploadCircuit.recordSuccess(service);
+      writeDiagnostic(req, "temporary_upload_attempt_completed", {
+        service,
+        fileName: displayName,
+        durationMs: Date.now() - attemptStartedAt,
+        status: result.status,
+      });
+      return result.url;
+    } catch (error) {
+      const circuitOpened = automaticUploadCircuit.recordFailure(service);
+      writeDiagnostic(req, "temporary_upload_attempt_failed", {
+        service,
+        fileName: displayName,
+        durationMs: Date.now() - attemptStartedAt,
+        status: error?.status,
+        error: error?.message || "连接失败",
+        circuitOpened,
+      });
+      errors.push(`${service}: ${error?.message || "连接失败"}`);
+    }
   }
 
   throw httpError(
@@ -1527,18 +1543,21 @@ app.get("/api/tasks/:id", async (req, res, next) => {
     verifyJobConfig(config, job);
     const pollStartedAt = Date.now();
     const result = await pollJob(config, job);
+    const failure = result.status === "failed" ? taskFailureDetails(result.body) : null;
     writeDiagnostic(req, "task_status_received", {
       durationMs: Date.now() - pollStartedAt,
       upstreamTaskId: job.taskId,
       taskStatus: result.status,
       progress: result.progress,
+      failureReason: failure?.reason,
+      failureCode: failure?.code,
     });
     res.json({
       id: req.params.id,
       status: result.status,
       progress: result.progress,
       videoUrl: result.status === "completed" ? `/api/tasks/${encodeURIComponent(req.params.id)}/content` : undefined,
-      error: result.status === "failed" ? errorFrom(result.body) : undefined,
+      error: failure?.reason,
       cost: result.body?.cost ?? result.body?.usage?.cost ?? result.body?.metadata?.cost,
       completedAt: dateText(result.body?.completed_at || result.body?.completedAt),
     });

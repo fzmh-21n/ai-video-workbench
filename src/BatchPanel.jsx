@@ -1,8 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
+  batchSubmissionPlan,
   batchSerializable,
   canBatchMatch,
   canBatchSubmit,
+  deterministicBatchStopReason,
   parseRecoveredTaskIds,
   runOrderedStaggered,
   splitBatchPrompts,
@@ -27,6 +29,7 @@ const STATUS_LABELS = {
   failed: "提交失败",
   generation_failed: "生成失败",
   submission_unknown: "结果待确认",
+  not_submitted: "未提交",
 };
 
 function uid(prefix) {
@@ -110,6 +113,7 @@ export default function BatchPanel({
   const [recoverText, setRecoverText] = useState("");
   const textInput = useRef(null);
   const recoveredBatchRef = useRef("");
+  const slowNoticeBatchRef = useRef("");
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
@@ -514,6 +518,25 @@ export default function BatchPanel({
       submissionMode,
     });
     let response;
+    const slowNoticeTimer = activeProfile.adapter === "meaicc"
+      ? window.setTimeout(() => {
+          recordDiagnostic({
+            adapter: activeProfile.adapter,
+            providerName: activeProfile.name,
+            model: activeProfile.model,
+            batchId,
+            section: item.section,
+            sequence,
+            requestId,
+            stage: "client_provider_ack_slow",
+            elapsedMs: Math.round(performance.now() - startedAt),
+          });
+          if (slowNoticeBatchRef.current !== batchId) {
+            slowNoticeBatchRef.current = batchId;
+            onNotice("MEAICC 正在较慢地确认任务，任务可能已经进入中转。请等待工作台返回结果，不要重复点击提交。");
+          }
+        }, 8000)
+      : null;
     try {
       response = await fetch("/api/tasks", {
         method: "POST",
@@ -537,6 +560,8 @@ export default function BatchPanel({
         error: error.message || "任务提交连接失败",
       });
       throw error;
+    } finally {
+      if (slowNoticeTimer) window.clearTimeout(slowNoticeTimer);
     }
     const body = await response.json().catch(() => ({}));
     recordDiagnostic({
@@ -556,6 +581,8 @@ export default function BatchPanel({
     });
     if (!response.ok) {
       const error = new Error(body.message || "任务提交失败");
+      error.status = response.status;
+      error.code = body.code || "";
       error.submissionUnknown = Boolean(body.submissionUnknown || body.code === "SUBMISSION_UNKNOWN");
       throw error;
     }
@@ -592,8 +619,13 @@ export default function BatchPanel({
     const ready = candidates.filter((item) => !issueFor(item));
     if (!ready.length) return onNotice(blocked.length ? "没有可提交章节，请先处理标红问题" : "没有已匹配且待提交的新章节；提交中和生成中的章节已自动跳过");
     const totalTasks = ready.reduce((total, item) => total + Number(parametersFor(item).quantity || 1), 0);
-    const effectiveConcurrency = submissionMode === "strict_order" ? 1 : concurrency;
-    const modeLabel = submissionMode === "strict_order" ? "严格顺序（上一节拿到任务ID后再提交下一节）" : "有序抢位（按章节号间隔发出）";
+    const submissionPlan = batchSubmissionPlan(submissionMode, concurrency);
+    const effectiveConcurrency = submissionPlan.concurrency;
+    const modeLabel = submissionMode === "strict_order"
+      ? "严格顺序（上一节拿到任务ID后再提交下一节）"
+      : submissionMode === "limited_rush"
+        ? "限量抢占（50ms错峰、固定并发5；不保证中转后台顺序）"
+        : "有序抢位（按章节号每350ms发出）";
     if (confirmAll && !window.confirm(`准备提交 ${ready.length} 节，共创建 ${totalTasks} 条任务。\n中转站：${activeProfile.name}\n模型：${activeProfile.model}\n模式：${modeLabel}\n最大同时在途：${effectiveConcurrency} 节\n\n工作台会先自动预上传全部素材，再开始抢位。确认开始吗？`)) return;
     setBusy("uploading");
     let uploadCache;
@@ -610,6 +642,8 @@ export default function BatchPanel({
       : item));
     let successes = 0;
     let failures = 0;
+    let stopReason = "";
+    const startedItemIds = new Set();
     const batchId = uid("batch");
     const batchStartedAt = Date.now();
     recordDiagnostic({
@@ -622,7 +656,8 @@ export default function BatchPanel({
       concurrency: effectiveConcurrency,
       submissionMode,
     });
-    await runOrderedStaggered(ready, effectiveConcurrency, submissionMode === "strict_order" ? 0 : 350, async (item, sequence) => {
+    const dispatchResult = await runOrderedStaggered(ready, effectiveConcurrency, submissionPlan.staggerMs, async (item, sequence) => {
+      startedItemIds.add(item.id);
       try {
         const records = await submitOne(item, batchId, uploadCache, sequence, batchStartedAt);
         successes += 1;
@@ -641,6 +676,21 @@ export default function BatchPanel({
           : value));
       } catch (error) {
         failures += 1;
+        const deterministicReason = deterministicBatchStopReason(error);
+        if (deterministicReason && !stopReason) {
+          stopReason = deterministicReason;
+          recordDiagnostic({
+            adapter: activeProfile.adapter,
+            providerName: activeProfile.name,
+            model: activeProfile.model,
+            batchId,
+            section: item.section,
+            sequence,
+            stage: "client_batch_stop_requested",
+            status: error.status || 0,
+            reason: deterministicReason,
+          });
+        }
         setItems((values) => values.map((value) => value.id === item.id
           ? {
               ...value,
@@ -650,7 +700,19 @@ export default function BatchPanel({
             }
           : value));
       }
-    });
+    }, { shouldStop: () => Boolean(stopReason) });
+    const skippedItems = ready.filter((item) => !startedItemIds.has(item.id));
+    if (skippedItems.length) {
+      const skippedIds = new Set(skippedItems.map((item) => item.id));
+      setItems((values) => values.map((value) => skippedIds.has(value.id)
+        ? {
+            ...value,
+            status: "not_submitted",
+            error: `整批已停止，本节尚未提交：${stopReason}`,
+            expanded: true,
+          }
+        : value));
+    }
     recordDiagnostic({
       adapter: activeProfile.adapter,
       providerName: activeProfile.name,
@@ -660,11 +722,18 @@ export default function BatchPanel({
       durationMs: Date.now() - batchStartedAt,
       successes,
       failures,
+      skipped: dispatchResult.skipped,
+      stopped: Boolean(stopReason),
+      stopReason,
       submissionMode,
     });
     setBusy("");
     onTasksAdded();
-    onNotice(`批量提交完成：成功 ${successes} 节，失败 ${failures} 节${blocked.length ? `，另有 ${blocked.length} 节因缺图或素材超限未提交` : ""}`);
+    if (stopReason) {
+      onNotice(`批量已安全停止：${stopReason}。成功 ${successes} 节，失败 ${failures} 节，剩余 ${skippedItems.length} 节未提交，可处理账号问题后继续。`);
+    } else {
+      onNotice(`批量提交完成：成功 ${successes} 节，失败 ${failures} 节${blocked.length ? `，另有 ${blocked.length} 节因缺图或素材超限未提交` : ""}`);
+    }
   }
 
   async function recoverMeaiccTasks() {
@@ -772,8 +841,8 @@ export default function BatchPanel({
         {activeProfile.adapter === "meaicc" && (
           <button disabled={!!busy || !items.length} onClick={() => setRecoverOpen((value) => !value)}>{busy === "recovering" ? "找回中…" : "找回MEAICC任务"}</button>
         )}
-        <label><span>提交模式</span><select value={submissionMode} onChange={(event) => setSubmissionMode(event.target.value)}><option value="ordered_rush">有序抢位</option><option value="strict_order">严格顺序</option></select></label>
-        <label><span>最大同时在途</span><select value={concurrency} disabled={submissionMode === "strict_order"} onChange={(event) => setConcurrency(Number(event.target.value))}>{CONCURRENCY_OPTIONS.map((value) => <option key={value} value={value}>{value} 条</option>)}</select></label>
+        <label><span>提交模式</span><select value={submissionMode} onChange={(event) => setSubmissionMode(event.target.value)}><option value="ordered_rush">有序抢位（350ms）</option><option value="limited_rush">限量抢占（50ms）</option><option value="strict_order">严格顺序</option></select></label>
+        <label title={submissionMode === "limited_rush" ? "限量抢占固定为5条同时在途" : ""}><span>最大同时在途</span><select value={submissionMode === "limited_rush" ? 5 : submissionMode === "strict_order" ? 1 : concurrency} disabled={submissionMode !== "ordered_rush"} onChange={(event) => setConcurrency(Number(event.target.value))}>{CONCURRENCY_OPTIONS.map((value) => <option key={value} value={value}>{value} 条</option>)}</select></label>
         <button className="primary-button" disabled={!!busy || !items.length} onClick={() => submitSelected(items, true)}>{busy === "uploading" ? "自动预上传中…" : busy === "submitting" ? "批量提交中…" : "开始批量提交"}</button>
       </div>
 

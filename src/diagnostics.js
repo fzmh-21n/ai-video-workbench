@@ -83,7 +83,10 @@ export function diagnosticExportPayload(profile, serverPayload) {
   const adapter = String(profile?.adapter || "");
   const clientEntries = readEntries().filter((entry) => entry.sessionId === sessionId && entry.adapter === adapter);
   const serverEntries = Array.isArray(serverPayload?.entries) ? serverPayload.entries : [];
-  const failures = [...clientEntries, ...serverEntries].filter((entry) => /failed|exception|closed/.test(String(entry.stage || "")));
+  const failures = [...clientEntries, ...serverEntries].filter((entry) => (
+    /failed|exception|closed/.test(String(entry.stage || ""))
+    && !/^temporary_upload_/.test(String(entry.stage || ""))
+  ));
   return redactDiagnosticValue({
     format: "ai-video-workbench-diagnostic-v1",
     exportedAt: new Date().toISOString(),
@@ -102,13 +105,16 @@ export function diagnosticExportPayload(profile, serverPayload) {
         .filter((entry) => entry.stage === "provider_task_ids_received")
         .map((entry) => ({ batchId: entry.batchId, section: entry.section, sequence: entry.sequence, durationMs: entry.durationMs, upstreamTaskIds: entry.upstreamTaskIds })),
       uploadAttempts: serverEntries
-        .filter((entry) => /^(?:temporary_upload_attempt|configured_upload)_(?:completed|failed)$/.test(String(entry.stage || "")))
-        .map((entry) => ({ stage: entry.stage, service: entry.service, fileName: entry.fileName, durationMs: entry.durationMs, status: entry.status, error: entry.error })),
+        .filter((entry) => /^(?:(?:temporary_upload_attempt|configured_upload)_(?:completed|failed)|temporary_upload_service_skipped)$/.test(String(entry.stage || "")))
+        .map((entry) => ({ stage: entry.stage, service: entry.service, fileName: entry.fileName, durationMs: entry.durationMs, status: entry.status, error: entry.error, reason: entry.reason, circuitOpened: entry.circuitOpened })),
+      providerFailures: serverEntries
+        .filter((entry) => entry.stage === "task_status_received" && entry.taskStatus === "failed")
+        .map((entry) => ({ batchId: entry.batchId, section: entry.section, sequence: entry.sequence, upstreamTaskId: entry.upstreamTaskId, failureCode: entry.failureCode, failureReason: entry.failureReason })),
       failures,
     },
     clientEntries,
     serverEntries,
-    guidance: "日志不包含 API Key、密码、提示词正文或素材 URL。请把完整 JSON 文件发送给维护人员分析。",
+    guidance: `本文件只包含当前浏览器会话中 ${profile?.name || adapter}（接口类型 ${adapter}）的日志，不包含其他中转。日志不包含 API Key、密码、提示词正文或素材 URL。`,
   });
 }
 

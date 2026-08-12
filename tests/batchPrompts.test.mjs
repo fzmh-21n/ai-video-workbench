@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  batchSubmissionPlan,
   canBatchMatch,
   canBatchSubmit,
+  deterministicBatchStopReason,
   parseRecoveredTaskIds,
   runOrderedStaggered,
   runWithConcurrency,
@@ -26,7 +28,7 @@ test("starts ordered-rush submissions by numeric section while keeping concurren
     started.push(item.section);
     active += 1;
     maximum = Math.max(maximum, active);
-    await new Promise((resolve) => setTimeout(resolve, item.section === 29 ? 8 : 2));
+    await new Promise((resolve) => setTimeout(resolve, item.section === 29 ? 20 : 12));
     active -= 1;
   });
   assert.deepEqual(started, [29, 30, 31]);
@@ -46,6 +48,70 @@ test("strict ordered submission never has more than one request in flight", asyn
   });
   assert.deepEqual(started, [1, 2, 3]);
   assert.equal(maximum, 1);
+});
+
+test("keeps one global stagger even when several overdue workers become available together", async () => {
+  const startedAt = [];
+  await runOrderedStaggered(
+    Array.from({ length: 12 }, (_, index) => ({ section: index + 1 })),
+    3,
+    8,
+    async () => {
+      startedAt.push(Date.now());
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    },
+  );
+  const gaps = startedAt.slice(1).map((value, index) => value - startedAt[index]);
+  assert.equal(gaps.every((gap) => gap >= 6), true, `unexpected start gaps: ${gaps.join(",")}`);
+});
+
+test("keeps numeric start order and avoids burst dispatch across 120 items", async () => {
+  const sections = Array.from({ length: 120 }, (_, index) => 120 - index);
+  const started = [];
+  let active = 0;
+  let maximum = 0;
+  await runOrderedStaggered(sections.map((section) => ({ section })), 5, 1, async (item) => {
+    started.push(item.section);
+    active += 1;
+    maximum = Math.max(maximum, active);
+    await new Promise((resolve) => setTimeout(resolve, 4 + (item.section % 3)));
+    active -= 1;
+  });
+  assert.deepEqual(started, Array.from({ length: 120 }, (_, index) => index + 1));
+  assert.equal(maximum <= 5, true);
+});
+
+test("stops dispatching unsent work after a deterministic batch error", async () => {
+  let stopped = false;
+  const started = [];
+  const result = await runOrderedStaggered(
+    Array.from({ length: 20 }, (_, index) => ({ section: index + 1 })),
+    5,
+    5,
+    async (item) => {
+      started.push(item.section);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      if (item.section === 3) stopped = true;
+    },
+    { shouldStop: () => stopped },
+  );
+  assert.equal(started.length < 20, true);
+  assert.equal(result.skipped, 20 - started.length);
+});
+
+test("uses fixed plans for limited rush and strict order", () => {
+  assert.deepEqual(batchSubmissionPlan("limited_rush", 20), { concurrency: 5, staggerMs: 50 });
+  assert.deepEqual(batchSubmissionPlan("strict_order", 20), { concurrency: 1, staggerMs: 0 });
+  assert.deepEqual(batchSubmissionPlan("ordered_rush", 3), { concurrency: 3, staggerMs: 350 });
+});
+
+test("only stops a batch for deterministic account and authentication failures", () => {
+  assert.equal(deterministicBatchStopReason({ status: 402, message: "积分不足，剩余可用：193" }), "积分不足，剩余可用：193");
+  assert.match(deterministicBatchStopReason({ status: 401, message: "Unauthorized" }), /Unauthorized/);
+  assert.match(deterministicBatchStopReason({ status: 400, message: "API Key 已失效" }), /API Key/);
+  assert.match(deterministicBatchStopReason({ status: 403, message: "Forbidden" }), /Forbidden/);
+  assert.equal(deterministicBatchStopReason({ status: 429, message: "线路繁忙，请稍后重试" }), "");
+  assert.equal(deterministicBatchStopReason({ status: 400, message: "本条提示词不合规" }), "");
 });
 
 test("parses MEAICC UUID and wr task IDs with optional chapter mapping", () => {
@@ -88,4 +154,5 @@ test("skips active and completed chapters during later batch operations", () => 
   assert.equal(canBatchSubmit({ status: "unmatched" }), false);
   assert.equal(canBatchSubmit({ status: "matched" }), true);
   assert.equal(canBatchSubmit({ status: "failed" }), true);
+  assert.equal(canBatchSubmit({ status: "not_submitted" }), true);
 });

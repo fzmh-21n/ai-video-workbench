@@ -43,7 +43,32 @@ export function canBatchMatch(item) {
 }
 
 export function canBatchSubmit(item) {
-  return ["matched", "failed", "generation_failed"].includes(item?.status);
+  return ["matched", "failed", "generation_failed", "not_submitted"].includes(item?.status);
+}
+
+export function batchSubmissionPlan(mode, concurrency) {
+  if (mode === "strict_order") return { concurrency: 1, staggerMs: 0 };
+  if (mode === "limited_rush") return { concurrency: 5, staggerMs: 50 };
+  return {
+    concurrency: Math.max(1, Math.min(20, Number(concurrency) || 1)),
+    staggerMs: 350,
+  };
+}
+
+export function deterministicBatchStopReason(error) {
+  const status = Number(error?.status || 0);
+  const message = String(error?.message || "").trim();
+  const code = String(error?.code || "").trim();
+  if (status === 401) return message || "API Key 无效或未授权";
+  if (status === 402) return message || "账户余额或积分不足";
+  if (/积分不足|余额不足|余额不够|额度不足|账户欠费|账号欠费|insufficient\s+(?:balance|credit|credits|quota)/i.test(message)) {
+    return message || "账户余额、积分或额度不足";
+  }
+  if (/api\s*key|密钥|鉴权|认证|无权限|权限|unauthori[sz]ed|forbidden|invalid[_\s-]*(?:key|token)|token\s+(?:invalid|expired)/i.test(`${code} ${message}`)
+    && /无效|错误|失效|过期|未授权|缺失|invalid|expired|unauthori[sz]ed|forbidden/i.test(`${code} ${message}`)) {
+    return message || "API Key 无效或鉴权失败";
+  }
+  return "";
 }
 
 export async function runWithConcurrency(values, concurrency, worker) {
@@ -64,22 +89,31 @@ export function orderedBatchItems(values) {
   ));
 }
 
-export async function runOrderedStaggered(values, concurrency, staggerMs, worker) {
+export async function runOrderedStaggered(values, concurrency, staggerMs, worker, options = {}) {
   const queue = orderedBatchItems(values);
   const limit = Math.max(1, Math.min(20, Number(concurrency) || 1));
   const gap = Math.max(0, Math.min(5000, Number(staggerMs) || 0));
-  const startedAt = Date.now();
-  let cursor = 0;
-  const runners = Array.from({ length: Math.min(limit, queue.length) }, async () => {
-    while (cursor < queue.length) {
-      const index = cursor;
-      cursor += 1;
-      const waitMs = startedAt + index * gap - Date.now();
-      if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
-      await worker(queue[index], index);
-    }
-  });
-  await Promise.all(runners);
+  const active = new Set();
+  let lastStartedAt = 0;
+  let started = 0;
+
+  for (let index = 0; index < queue.length; index += 1) {
+    while (active.size >= limit) await Promise.race(active);
+    if (options.shouldStop?.()) break;
+
+    const waitMs = lastStartedAt ? lastStartedAt + gap - Date.now() : 0;
+    if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
+    if (options.shouldStop?.()) break;
+
+    lastStartedAt = Date.now();
+    started += 1;
+    let pending;
+    pending = Promise.resolve().then(() => worker(queue[index], index)).finally(() => active.delete(pending));
+    active.add(pending);
+  }
+
+  await Promise.all(active);
+  return { started, skipped: queue.length - started };
 }
 
 const RECOVERED_TASK_ID = /(?:wr_[0-9a-f-]+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;

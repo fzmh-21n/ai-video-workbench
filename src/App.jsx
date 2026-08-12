@@ -31,6 +31,7 @@ import {
   saveCredentials,
 } from "./credentialStore.js";
 import { normalizedTaskProgress } from "./taskProgress.js";
+import { orderedDownloadFilename, orderedDownloadTasks } from "./taskDownload.js";
 import {
   filesFromProjectDirectory,
   loadProjectDirectory,
@@ -485,7 +486,7 @@ function Workbench({ onLogout }) {
     setDiagnosticBusy("exporting");
     try {
       const result = await exportDiagnostics(activeProfile);
-      setNotice(`已导出 ${activeProfile.name} 的诊断日志：${result.filename}（${result.count} 条记录）`);
+      setNotice(`已仅导出当前中转 ${activeProfile.name} 的诊断日志：${result.filename}（${result.count} 条记录）；不包含其他中转`);
     } catch (error) {
       if (error?.name !== "AbortError") setNotice(error.message || "导出诊断日志失败");
     } finally {
@@ -1185,49 +1186,42 @@ function Workbench({ onLogout }) {
   }
 
   async function downloadBatch(batch) {
-    const completed = batch.tasks.filter((task) => task.status === "completed" && task.videoUrl);
+    const completed = orderedDownloadTasks(
+      batch.tasks.filter((task) => task.status === "completed" && task.videoUrl),
+    );
     if (!completed.length) return setNotice("该批次目前还没有可下载的成功视频");
     const skipped = batch.tasks.length - completed.length;
     setDownloadingBatchId(batch.id);
     let downloaded = 0;
     let unavailable = 0;
-    let nextIndex = 0;
     try {
       const downloadOne = async (index) => {
         const task = completed[index];
         try {
           const profile = profiles.find((item) => item.id === task.profileId);
           if (!profile || !keyFor(profile)) throw new Error("所属中转站缺少 API Key");
-          setNotice(`正在并行下载（最多3条）：已处理 ${downloaded + unavailable}/${completed.length} · 已成功 ${downloaded} · 不可用 ${unavailable}`);
+          setNotice(`正在按章节顺序下载：第 ${index + 1}/${completed.length} 个 · 已成功 ${downloaded} · 不可用 ${unavailable}`);
           const response = await fetch(task.videoUrl, { headers: headersFor(profile) });
           if (!response.ok) {
             const body = await response.json().catch(() => ({}));
             throw new Error(body.message || `HTTP ${response.status}`);
           }
           const url = URL.createObjectURL(await response.blob());
-          const order = String(index + 1).padStart(2, "0");
-          const safeTitle = String(task.title || `视频-${order}`).replace(/[\\/:*?"<>|]/g, "_");
           const link = document.createElement("a");
           link.href = url;
-          link.download = `${order}-${safeTitle}.mp4`;
+          link.download = orderedDownloadFilename(task, index, completed.length);
           document.body.appendChild(link);
           link.click();
           link.remove();
           window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
           downloaded += 1;
+          await new Promise((resolve) => window.setTimeout(resolve, 150));
         } catch {
           unavailable += 1;
         }
-        setNotice(`正在并行下载（最多3条）：已处理 ${downloaded + unavailable}/${completed.length} · 已成功 ${downloaded} · 不可用 ${unavailable}`);
+        setNotice(`正在按章节顺序下载：已处理 ${downloaded + unavailable}/${completed.length} · 已成功 ${downloaded} · 不可用 ${unavailable}`);
       };
-      const worker = async () => {
-        while (nextIndex < completed.length) {
-          const index = nextIndex;
-          nextIndex += 1;
-          await downloadOne(index);
-        }
-      };
-      await Promise.all(Array.from({ length: Math.min(3, completed.length) }, worker));
+      for (let index = 0; index < completed.length; index += 1) await downloadOne(index);
       setNotice(`批次下载尝试完成：实际开始下载 ${downloaded} 个，结果地址不可用 ${unavailable} 个${skipped ? `，另跳过生成失败或未完成任务 ${skipped} 条` : ""}`);
     } catch (error) {
       setNotice(error.message || "批次下载失败");
@@ -1329,7 +1323,7 @@ function Workbench({ onLogout }) {
             {keyFor(activeProfile) ? activeProfile.model : "等待 API 配置"}
           </span>
           <span className="network-pill" title="不继承环境变量代理；系统网卡/TUN代理仍会接管请求">直连防丢包</span>
-          <button className="secondary-button" disabled={!!diagnosticBusy} onClick={downloadDiagnostics}>{diagnosticBusy === "exporting" ? "导出中…" : "导出当前中转日志"}</button>
+          <button className="secondary-button" title="只导出当前选择的中转，不包含其他中转" disabled={!!diagnosticBusy} onClick={downloadDiagnostics}>{diagnosticBusy === "exporting" ? "导出中…" : "仅导出当前中转日志"}</button>
           <button className="secondary-button" disabled={!!diagnosticBusy} onClick={resetDiagnostics}>{diagnosticBusy === "clearing" ? "清空中…" : "清空本次日志"}</button>
           <button className="secondary-button" onClick={() => openConfig()}>中转站管理</button>
           <button className="logout-button" onClick={onLogout}>退出登录</button>

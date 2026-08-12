@@ -105,8 +105,8 @@ export function diagnosticExportPayload(profile, serverPayload) {
         .filter((entry) => entry.stage === "provider_task_ids_received")
         .map((entry) => ({ batchId: entry.batchId, section: entry.section, sequence: entry.sequence, durationMs: entry.durationMs, upstreamTaskIds: entry.upstreamTaskIds })),
       uploadAttempts: serverEntries
-        .filter((entry) => /^(?:(?:temporary_upload_attempt|configured_upload)_(?:completed|failed)|temporary_upload_service_skipped)$/.test(String(entry.stage || "")))
-        .map((entry) => ({ stage: entry.stage, service: entry.service, fileName: entry.fileName, durationMs: entry.durationMs, status: entry.status, error: entry.error, reason: entry.reason, circuitOpened: entry.circuitOpened })),
+        .filter((entry) => /^(?:(?:temporary_upload_attempt|configured_upload)_(?:completed|failed)|configured_upload_retry_wait|temporary_upload_service_skipped)$/.test(String(entry.stage || "")))
+        .map((entry) => ({ stage: entry.stage, service: entry.service, fileName: entry.fileName, durationMs: entry.durationMs, status: entry.status, error: entry.error, reason: entry.reason, circuitOpened: entry.circuitOpened, attempt: entry.attempt, nextAttempt: entry.nextAttempt, delayMs: entry.delayMs, retryAfter: entry.retryAfter, attemptCount: entry.attemptCount })),
       providerFailures: serverEntries
         .filter((entry) => entry.stage === "task_status_received" && entry.taskStatus === "failed")
         .map((entry) => ({ batchId: entry.batchId, section: entry.section, sequence: entry.sequence, upstreamTaskId: entry.upstreamTaskId, failureCode: entry.failureCode, failureReason: entry.failureReason })),

@@ -3,10 +3,29 @@ import test from "node:test";
 
 import {
   AUTOMATIC_UPLOAD_SERVICES,
+  configuredUploadBatchSize,
+  configuredUploadRetryDelay,
   createUploadCircuitBreaker,
   mediaUploadMode,
   tmpfilesDirectUrl,
 } from "../src/uploadPolicy.js";
+
+test("uploads Ziyu materials one at a time so completed URLs can be checkpointed", () => {
+  assert.equal(configuredUploadBatchSize("ziyuai"), 1);
+  assert.equal(configuredUploadBatchSize("meaicc"), 50);
+});
+
+test("honors numeric and HTTP-date Retry-After values with a safe cap", () => {
+  assert.equal(configuredUploadRetryDelay("12", 0, 0), 12_000);
+  assert.equal(configuredUploadRetryDelay("Thu, 01 Jan 1970 00:00:20 GMT", 0, 10_000), 10_000);
+  assert.equal(configuredUploadRetryDelay("600", 0, 0), 120_000);
+});
+
+test("uses exponential waits when Ziyu omits Retry-After", () => {
+  assert.equal(configuredUploadRetryDelay("", 0, 0), 5_000);
+  assert.equal(configuredUploadRetryDelay("", 1, 0), 10_000);
+  assert.equal(configuredUploadRetryDelay("", 2, 0), 20_000);
+});
 
 test("tries Uguu before Litterbox and Tmpfiles", () => {
   assert.deepEqual(AUTOMATIC_UPLOAD_SERVICES, ["Uguu", "Litterbox", "Tmpfiles"]);

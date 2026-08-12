@@ -14,6 +14,7 @@ import { allTasks, putTasks } from "./taskStore.js";
 import { pollDelayForAdapter } from "./providerCatalog.js";
 import { normalizedTaskProgress } from "./taskProgress.js";
 import { diagnosticHeaders, recordDiagnostic } from "./diagnostics.js";
+import { configuredUploadBatchSize } from "./uploadPolicy.js";
 
 const STORAGE_KEY = "video-workbench-batch-v1";
 const CONCURRENCY_OPTIONS = [1, 2, 3, 5, 10, 20];
@@ -370,8 +371,10 @@ export default function BatchPanel({
       return nextUploaded;
     }
     const entries = [...unique.entries()];
-    for (let offset = 0; offset < entries.length; offset += 50) {
-      const chunk = entries.slice(offset, offset + 50);
+    const chunkSize = configuredUploadBatchSize(activeProfile.adapter);
+    let completedThisRun = 0;
+    for (let offset = 0; offset < entries.length; offset += chunkSize) {
+      const chunk = entries.slice(offset, offset + chunkSize);
       const form = new FormData();
       const meta = chunk.map(([key, value], fileIndex) => {
         form.append("references", value.file, value.file.name);
@@ -427,11 +430,22 @@ export default function BatchPanel({
         materialCount: body.materials?.length || 0,
         error: response.ok ? "" : body.message || "素材预上传失败",
       });
-      if (!response.ok) throw new Error(body.message || "素材预上传失败");
+      if (!response.ok) {
+        setUploaded(nextUploaded);
+        setUploadedProfileId(activeProfile.id);
+        const progress = completedThisRun
+          ? `；本次已成功并保留 ${completedThisRun}/${entries.length} 个素材，下次会从未完成处继续`
+          : "";
+        throw new Error(`${body.message || "素材预上传失败"}${progress}`);
+      }
       for (const material of body.materials || []) {
         nextUploaded[material.key] = { url: material.url, expiresAt: body.expiresAt };
       }
-      onNotice(`正在预上传素材：${Math.min(offset + chunk.length, entries.length)}/${entries.length}`);
+      completedThisRun += body.materials?.length || 0;
+      // 紫域逐个上传确认；每成功一个就立即写入状态与本地缓存，中途限流也不丢进度。
+      setUploaded({ ...nextUploaded });
+      setUploadedProfileId(activeProfile.id);
+      onNotice(`正在预上传素材：${completedThisRun}/${entries.length}${activeProfile.adapter === "ziyuai" ? "（紫域单通道，限流时会自动等待）" : ""}`);
     }
     setUploaded(nextUploaded);
     setUploadedProfileId(activeProfile.id);

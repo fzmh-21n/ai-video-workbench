@@ -1,5 +1,22 @@
 export const AUTOMATIC_UPLOAD_SERVICES = ["Uguu", "Litterbox", "Tmpfiles"];
 
+export function configuredUploadBatchSize(adapter) {
+  return adapter === "ziyuai" ? 1 : 50;
+}
+
+export function configuredUploadRetryDelay(retryAfter, retryIndex, now = Date.now()) {
+  const raw = String(retryAfter || "").trim();
+  let delayMs = 0;
+  if (/^\d+(?:\.\d+)?$/.test(raw)) {
+    delayMs = Number(raw) * 1000;
+  } else if (raw) {
+    const retryAt = Date.parse(raw);
+    if (Number.isFinite(retryAt)) delayMs = retryAt - now;
+  }
+  if (!(delayMs > 0)) delayMs = 5000 * (2 ** Math.max(0, Number(retryIndex) || 0));
+  return Math.min(120_000, Math.max(1000, Math.round(delayMs)));
+}
+
 export function createUploadCircuitBreaker({ failureThreshold = 2, monitoredServices = ["Litterbox"] } = {}) {
   const monitored = new Set(monitoredServices);
   const failures = new Map();

@@ -33,6 +33,7 @@ import {
 } from "./src/meaiccCatalog.js";
 import {
   AUTOMATIC_UPLOAD_SERVICES,
+  configuredUploadRetryDelay,
   createUploadCircuitBreaker,
   mediaUploadMode,
   tmpfilesDirectUrl,
@@ -603,43 +604,93 @@ async function uploadMedia(config, file, material = {}, req) {
   const displayName = String(material.name || file.originalname || "本地素材");
   const bytes = fileBytes(file);
   const uploadStartedAt = Date.now();
+  let uploadAttemptCount = 0;
   writeDiagnostic(req, "configured_upload_started", {
     service: config.adapter,
     fileName: displayName,
     bytes: bytes.length,
     kind: material.kind || "",
   });
-  if (config.adapter === "ziyuai") {
-    const kind = ["image", "audio", "video"].includes(material.kind) ? material.kind : "image";
-    const data = `data:${file.mimetype || "application/octet-stream"};base64,${bytes.toString("base64")}`;
-    const response = await upstream(config.mediaUploadUrl, {
-      method: "POST",
-      headers: authHeaders(config, { "Content-Type": "application/json" }),
-      body: JSON.stringify({ files: [{ type: kind, name: displayName, data }] }),
-    }, 180_000);
+  try {
+    if (config.adapter === "ziyuai") {
+      const kind = ["image", "audio", "video"].includes(material.kind) ? material.kind : "image";
+      const data = `data:${file.mimetype || "application/octet-stream"};base64,${bytes.toString("base64")}`;
+      const payload = JSON.stringify({ files: [{ type: kind, name: displayName, data }] });
+      const maxAttempts = 4;
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        uploadAttemptCount = attempt;
+        writeDiagnostic(req, "configured_upload_attempt_started", {
+          service: config.adapter,
+          fileName: displayName,
+          attempt,
+          maxAttempts,
+        });
+        const response = await upstream(config.mediaUploadUrl, {
+          method: "POST",
+          headers: authHeaders(config, { "Content-Type": "application/json" }),
+          body: payload,
+        }, 180_000);
+        let body;
+        try {
+          body = await readJson(response);
+        } catch (error) {
+          if (response.status === 429 && attempt < maxAttempts) {
+            const delayMs = configuredUploadRetryDelay(response.headers.get("retry-after"), attempt - 1);
+            writeDiagnostic(req, "configured_upload_retry_wait", {
+              service: config.adapter,
+              fileName: displayName,
+              status: response.status,
+              attempt,
+              nextAttempt: attempt + 1,
+              delayMs,
+              retryAfter: response.headers.get("retry-after") || "",
+            });
+            await new Promise((resolve) => setTimeout(resolve, delayMs));
+            continue;
+          }
+          throw error;
+        }
+        const value = body?.assets?.[0]?.url || body?.data?.assets?.[0]?.url;
+        if (!value) throw httpError(502, `紫域 AI 素材上传成功但没有返回 URL：${displayName}`);
+        writeDiagnostic(req, "configured_upload_completed", {
+          service: config.adapter,
+          fileName: displayName,
+          durationMs: Date.now() - uploadStartedAt,
+          status: response.status,
+          attemptCount: attempt,
+        });
+        return publicUrl(value, "紫域 AI 素材 URL").toString();
+      }
+    }
+    const form = new FormData();
+    form.set("file", new Blob([bytes], { type: file.mimetype || "application/octet-stream" }), displayName);
+    const headers = { Authorization: `Bearer ${config.mediaUploadKey}` };
+    if (config.adapter === "lwaigc") {
+      const fingerprint = crypto.createHash("sha256").update(bytes).digest("hex").slice(0, 40);
+      headers["Idempotency-Key"] = `asset_${fingerprint}`;
+    }
+    uploadAttemptCount = 1;
+    const response = await upstream(
+      config.mediaUploadUrl,
+      { method: "POST", headers, body: form },
+      180_000,
+    );
     const body = await readJson(response);
-    const value = body?.assets?.[0]?.url || body?.data?.assets?.[0]?.url;
-    if (!value) throw httpError(502, `紫域 AI 素材上传成功但没有返回 URL：${displayName}`);
+    const value = body?.url || body?.data?.url || body?.data?.[0]?.url;
+    if (!value) throw httpError(502, `素材上传成功但没有返回 URL：${displayName}`);
     writeDiagnostic(req, "configured_upload_completed", { service: config.adapter, fileName: displayName, durationMs: Date.now() - uploadStartedAt, status: response.status });
-    return publicUrl(value, "紫域 AI 素材 URL").toString();
+    return publicUrl(value, "素材 URL").toString();
+  } catch (error) {
+    writeDiagnostic(req, "configured_upload_failed", {
+      service: config.adapter,
+      fileName: displayName,
+      durationMs: Date.now() - uploadStartedAt,
+      status: error?.status || 500,
+      error: error?.message || "素材上传失败",
+      attemptCount: uploadAttemptCount,
+    });
+    throw error;
   }
-  const form = new FormData();
-  form.set("file", new Blob([bytes], { type: file.mimetype || "application/octet-stream" }), displayName);
-  const headers = { Authorization: `Bearer ${config.mediaUploadKey}` };
-  if (config.adapter === "lwaigc") {
-    const fingerprint = crypto.createHash("sha256").update(bytes).digest("hex").slice(0, 40);
-    headers["Idempotency-Key"] = `asset_${fingerprint}`;
-  }
-  const response = await upstream(
-    config.mediaUploadUrl,
-    { method: "POST", headers, body: form },
-    180_000,
-  );
-  const body = await readJson(response);
-  const value = body?.url || body?.data?.url || body?.data?.[0]?.url;
-  if (!value) throw httpError(502, `素材上传成功但没有返回 URL：${displayName}`);
-  writeDiagnostic(req, "configured_upload_completed", { service: config.adapter, fileName: displayName, durationMs: Date.now() - uploadStartedAt, status: response.status });
-  return publicUrl(value, "素材 URL").toString();
 }
 
 async function importLwaigcMedia(config, value) {
@@ -671,7 +722,8 @@ function imageDataUrl(file) {
 async function prepareMaterials(config, files, meta, req) {
   const materials = new Array(meta.length);
   let cursor = 0;
-  const workers = Array.from({ length: Math.min(4, meta.length) }, async () => {
+  const concurrency = config.adapter === "ziyuai" ? 1 : 4;
+  const workers = Array.from({ length: Math.min(concurrency, meta.length) }, async () => {
     while (cursor < meta.length) {
       const index = cursor;
       cursor += 1;

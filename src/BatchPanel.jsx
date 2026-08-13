@@ -876,7 +876,7 @@ export default function BatchPanel({
         <label><span>生成数量</span><select value={quantity} onChange={(event) => setQuantity(Number(event.target.value))}>{[1, 2, 3, 4].map((value) => <option key={value}>{value}</option>)}</select></label>
         <label><span>随机种子</span><input value={seed} onChange={(event) => setSeed(event.target.value)} disabled={!capability.seed} /></label>
       </div>
-        <label className="check-row"><input type="checkbox" checked={syncAudio} disabled={capability.syncAudioFixed} onChange={(event) => setSyncAudio(event.target.checked)} />生成同步音频</label>
+        <label className="check-row"><input type="checkbox" checked={syncAudio} onChange={(event) => setSyncAudio(event.target.checked)} />生成同步音频（当前中转默认开启）</label>
       <label className="check-row warning-check"><input type="checkbox" checked={allowMissingImages} onChange={(event) => setAllowMissingImages(event.target.checked)} />仍然提交缺少图片的章节</label>
       <div className="notice" role="status">ⓘ {onNotice && notice}</div>
 

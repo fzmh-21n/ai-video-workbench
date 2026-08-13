@@ -24,6 +24,7 @@ import {
   putTask,
   putTasks,
   removeTask as removeStoredTask,
+  removeTasks as removeStoredTasks,
 } from "./taskStore.js";
 import {
   clearCredentials,
@@ -32,6 +33,7 @@ import {
 } from "./credentialStore.js";
 import { normalizedTaskProgress } from "./taskProgress.js";
 import { orderedDownloadFilename, orderedDownloadTasks } from "./taskDownload.js";
+import { syncAudioForProfile, withSyncAudioPreference } from "./syncAudioPreference.js";
 import {
   filesFromProjectDirectory,
   loadProjectDirectory,
@@ -50,6 +52,7 @@ const PROFILE_KEY = "video-workbench-profiles-v2";
 const ACTIVE_KEY = "video-workbench-active-profile-v2";
 const TASK_KEY = "video-workbench-tasks-v2";
 const FIXED_CONTENT_KEY = "video-workbench-fixed-content-v1";
+const SYNC_AUDIO_PREFERENCES_KEY = "video-workbench-sync-audio-v1";
 const PAGE_SIZE = 10;
 const MAX_TOTAL_BYTES = 200 * 1024 * 1024;
 const REFERENCE_LIMITS = { image: 30, audio: 10, video: 10 };
@@ -265,7 +268,9 @@ function Workbench({ onLogout }) {
   const [ratio, setRatio] = useState("16:9");
   const [seed, setSeed] = useState("");
   const [quantity, setQuantity] = useState(1);
-  const [syncAudio, setSyncAudio] = useState(true);
+  const [syncAudioPreferences, setSyncAudioPreferences] = useState(
+    () => loadJson(SYNC_AUDIO_PREFERENCES_KEY, {}),
+  );
   const [autoReference, setAutoReference] = useState(true);
   const [notice, setNotice] = useState("请选择中转站并完成 API 配置");
   const [submitting, setSubmitting] = useState(false);
@@ -294,10 +299,18 @@ function Workbench({ onLogout }) {
   const promptInput = useRef(null);
   const profilesRef = useRef(profiles);
   const pollingRef = useRef(false);
+  const deletedTaskIdsRef = useRef(new Set());
 
   const activeProfile =
     profiles.find((profile) => profile.id === activeId) || profiles[0];
   const capability = useMemo(() => capabilityFor(activeProfile), [activeProfile]);
+  const syncAudio = syncAudioForProfile(syncAudioPreferences, activeProfile.id);
+
+  function setSyncAudio(nextValue) {
+    setSyncAudioPreferences((current) => (
+      withSyncAudioPreference(current, activeProfile.id, nextValue)
+    ));
+  }
   const sdVersion = sdVersionForProfile(activeProfile);
   const availableActiveModels = modelOptions[activeProfile.id];
   const sdVersionAvailability = {
@@ -356,6 +369,9 @@ function Workbench({ onLogout }) {
   }, [profiles]);
   useEffect(() => localStorage.setItem(ACTIVE_KEY, activeId), [activeId]);
   useEffect(() => localStorage.setItem(FIXED_CONTENT_KEY, fixedContent), [fixedContent]);
+  useEffect(() => {
+    localStorage.setItem(SYNC_AUDIO_PREFERENCES_KEY, JSON.stringify(syncAudioPreferences));
+  }, [syncAudioPreferences]);
   useEffect(() => localStorage.setItem("video-workbench-mode-v1", workMode), [workMode]);
   useEffect(() => {
     let cancelled = false;
@@ -432,7 +448,6 @@ function Workbench({ onLogout }) {
     if (!capability.resolutions.includes(resolution))
       setResolution(capability.resolutions[0]);
     if (!capability.ratios.includes(ratio)) setRatio(capability.ratios[0]);
-    if (capability.syncAudioFixed) setSyncAudio(true);
   }, [activeProfile.id, activeProfile.model]);
 
   function keyFor(profile) {
@@ -587,6 +602,7 @@ function Workbench({ onLogout }) {
         );
         const changed = pending
           .map((task) => {
+            if (deletedTaskIdsRef.current.has(task.id)) return null;
             const update = updates.find((item) => item?.id === task.id);
             if (!update) return null;
             if (update.transient) {
@@ -1246,9 +1262,40 @@ function Workbench({ onLogout }) {
 
   async function deleteTask(task) {
     if (videoBlob?.taskId === task.id) setVideoBlob(null);
-    await removeStoredTask(task.id);
-    setExpandedTaskId((current) => (current === task.id ? null : current));
-    setTaskRefreshVersion((current) => current + 1);
+    deletedTaskIdsRef.current.add(task.id);
+    try {
+      await removeStoredTask(task.id);
+      setTasks((current) => current.filter((item) => item.id !== task.id));
+      setExpandedTaskId((current) => (current === task.id ? null : current));
+      setTaskRefreshVersion((current) => current + 1);
+    } catch (error) {
+      deletedTaskIdsRef.current.delete(task.id);
+      setNotice(error.message || "删除任务失败");
+    }
+  }
+
+  async function deleteBatch(batch) {
+    const taskIds = batch.tasks.map((task) => task.id);
+    if (!taskIds.length) return;
+    const activeCount = batch.tasks.filter((task) => task.status === "queued" || task.status === "processing").length;
+    const activeWarning = activeCount
+      ? `\n其中 ${activeCount} 条仍在生成；删除只移除本机记录，不会取消中转站已经创建的任务。`
+      : "";
+    if (!window.confirm(`确定删除整个批次“${batch.title}”及其 ${taskIds.length} 条任务记录吗？${activeWarning}\n此操作无法撤销。`)) return;
+
+    taskIds.forEach((id) => deletedTaskIdsRef.current.add(id));
+    try {
+      await removeStoredTasks(taskIds);
+      if (taskIds.includes(videoBlob?.taskId)) setVideoBlob(null);
+      setTasks((current) => current.filter((task) => !taskIds.includes(task.id)));
+      setExpandedTaskId((current) => (taskIds.includes(current) ? null : current));
+      setExpandedBatchId((current) => (current === batch.id ? null : current));
+      setTaskRefreshVersion((current) => current + 1);
+      setNotice(`已删除批次“${batch.title}”及其 ${taskIds.length} 条本机任务记录`);
+    } catch (error) {
+      taskIds.forEach((id) => deletedTaskIdsRef.current.delete(id));
+      setNotice(error.message || "删除批量任务失败");
+    }
   }
 
   async function exportTaskBackup() {
@@ -1570,8 +1617,8 @@ function Workbench({ onLogout }) {
               <label><span>生成数量</span><select value={quantity} onChange={(event) => setQuantity(Number(event.target.value))}>{[1, 2, 3, 4].map((value) => <option key={value}>{value}</option>)}</select></label>
             </div>
             <label className="check-row">
-                        <input type="checkbox" checked={syncAudio} disabled={capability.syncAudioFixed} onChange={(event) => setSyncAudio(event.target.checked)} />
-                        生成同步音频{capability.syncAudioFixed ? "（当前模型固定开启）" : ""}
+                        <input type="checkbox" checked={syncAudio} onChange={(event) => setSyncAudio(event.target.checked)} />
+                        生成同步音频（当前中转默认开启）
             </label>
             <div className="notice" role="status">ⓘ {notice}</div>
             <div className="submit-row">
@@ -1631,15 +1678,21 @@ function Workbench({ onLogout }) {
                 return (
                   <article className={`batch-task-group ${batchExpanded ? "expanded" : ""}`} key={entry.id}>
                     <div className="batch-task-group-head" onClick={() => setExpandedBatchId(batchExpanded ? null : entry.id)}>
-                      <div>
+                      <div className="batch-task-group-summary">
                         <strong>▸ 批量任务｜{entry.title}</strong>
                         <span>共 {entry.tasks.length} 条 · 已生成 {completedCount} · 生成中 {entry.tasks.length - completedCount - failedCount} · 失败 {failedCount}</span>
                       </div>
-                      <button
-                        className="batch-download-button"
-                        disabled={!completedCount || downloadingBatchId === entry.id}
-                        onClick={(event) => { event.stopPropagation(); downloadBatch(entry); }}
-                      >{downloadingBatchId === entry.id ? "下载中…" : `一键下载（${completedCount}）`}</button>
+                      <div className="batch-task-actions">
+                        <button
+                          className="batch-download-button"
+                          disabled={!completedCount || downloadingBatchId === entry.id}
+                          onClick={(event) => { event.stopPropagation(); downloadBatch(entry); }}
+                        >{downloadingBatchId === entry.id ? "下载中…" : `一键下载（${completedCount}）`}</button>
+                        <button
+                          className="delete-button batch-delete-button"
+                          onClick={(event) => { event.stopPropagation(); deleteBatch(entry); }}
+                        >删除批次</button>
+                      </div>
                     </div>
                     <div className="progress-row batch-group-progress"><div className="progress-track"><span style={{ width: `${progress}%` }} /></div><b>{progress}%</b></div>
                     {batchExpanded && (

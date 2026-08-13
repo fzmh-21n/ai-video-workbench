@@ -233,12 +233,14 @@ input, select {
 .task-card.expanded { border-color: #d3ad66; }
 .batch-task-group { overflow: hidden; margin-bottom: 10px; border: 1px solid #d9b878; border-radius: 12px; background: #fff9ed; box-shadow: 0 3px 12px #96671a12; }
 .batch-task-group-head { display: flex; align-items: center; gap: 10px; padding: 13px; cursor: pointer; }
-.batch-task-group-head > div { min-width: 0; flex: 1; }
+.batch-task-group-summary { min-width: 0; flex: 1; }
 .batch-task-group-head strong, .batch-task-group-head span { display: block; }
 .batch-task-group-head strong { overflow: hidden; color: #805414; text-overflow: ellipsis; white-space: nowrap; }
 .batch-task-group-head span { margin-top: 5px; color: #8c7960; font-size: 12px; }
+.batch-task-actions { display: flex; align-items: center; gap: 7px; flex: 0 0 auto; }
 .batch-download-button { border-color: #bfcfbd; background: #edf8ef; color: #287347; white-space: nowrap; }
 .batch-download-button:disabled { border-color: #e2d7c6; background: #f4efe6; color: #aaa091; }
+.batch-delete-button { white-space: nowrap; }
 .batch-group-progress { padding: 0 13px 12px; }
 .batch-task-children { display: grid; gap: 8px; padding: 10px; border-top: 1px solid #ead8b8; background: #fffdf8; }
 .batch-child-task { margin: 0; border-color: #eadcc6; background: #fff; }
@@ -374,5 +376,8 @@ input, select {
   .settings-grid, .url-adder, .task-controls { grid-template-columns: 1fr; }
   .task-backup-buttons { grid-column: 1; justify-content: stretch; }
   .task-backup-buttons button { flex: 1; }
+  .batch-task-group-head { align-items: stretch; flex-direction: column; }
+  .batch-task-actions { width: 100%; }
+  .batch-task-actions button { flex: 1; }
   .task-topline, .pagination { align-items: flex-start; flex-direction: column; }
 }

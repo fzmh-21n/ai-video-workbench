@@ -74,9 +74,16 @@ export async function putTask(task) {
 }
 
 export async function removeTask(id) {
+  return removeTasks([id]);
+}
+
+export async function removeTasks(ids) {
+  const uniqueIds = [...new Set((ids || []).filter(Boolean))];
+  if (!uniqueIds.length) return;
   const database = await openTaskDatabase();
   const transaction = database.transaction(STORE_NAME, "readwrite");
-  transaction.objectStore(STORE_NAME).delete(id);
+  const store = transaction.objectStore(STORE_NAME);
+  for (const id of uniqueIds) store.delete(id);
   await transactionDone(transaction);
 }
 

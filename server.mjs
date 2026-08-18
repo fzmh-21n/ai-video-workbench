@@ -1,5 +1,6 @@
 import express from "express";
 import multer from "multer";
+import COS from "cos-nodejs-sdk-v5";
 import path from "node:path";
 import crypto from "node:crypto";
 import { Readable } from "node:stream";
@@ -23,6 +24,7 @@ import {
 } from "./serverAuth.mjs";
 import {
   LWAIGC_VIDEO_MODELS,
+  isLwaigcDqModel,
   lwaigcLimitIssue,
   lwaigcVideoPayload,
 } from "./src/lwaigcCatalog.js";
@@ -47,6 +49,8 @@ import {
   globalAiOpcStatusPath,
 } from "./src/globalAiOpcCatalog.js";
 import { MAXFORAI_VIDEO_MODELS, maxforaiVideoPayload } from "./src/maxforaiCatalog.js";
+import { CLMM_BASE_URL, clmmLimitIssue, clmmModels, clmmVideoPayload } from "./src/clmmCatalog.js";
+import { PIDOI_BASE_URL, PIDOI_MODELS, pidoiVideoPayload } from "./src/pidoiCatalog.js";
 import { normalizedTaskProgress } from "./src/taskProgress.js";
 import { taskFailureDetails } from "./src/upstreamTaskFailure.js";
 import { friendlyUpstreamError } from "./src/upstreamError.js";
@@ -56,6 +60,7 @@ import {
   sanitizeDiagnostic,
 } from "./serverDiagnostics.mjs";
 import { capabilityLimitIssue, submissionTimeoutForAdapter } from "./src/providerCatalog.js";
+import { cosFingerprintKey, cosPublicUrl, normalizeCosConfig } from "./src/cosStorage.js";
 
 // 与飞猫最新插件保持一致：本地中转服务不继承梯子/环境代理。
 // 只影响本工作台进程，不会改动 Windows 或浏览器的代理设置。
@@ -72,10 +77,15 @@ const port = Number(process.env.PORT || 8787);
 const dataDir = path.join(rootDir, ".workbench-data");
 const uploadDir = path.join(dataDir, "uploads");
 const diagnosticLogPath = path.join(dataDir, "diagnostics.jsonl");
+const cosConfigPath = path.join(dataDir, "cos-config.json");
 const automaticUploadServices = AUTOMATIC_UPLOAD_SERVICES;
 const automaticUploadCircuit = createUploadCircuitBreaker({ failureThreshold: 2 });
 mkdirSync(dataDir, { recursive: true });
 mkdirSync(uploadDir, { recursive: true });
+
+function cosConfig() {
+  try { return normalizeCosConfig(JSON.parse(readFileSync(cosConfigPath, "utf8"))); } catch { return null; }
+}
 
 function diagnosticEntries() {
   try {
@@ -268,6 +278,8 @@ function inferAdapter(url) {
   if (host === "ziyuai.vip" || host === "www.ziyuai.vip") return "ziyuai";
   if (host === "zcbservice.aizfw.cn" || host === "docs.globalaiopc.com" || host === "api.globalaiopc.com") return "globalaiopc";
   if (host === "maxforai.top" || host === "www.maxforai.top") return "maxforai";
+  if (host === "clmm-mall.top" || host === "www.clmm-mall.top") return "clmm";
+  if (host === "pidoi.com" || host === "www.pidoi.com") return "pidoi";
   return "newapi";
 }
 
@@ -278,7 +290,7 @@ function providerConfig(req, requireModel = true) {
   let model = encodedModel;
   try { model = decodeURIComponent(encodedModel); } catch {}
   const requestedAdapter = String(req.get("x-api-adapter") || "").trim();
-  const adapter = ["fmgo", "paipu", "viralee", "canseedream", "lwaigc", "meaicc", "ziyuai", "globalaiopc", "maxforai", "newapi"].includes(requestedAdapter)
+  const adapter = ["fmgo", "paipu", "viralee", "canseedream", "lwaigc", "meaicc", "ziyuai", "globalaiopc", "maxforai", "clmm", "pidoi", "newapi"].includes(requestedAdapter)
     ? requestedAdapter
     : inferAdapter(resolvedBaseUrl);
   // canseedream.com 目前会 301 跳转至 see.ximeiedu.org。跨域跳转会按
@@ -287,6 +299,8 @@ function providerConfig(req, requireModel = true) {
   if (adapter === "canseedream" && new URL(resolvedBaseUrl).hostname === "canseedream.com")
     resolvedBaseUrl = "https://see.ximeiedu.org";
   if (adapter === "globalaiopc") resolvedBaseUrl = GLOBAL_AIOPC_BASE_URL;
+  if (adapter === "clmm") resolvedBaseUrl = CLMM_BASE_URL;
+  if (adapter === "pidoi") resolvedBaseUrl = PIDOI_BASE_URL;
   const rawUploadUrl = String(req.get("x-media-upload-url") || "").trim();
   const mediaUploadUrl = rawUploadUrl
     ? publicUrl(rawUploadUrl, "素材上传地址").toString()
@@ -294,7 +308,7 @@ function providerConfig(req, requireModel = true) {
       ? `${resolvedBaseUrl}/v1/assets`
       : adapter === "ziyuai"
         ? `${resolvedBaseUrl}/api/v1/uploads`
-        : adapter === "maxforai"
+      : adapter === "maxforai"
           ? `${resolvedBaseUrl}/v1/assets`
       : "";
   const mediaUploadKey = String(req.get("x-media-upload-key") || "").trim() || apiKey;
@@ -374,6 +388,8 @@ function fallbackModels(adapter) {
                 ? GLOBAL_AIOPC_MODELS
                 : adapter === "maxforai"
                   ? MAXFORAI_VIDEO_MODELS
+                : adapter === "pidoi"
+                  ? PIDOI_MODELS
         : [];
 }
 
@@ -433,6 +449,7 @@ function videoUrlsFrom(body, base) {
     body?.file_url,
     typeof body?.object === "string" && /^https?:\/\//i.test(body.object) ? body.object : null,
     body?.metadata?.url,
+    typeof body?.content === "string" ? body.content : null,
     body?.content?.video_url,
     body?.output?.url,
     body?.result?.url,
@@ -440,6 +457,7 @@ function videoUrlsFrom(body, base) {
     body?.data?.result_url,
     body?.data?.url,
     body?.data?.metadata?.url,
+    typeof body?.data?.content === "string" ? body.data.content : null,
     body?.data?.[0]?.url,
     body?.data?.[0]?.video_url,
     body?.previewUrl,
@@ -597,7 +615,72 @@ async function uploadTemporaryMedia(file, material = {}, req) {
   );
 }
 
+async function uploadCosMedia(storage, file, material = {}, req) {
+  const bytes = fileBytes(file);
+  const displayName = String(material.name || file.originalname || "本地素材");
+  const kind = ["image", "audio", "video"].includes(material.kind) ? material.kind : "file";
+  const extension = path.extname(displayName || file.originalname || "").toLowerCase().replace(/[^.a-z0-9]/g, "");
+  const digest = crypto.createHash("sha256").update(bytes).digest("hex");
+  const key = cosFingerprintKey({ kind, digest, extension });
+  const startedAt = Date.now();
+  writeDiagnostic(req, "cos_upload_started", { service: "Tencent COS", fileName: displayName, kind, bytes: bytes.length });
+  try {
+    const client = new COS({ SecretId: storage.secretId, SecretKey: storage.secretKey, Timeout: 300_000 });
+    const exists = await new Promise((resolve, reject) => client.headObject({
+      Bucket: storage.bucket,
+      Region: storage.region,
+      Key: key,
+    }, (error) => {
+      const status = Number(error?.statusCode || error?.status || 0);
+      if (!error) return resolve(true);
+      if (status === 404 || error?.code === "NoSuchKey" || error?.code === "NotFound") return resolve(false);
+      return reject(error);
+    }));
+    if (exists) {
+      writeDiagnostic(req, "cos_upload_reused", {
+        service: "Tencent COS",
+        fileName: displayName,
+        kind,
+        bytes: bytes.length,
+        fingerprint: digest,
+        durationMs: Date.now() - startedAt,
+      });
+      return cosPublicUrl(storage, key);
+    }
+    await new Promise((resolve, reject) => client.putObject({
+      Bucket: storage.bucket,
+      Region: storage.region,
+      Key: key,
+      Body: bytes,
+      ContentType: file.mimetype || "application/octet-stream",
+    }, (error, data) => error ? reject(error) : resolve(data)));
+    writeDiagnostic(req, "cos_upload_completed", {
+      service: "Tencent COS",
+      fileName: displayName,
+      kind,
+      bytes: bytes.length,
+      fingerprint: digest,
+      durationMs: Date.now() - startedAt,
+    });
+    return cosPublicUrl(storage, key);
+  } catch (error) {
+    const status = Number(error?.statusCode || error?.status || 500);
+    const message = error?.error?.Message || error?.message || error?.code || "COS 上传失败";
+    writeDiagnostic(req, "cos_upload_failed", {
+      service: "Tencent COS",
+      fileName: displayName,
+      kind,
+      durationMs: Date.now() - startedAt,
+      status,
+      error: message,
+    });
+    throw httpError(status, `腾讯云 COS 上传失败：${message}`);
+  }
+}
+
 async function uploadMedia(config, file, material = {}, req) {
+  const storage = cosConfig();
+  if (storage) return uploadCosMedia(storage, file, material, req);
   if (mediaUploadMode(config, file.mimetype) === "temporary") {
     return uploadTemporaryMedia(file, material, req);
   }
@@ -739,7 +822,7 @@ async function prepareMaterials(config, files, meta, req) {
       const file = files[Number(item.fileIndex)];
       if (!file) throw httpError(400, `找不到素材文件：${item.name || item.tag}`);
       let url;
-      if (kind === "image" && config.adapter === "newapi" && !config.mediaUploadUrl) {
+      if (kind === "image" && config.adapter === "newapi" && !config.mediaUploadUrl && !cosConfig()) {
         url = imageDataUrl(file);
       } else {
         url = await uploadMedia(config, file, item, req);
@@ -1106,6 +1189,23 @@ async function createLwaigc(config, input) {
 async function createVideo(config, input) {
   if (config.adapter === "fmgo") return createFmgo(config, input);
   if (config.adapter === "lwaigc") return createLwaigc(config, input);
+  if (config.adapter === "clmm") {
+    const response = await upstream(`${CLMM_BASE_URL}/v1/videos`, {
+      method: "POST",
+      headers: authHeaders(config, { "Content-Type": "application/json" }),
+      body: JSON.stringify(clmmVideoPayload(config.model, input)),
+    }, 180_000);
+    const body = await readJson(response);
+    const taskId = taskIdFrom(body);
+    if (!taskId) throw httpError(502, "CLMM Mall 创建成功但没有返回 task_id");
+    return {
+      adapter: "clmm",
+      baseUrl: CLMM_BASE_URL,
+      taskId,
+      statusPath: `/v1/videos/${encodeURIComponent(taskId)}`,
+      model: config.model,
+    };
+  }
   if (config.adapter === "globalaiopc") {
     const response = await upstream(`${config.baseUrl}${globalAiOpcCreatePath(config.model)}`, {
       method: "POST",
@@ -1169,6 +1269,8 @@ async function createVideo(config, input) {
           ? meaiccVideoPayload(config.model, input)
         : config.adapter === "maxforai"
           ? maxforaiVideoPayload(config.model, input)
+        : config.adapter === "pidoi"
+          ? pidoiVideoPayload(config.model, input)
         : genericPayload(config, input);
   const response = await upstream(`${config.baseUrl}/v1/videos`, {
     method: "POST",
@@ -1344,6 +1446,19 @@ app.post("/api/diagnostics/clear", (req, res) => {
   return res.json({ removed });
 });
 
+app.get("/api/storage/status", (_req, res) => {
+  const storage = cosConfig();
+  return res.json(storage
+    ? {
+        configured: true,
+        provider: "Tencent COS",
+        bucket: storage.bucket,
+        region: storage.region,
+        endpoint: `https://${storage.bucket}.cos.${storage.region}.myqcloud.com`,
+      }
+    : { configured: false });
+});
+
 app.get("/api/config/models", async (req, res, next) => {
   try {
     const config = providerConfig(req, false);
@@ -1393,6 +1508,15 @@ app.get("/api/config/models", async (req, res, next) => {
       const catalog = ziyuModels(body);
       if (!catalog.models.length) throw httpError(502, "紫域 AI 当前没有返回可用视频模型");
       return res.json(catalog);
+    }
+    if (config.adapter === "clmm") {
+      const response = await upstream(`${CLMM_BASE_URL}/v1/api/pricing`, { headers: authHeaders(config) });
+      const models = clmmModels(await readJson(response));
+      if (!models.length) throw httpError(502, "CLMM Mall 当前没有返回可用视频模型");
+      return res.json({ models });
+    }
+    if (config.adapter === "pidoi") {
+      return res.json({ models: PIDOI_MODELS });
     }
     const response = await upstream(`${config.baseUrl}/v1/models`, { headers: authHeaders(config) });
     if (!response.ok && [404, 405, 501].includes(response.status)) {
@@ -1494,6 +1618,10 @@ app.post("/api/tasks", upload.array("references", 50), async (req, res, next) =>
     validateLwaigcLimits(config, meta, requestedDuration);
     validateMeaiccLimits(config, meta, requestedDuration);
     validateProviderLimits(config, meta, requestedDuration);
+    if (config.adapter === "clmm") {
+      const issue = clmmLimitIssue(config.model, meta, requestedDuration);
+      if (issue) throw httpError(400, issue);
+    }
     const prepareStartedAt = Date.now();
     writeDiagnostic(req, "task_materials_prepare_started", { materialCount: meta.length });
     const materials = await prepareMaterials(config, files, meta, req);
@@ -1507,6 +1635,8 @@ app.post("/api/tasks", upload.array("references", 50), async (req, res, next) =>
       materials,
       String(req.body.autoReference || "true") !== "false",
     );
+    if (config.adapter === "pidoi" && config.model === "tejiasd" && prompt.length > 2500)
+      throw httpError(400, `Pidoi tejiasd 提示词最多 2500 字，当前为 ${prompt.length} 字`);
     const input = {
       prompt,
       materials,
@@ -1522,6 +1652,8 @@ app.post("/api/tasks", upload.array("references", 50), async (req, res, next) =>
         : null,
       syncAudio: String(req.body.syncAudio || "false") === "true",
     };
+    if (config.adapter === "lwaigc" && isLwaigcDqModel(config.model) && Number(input.seed) > 999999999)
+      throw httpError(400, "DQ Seedance 2.0 的随机种子必须在 0–999999999 之间");
     const quantity = safeNumber(req.body.quantity, 1, 1, 4);
     const providerStartedAt = Date.now();
     writeDiagnostic(req, "provider_submit_started", {
@@ -1625,7 +1757,7 @@ app.get("/api/tasks/:id/content", async (req, res, next) => {
     const job = decodeJob(req.params.id);
     verifyJobConfig(config, job);
     const range = req.get("range");
-    if (config.adapter !== "canseedream" && config.adapter !== "meaicc" && config.adapter !== "ziyuai" && config.adapter !== "globalaiopc") {
+    if (config.adapter !== "canseedream" && config.adapter !== "meaicc" && config.adapter !== "ziyuai" && config.adapter !== "globalaiopc" && config.adapter !== "clmm" && config.adapter !== "pidoi") {
       const fixedResponse = await upstream(
         `${config.baseUrl}/v1/videos/${encodeURIComponent(job.taskId)}/content`,
         { headers: authHeaders(config, range ? { Range: range } : {}) },

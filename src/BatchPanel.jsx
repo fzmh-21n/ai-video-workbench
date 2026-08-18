@@ -11,6 +11,7 @@ import {
 } from "./batchPrompts.js";
 import { internalizeProjectAliases, planProjectReferences } from "./projectReferences.js";
 import { allTasks, putTasks } from "./taskStore.js";
+import { taskReuseSnapshot } from "./taskReuse.js";
 import { pollDelayForAdapter } from "./providerCatalog.js";
 import { normalizedTaskProgress } from "./taskProgress.js";
 import { diagnosticHeaders, recordDiagnostic } from "./diagnostics.js";
@@ -77,6 +78,7 @@ export default function BatchPanel({
   capability,
   duration,
   fixedContent,
+  fixedContentVersionLabel,
   headers,
   notice,
   onNotice,
@@ -609,6 +611,17 @@ export default function BatchPanel({
       model: activeProfile.model,
       title: `第${String(item.section).padStart(2, "0")}节-${activeProfile.model}${created.length > 1 ? `-${index + 1}` : ""}`,
       prompt: submittedPrompt,
+      reuseSnapshot: taskReuseSnapshot({
+        prompt: item.prompt,
+        references,
+        duration: params.duration,
+        resolution: params.resolution,
+        ratio: params.ratio,
+        seed: params.seed,
+        quantity: params.quantity,
+        syncAudio: params.syncAudio,
+        autoReference,
+      }),
       projectName: projectName || "未归类",
       batchId,
       batchTitle: item.sourceName
@@ -845,7 +858,7 @@ export default function BatchPanel({
         </div>
       </div>
 
-      <label className="field-label fixed-label">固定内容<span>提交每一节时自动放在最前方</span></label>
+      <label className="field-label fixed-label">固定内容（{fixedContentVersionLabel}）<span>两个模型版本分别保存；提交每一节时自动放在最前方</span></label>
       <textarea className="fixed-content" value={fixedContent} onChange={(event) => setFixedContent(event.target.value)} />
 
       <div className="batch-toolbar">

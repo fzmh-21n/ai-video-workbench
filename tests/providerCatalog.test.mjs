@@ -45,7 +45,7 @@ test("includes LWAIGC as a built-in OpenAI-compatible provider", () => {
     mediaUploadUrl: "https://ai.lwaigc.cn/v1/assets",
   });
   assert.equal(inferAdapter(profile.baseUrl), "lwaigc");
-  assert.equal(LWAIGC_VIDEO_MODELS.length, 23);
+  assert.equal(LWAIGC_VIDEO_MODELS.length, 25);
 });
 
 test("applies the documented LWAIGC capacity for Seedance 2.5", () => {
@@ -180,8 +180,8 @@ test("rejects every SD2.5 one-over-capacity boundary and a 31 second request", (
   assert.match(lwaigcLimitIssue(model, materials(30, 10, 10), 31), /不支持 31 秒/);
 });
 
-test("defines sane capabilities for all 23 documented LWAIGC video models", () => {
-  assert.equal(new Set(LWAIGC_VIDEO_MODELS).size, 23);
+test("defines sane capabilities for all 25 documented LWAIGC video models", () => {
+  assert.equal(new Set(LWAIGC_VIDEO_MODELS).size, 25);
   for (const model of LWAIGC_VIDEO_MODELS) {
     const capability = lwaigcCapability(model);
     assert.ok(capability.images >= 1 && capability.images <= 30, `${model} 图片上限无效`);

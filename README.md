@@ -1,11 +1,19 @@
 # AI 视频生成工作台（多中转站网页版）
 
+## 统一素材存储
+
+工作台支持将所有中转站的本地图片、音频和视频统一上传到腾讯云 COS，再把稳定的 HTTPS 地址发送给各中转站。配置文件位于 `.workbench-data/cos-config.json`，该目录已被 Git 忽略，密钥不会进入源码包或 GitHub。
+
+当前电脑已配置香港 COS 存储桶 `ai-video-workbench-assets-1418205891`。启用后，无需再为每家中转分别填写素材上传地址；中转站自带的上传接口和 Uguu、Litterbox、Tmpfiles 只在未配置 COS 时作为旧版兼容路径。
+
 一个在本机运行的 AI 视频生成工作台，用来统一管理多个 API 中转站、项目素材、提示词引用和视频生成任务。
 
 当前内置适配：
 
 - FMGO / 飞猫
 - Paipu / Lec API
+- CLMM Mall（动态读取 `/v1/api/pricing` 模型）
+- Pidoi（`tejiasd`）
 - ViralE
 - CanSeeDream / 看见梦想
 - LWAIGC
@@ -172,6 +180,8 @@ http://localhost:8787/
 
 - FMGO：`https://api.fmgo.top`
 - Paipu：`https://api.paipu.net`
+- CLMM Mall：`https://clmm-mall.top`（接口前缀 `/v1`）
+- Pidoi：`https://pidoi.com`（卡脸 933、SD2.0 931、SD2.0 Fast、SD2.5 720P）
 - ViralE：`https://api.viralee.top`
 - CanSeeDream：`https://see.ximeiedu.org`
 - LWAIGC：`https://ai.lwaigc.cn`

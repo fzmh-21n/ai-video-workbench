@@ -1,4 +1,5 @@
-const SECTION_MARKER = /^(\d+)\.\s*[（(]([^\r\n]*?)[）)]\s*$/gm;
+const SECTION_MARKER = /^(?:(\d+)\.\s*[（(]([^\r\n]*?)[）)]\s*|剧情\s*[\[【]\s*(\d+)\s*[\]】]\s*[：:]?\s*)$/gm;
+const OUTPUT_WRAPPER = /^\s*_::~(?:OUTPUT_START|OUTPUT_END|FIELD)::~_\s*$/gm;
 
 export function splitBatchPrompts(text) {
   const source = String(text || "").replace(/^\uFEFF/, "").trim();
@@ -7,13 +8,13 @@ export function splitBatchPrompts(text) {
   return markers.map((marker, index) => {
     const start = marker.index;
     const end = markers[index + 1]?.index ?? source.length;
-    const section = Number(marker[1]);
-    const title = marker[2].trim();
+    const section = Number(marker[1] || marker[3]);
+    const title = marker[2]?.trim() || `剧情[${section}]`;
     return {
       id: `section-${section}-${index}`,
       section,
       title,
-      prompt: source.slice(start, end).trim(),
+      prompt: source.slice(start, end).replace(OUTPUT_WRAPPER, "").trim(),
       references: [],
       missingImages: [],
       status: "unmatched",

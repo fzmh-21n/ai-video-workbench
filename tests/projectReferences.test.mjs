@@ -33,6 +33,75 @@ test("cleans spaces, hidden newlines, full-width digits, and full-width undersco
   assert.equal(cleanMatchValue(" \r０１１＿人物１\n "), "011_人物1");
 });
 
+test("matches the new people and scene section headings", () => {
+  const prompt = [
+    "【出场人物】",
+    "001_林晓（站在门口）",
+    "【出场场景】",
+    "101_医院走廊（冷色灯光）",
+  ].join("\n");
+  const result = planProjectReferences(prompt, [
+    image("001_林晓.png"),
+    image("101_医院走廊.jpg"),
+  ]);
+
+  assert.equal(result.matches.length, 2);
+  assert.equal(result.missing.length, 0);
+  assert.match(result.annotatedPrompt, /【出场人物】\n@001_林晓=001_林晓（站在门口），/);
+  assert.match(result.annotatedPrompt, /【出场场景】\n@101_医院走廊=101_医院走廊，/);
+  assert.doesNotMatch(result.annotatedPrompt, /冷色灯光/);
+});
+
+test("matches voices under adjacent role voice and dubbing instruction headings", () => {
+  const prompt = [
+    "【角色声线】【配音指令】",
+    "林晓【声音1】：清亮、语速平稳。",
+    "顾远【声音2】：低沉、略带沙哑。",
+    "【出场人物】",
+    "001_林晓",
+  ].join("\n");
+  const result = planProjectReferences(prompt, [audio("林晓.wav"), audio("顾远.mp3"), image("001_林晓.png")]);
+
+  assert.equal(result.matches.filter((item) => item.role === "voice").length, 2);
+  assert.equal(result.missing.length, 0);
+  assert.match(result.annotatedPrompt, /【角色声线】【配音指令】\n@林晓=林晓【声音1】/);
+  assert.match(result.annotatedPrompt, /\n@顾远=顾远【声音2】/);
+});
+
+test("matches numbered audio files from leading parenthesized voice labels", () => {
+  const prompt = [
+    "【角色声线】【配音指令】：",
+    "（声音1）张桂芳｜角色图_002_张桂芳油污版｜克制、平静、边界明确｜平均3.4-3.8字/秒。",
+    "（声音2）王丽华｜角色图_003_王丽华｜尖刻、理所当然、控制欲强｜平均4.1字/秒。",
+    "（声音3）一楼目击业主｜本组无新对白，保持上一组声线锁定。",
+  ].join("\n");
+  const result = planProjectReferences(prompt, [
+    audio("声音1.wav"),
+    audio("声音2.wav"),
+    audio("声音3.wav"),
+  ]);
+
+  assert.deepEqual(result.matches.map((item) => item.requested), ["声音1", "声音2", "声音3"]);
+  assert.equal(result.missing.length, 0);
+  assert.match(result.annotatedPrompt, /（@声音1=声音1）张桂芳/);
+  assert.match(result.annotatedPrompt, /（@声音2=声音2）王丽华/);
+  assert.match(result.annotatedPrompt, /（@声音3=声音3）一楼目击业主/);
+});
+
+test("matches numbered audio files from voice assignment lines", () => {
+  const prompt = [
+    "【角色声线】【配音指令】：",
+    "声音1=张桂芳，继续平稳讲事实。",
+    "声音2=王丽华，音量骤然拔高。",
+    "【出场人物】：",
+    "角色图_002_张桂芳油污版",
+  ].join("\n");
+  const result = planProjectReferences(prompt, [audio("声音1.wav"), audio("声音2.wav"), image("角色图_002_张桂芳油污版.png")]);
+
+  assert.deepEqual(result.matches.filter((item) => item.role === "voice").map((item) => item.requested), ["声音1", "声音2"]);
+  assert.equal(result.missing.length, 0);
+});
+
 test("matches a complete filename exactly before extension fallback", () => {
   const plan = planProjectReferences(
     "【本节出场的所有人物】\n011_人物1.jpg",

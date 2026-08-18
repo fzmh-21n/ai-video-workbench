@@ -1,4 +1,6 @@
 export const LWAIGC_VIDEO_MODELS = [
+  "dq-sd933-pro",
+  "dq-sd933-pro-face",
   "firefly-seedance2-1080p",
   "firefly-seedance2-720p",
   "firefly-seedance2-480p",
@@ -26,6 +28,10 @@ export const LWAIGC_VIDEO_MODELS = [
 
 const range = (start, end) => Array.from({ length: end - start + 1 }, (_, index) => start + index);
 
+export function isLwaigcDqModel(model) {
+  return ["dq-sd933-pro", "dq-sd933-pro-face"].includes(String(model || "").trim().toLowerCase());
+}
+
 export function lwaigcCapability(modelName) {
   const model = String(modelName || "");
   const fixedResolution = model.match(/-(480p|720p|1080p)(?:-|$)/i)?.[1]?.toLowerCase() || "720p";
@@ -40,6 +46,17 @@ export function lwaigcCapability(modelName) {
     syncAudio: false,
     syncAudioFixed: false,
   };
+
+  if (isLwaigcDqModel(model)) {
+    return {
+      ...common,
+      durations: range(4, 15),
+      resolutions: ["720p"],
+      ratios: ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"],
+      seed: true,
+      syncAudio: true,
+    };
+  }
 
   if (model === "ft-seedance2.0-pro") {
     return { ...common, videos: 0, resolutions: ["720p"], ratios: ["9:16", "16:9", "1:1", "4:3", "3:4"] };
@@ -95,6 +112,15 @@ export function lwaigcVideoPayload(model, input, clientTaskId) {
       "1:1": "1024x1024",
     }[input.aspectRatio] || "1280x720";
     return payload;
+  }
+
+  if (isLwaigcDqModel(model)) {
+    payload.size = input.aspectRatio === "9:16"
+      ? "720x1280"
+      : input.aspectRatio === "16:9"
+        ? "1280x720"
+        : "720p";
+    if (input.seed !== null && input.seed !== undefined) payload.seed = Number(input.seed);
   }
 
   payload.aspect_ratio = input.aspectRatio;

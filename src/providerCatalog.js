@@ -7,6 +7,8 @@ import {
   globalAiOpcCapability,
 } from "./globalAiOpcCatalog.js";
 import { MAXFORAI_BASE_URL, MAXFORAI_VIDEO_MODELS, maxforaiCapability } from "./maxforaiCatalog.js";
+import { CLMM_BASE_URL, clmmCapability } from "./clmmCatalog.js";
+import { PIDOI_BASE_URL, PIDOI_MODELS, pidoiCapability } from "./pidoiCatalog.js";
 
 export const DEFAULT_PROFILES = [
   {
@@ -81,6 +83,22 @@ export const DEFAULT_PROFILES = [
     model: "firefly-seedance2-720p",
     mediaUploadUrl: `${MAXFORAI_BASE_URL}/v1/assets`,
   },
+  {
+    id: "clmm",
+    name: "CLMM Mall",
+    baseUrl: CLMM_BASE_URL,
+    adapter: "clmm",
+    model: "",
+    mediaUploadUrl: "",
+  },
+  {
+    id: "pidoi",
+    name: "Pidoi",
+    baseUrl: PIDOI_BASE_URL,
+    adapter: "pidoi",
+    model: "tejiasd",
+    mediaUploadUrl: "",
+  },
 ];
 
 export const FALLBACK_MODELS = {
@@ -143,15 +161,27 @@ export const FALLBACK_MODELS = {
   meaicc: MEAICC_VIDEO_MODELS,
   globalaiopc: GLOBAL_AIOPC_MODELS,
   maxforai: MAXFORAI_VIDEO_MODELS,
+  clmm: [],
+  pidoi: PIDOI_MODELS,
 };
 
 export const FALLBACK_MODEL_LABELS = {
+  lwaigc: {
+    "dq-sd933-pro": "DQ Seedance 2.0 · 卡脸 · 720P · 4–15秒",
+    "dq-sd933-pro-face": "DQ Seedance 2.0 · 不卡脸 · 720P · 4–15秒",
+  },
   canseedream: {
     kele_pool: "可乐线路 · 480P · 15秒 · 450积分",
     tc_pool: "怀旧线路 · 720P · 自动时长 · 468积分",
     shutiao_pool: "香蕉线路 · 720P · 15秒 · 768积分",
     lajiao_pool: "辣椒 SD2.5 满血 · 720P · 4–30秒 · 1190积分",
     yingtao_pool: "樱桃 SD2.5 满血 · 720P · 30秒 · 2990积分",
+  },
+  pidoi: {
+    tejiasd: "卡脸 933 · 特价 SD2.0",
+    "sd-2.0-931-720p": "SD2.0 931 · 720P · 4–15秒",
+    "sd-2.0-fast-720p": "SD2.0 Fast · 480P请求档 · 4–15秒",
+    "sd-2.5-720p": "SD2.5 · 720P · 4–29秒",
   },
 };
 
@@ -178,6 +208,10 @@ const SD_VERSION_MODELS = {
   globalaiopc: {
     sd20: "sd_2.0_fast_discount_720p",
   },
+  pidoi: {
+    sd20: "sd-2.0-931-720p",
+    sd25: "sd-2.5-720p",
+  },
 };
 
 export function preferredModelForSdVersion(adapter, version) {
@@ -185,7 +219,7 @@ export function preferredModelForSdVersion(adapter, version) {
 }
 
 export function pollDelayForAdapter(adapter) {
-  return adapter === "meaicc" || adapter === "globalaiopc" ? 21_000 : 10_000;
+  return adapter === "clmm" ? 3_000 : adapter === "meaicc" || adapter === "globalaiopc" ? 21_000 : 10_000;
 }
 
 export function submissionTimeoutForAdapter(adapter) {
@@ -438,6 +472,8 @@ function rawCapabilityFor(profile) {
   }
   if (adapter === "globalaiopc") return globalAiOpcCapability(profile?.model);
   if (adapter === "maxforai") return maxforaiCapability(profile?.model);
+  if (adapter === "clmm") return clmmCapability(profile?.model);
+  if (adapter === "pidoi") return pidoiCapability(profile?.model);
 
   return base;
 }
@@ -524,6 +560,8 @@ export function inferAdapter(baseUrl) {
     if (host === "ziyuai.vip" || host === "www.ziyuai.vip") return "ziyuai";
     if (host === "zcbservice.aizfw.cn" || host === "docs.globalaiopc.com" || host === "api.globalaiopc.com") return "globalaiopc";
     if (host === "maxforai.top" || host === "www.maxforai.top") return "maxforai";
+    if (host === "clmm-mall.top" || host === "www.clmm-mall.top") return "clmm";
+    if (host === "pidoi.com" || host === "www.pidoi.com") return "pidoi";
   } catch {}
   return "newapi";
 }
@@ -531,6 +569,22 @@ export function inferAdapter(baseUrl) {
 export function migrateSavedProfile(profile) {
   if (!profile || typeof profile !== "object") return profile;
   const inferredAdapter = inferAdapter(profile.baseUrl);
+  if (profile.id === "clmm" || inferredAdapter === "clmm" || profile.adapter === "clmm") {
+    return { ...profile, baseUrl: CLMM_BASE_URL, adapter: "clmm", mediaUploadUrl: "" };
+  }
+  if (profile.id === "pidoi" || inferredAdapter === "pidoi" || profile.adapter === "pidoi") {
+    return {
+      ...profile,
+      baseUrl: PIDOI_BASE_URL,
+      adapter: "pidoi",
+      model: PIDOI_MODELS.includes(profile.model) ? profile.model : "tejiasd",
+      // Pidoi 的公开文档没有提供素材上传端点。清除旧版本曾写入的
+      // 推测地址，留空时由本地服务自动把素材转成临时公网 URL。
+      mediaUploadUrl: profile.mediaUploadUrl === `${PIDOI_BASE_URL}/v1/media/uploads`
+        ? ""
+        : profile.mediaUploadUrl || "",
+    };
+  }
   const officialMaxForAI = profile.id === "maxforai" || inferredAdapter === "maxforai";
   if (officialMaxForAI || profile.adapter === "maxforai") {
     return {

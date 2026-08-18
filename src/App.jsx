@@ -34,6 +34,8 @@ import {
 import { normalizedTaskProgress } from "./taskProgress.js";
 import { orderedDownloadFilename, orderedDownloadTasks } from "./taskDownload.js";
 import { syncAudioForProfile, withSyncAudioPreference } from "./syncAudioPreference.js";
+import { loadFixedContentByVersion, withFixedContentForVersion } from "./fixedContentStore.js";
+import { reusableAssetFor, taskReuseSnapshot } from "./taskReuse.js";
 import {
   filesFromProjectDirectory,
   loadProjectDirectory,
@@ -52,6 +54,7 @@ const PROFILE_KEY = "video-workbench-profiles-v2";
 const ACTIVE_KEY = "video-workbench-active-profile-v2";
 const TASK_KEY = "video-workbench-tasks-v2";
 const FIXED_CONTENT_KEY = "video-workbench-fixed-content-v1";
+const FIXED_CONTENT_BY_VERSION_KEY = "video-workbench-fixed-content-by-version-v2";
 const SYNC_AUDIO_PREFERENCES_KEY = "video-workbench-sync-audio-v1";
 const PAGE_SIZE = 10;
 const MAX_TOTAL_BYTES = 200 * 1024 * 1024;
@@ -146,7 +149,9 @@ function normalizeModels(payload, adapter) {
   const values = raw
     .map((model) => (typeof model === "string" ? model : model?.id || model?.name))
     .filter(Boolean);
-  if (adapter === "lwaigc" && Array.isArray(payload?.models)) return values;
+  if (adapter === "lwaigc" && Array.isArray(payload?.models)) {
+    return [...new Set([...FALLBACK_MODELS.lwaigc.slice(0, 2), ...values])];
+  }
   return values.length ? values : FALLBACK_MODELS[adapter] || [];
 }
 
@@ -255,9 +260,14 @@ function Workbench({ onLogout }) {
   const [taskProjectOptions, setTaskProjectOptions] = useState([]);
   const [taskQuery, setTaskQuery] = useState("");
   const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
-  const [fixedContent, setFixedContent] = useState(
-    () => localStorage.getItem(FIXED_CONTENT_KEY) || "",
-  );
+  const [fixedContentByVersion, setFixedContentByVersion] = useState(() => {
+    const initialProfile = profiles.find((profile) => profile.id === activeId) || profiles[0];
+    return loadFixedContentByVersion(
+      loadJson(FIXED_CONTENT_BY_VERSION_KEY, null),
+      localStorage.getItem(FIXED_CONTENT_KEY) || "",
+      sdVersionForProfile(initialProfile),
+    );
+  });
   const [projectName, setProjectName] = useState("");
   const [projectAssets, setProjectAssets] = useState([]);
   const [projectDirectoryHandle, setProjectDirectoryHandle] = useState(null);
@@ -312,6 +322,10 @@ function Workbench({ onLogout }) {
     ));
   }
   const sdVersion = sdVersionForProfile(activeProfile);
+  const fixedContent = fixedContentByVersion[sdVersion] || "";
+  function setFixedContent(value) {
+    setFixedContentByVersion((current) => withFixedContentForVersion(current, sdVersion, value));
+  }
   const availableActiveModels = modelOptions[activeProfile.id];
   const sdVersionAvailability = {
     sd20: modelForSdVersion(activeProfile, "sd20", availableActiveModels),
@@ -368,7 +382,10 @@ function Workbench({ onLogout }) {
     profilesRef.current = profiles;
   }, [profiles]);
   useEffect(() => localStorage.setItem(ACTIVE_KEY, activeId), [activeId]);
-  useEffect(() => localStorage.setItem(FIXED_CONTENT_KEY, fixedContent), [fixedContent]);
+  useEffect(() => {
+    localStorage.setItem(FIXED_CONTENT_BY_VERSION_KEY, JSON.stringify(fixedContentByVersion));
+    localStorage.removeItem(FIXED_CONTENT_KEY);
+  }, [fixedContentByVersion]);
   useEffect(() => {
     localStorage.setItem(SYNC_AUDIO_PREFERENCES_KEY, JSON.stringify(syncAudioPreferences));
   }, [syncAudioPreferences]);
@@ -1151,6 +1168,17 @@ function Workbench({ onLogout }) {
           model: activeProfile.model,
           title: `${activeProfile.model}-${createdAtMs}${created.length > 1 ? `-${index + 1}` : ""}`,
           prompt: submittedPrompt,
+          reuseSnapshot: taskReuseSnapshot({
+            prompt,
+            references,
+            duration,
+            resolution,
+            ratio,
+            seed,
+            quantity,
+            syncAudio,
+            autoReference,
+          }),
           projectName: projectName || "未归类",
           diagnosticRequestId: requestId,
           submitDurationMs: Math.round(performance.now() - submitStartedAt),
@@ -1199,6 +1227,94 @@ function Workbench({ onLogout }) {
     } catch (error) {
       setNotice(error.message || "读取视频失败");
     }
+  }
+
+  async function reuseFailedTask(task) {
+    const snapshot = task.reuseSnapshot || {};
+    const targetProfile = profiles.find((profile) => profile.id === task.profileId) || activeProfile;
+    const targetModel = task.model || targetProfile.model;
+    const targetVersion = sdVersionForProfile({ ...targetProfile, model: targetModel });
+    const versionFixedContent = fixedContentByVersion[targetVersion] || "";
+    let reusablePrompt = String(snapshot.prompt || task.prompt || "");
+    if (!snapshot.prompt && versionFixedContent && reusablePrompt.startsWith(versionFixedContent)) {
+      reusablePrompt = reusablePrompt.slice(versionFixedContent.length).replace(/^\s+/, "");
+    }
+
+    const restored = [];
+    const missing = [];
+    for (const [index, reference] of (snapshot.references || []).entries()) {
+      const asset = reusableAssetFor(reference, projectAssets);
+      if (asset?.file) {
+        restored.push({
+          id: uid("ref"),
+          kind: reference.kind || asset.kind,
+          file: asset.file,
+          name: asset.file.name,
+          alias: reference.alias || fileStem(asset.file.name),
+          projectAssetKey: asset.key,
+          preview: URL.createObjectURL(asset.file),
+          subType: reference.subType || "reference",
+          durationSeconds: reference.durationSeconds || await readMediaDuration(asset.file, reference.kind || asset.kind),
+        });
+      } else if (reference.url) {
+        restored.push({
+          id: uid("ref"),
+          kind: reference.kind || kindFromUrl(reference.url, "image"),
+          url: reference.url,
+          name: reference.name || `素材 ${index + 1}`,
+          alias: reference.alias || "",
+          preview: reference.url,
+          subType: reference.subType || "reference",
+          durationSeconds: reference.durationSeconds || null,
+        });
+      } else {
+        missing.push(reference.name || `素材 ${index + 1}`);
+      }
+    }
+
+    // 旧任务是在“可复用快照”加入前创建的。只要当前项目仍然打开，
+    // 就用原提示词再做一次精确项目匹配，让旧失败任务也尽量能一键复用。
+    if (!snapshot.references && projectAssets.length) {
+      const plan = planProjectReferences(reusablePrompt, projectAssets);
+      const selectedAssets = [...new Map(plan.matches.map((match) => [match.asset.key, match.asset])).values()];
+      const durations = await Promise.all(selectedAssets.map((asset) => readMediaDuration(asset.file, asset.kind)));
+      selectedAssets.forEach((asset, index) => restored.push({
+        id: uid("ref"),
+        kind: asset.kind,
+        file: asset.file,
+        name: asset.file.name,
+        alias: asset.stem,
+        projectAssetKey: asset.key,
+        preview: URL.createObjectURL(asset.file),
+        subType: "reference",
+        durationSeconds: durations[index] || null,
+      }));
+      if (plan.matches.length) reusablePrompt = plan.annotatedPrompt;
+    }
+
+    clearReferences();
+    setReferences(reindexReferences(restored));
+    setPrompt(reusablePrompt);
+    if (snapshot.duration != null) setDuration(snapshot.duration);
+    if (snapshot.resolution) setResolution(snapshot.resolution);
+    if (snapshot.ratio) setRatio(snapshot.ratio);
+    if (snapshot.seed != null) setSeed(snapshot.seed);
+    if (snapshot.quantity != null) setQuantity(snapshot.quantity);
+    if (snapshot.syncAudio != null) {
+      setSyncAudioPreferences((current) => withSyncAudioPreference(current, targetProfile.id, snapshot.syncAudio));
+    }
+    if (snapshot.autoReference != null) setAutoReference(snapshot.autoReference);
+    setProfiles((current) => current.map((profile) => (
+      profile.id === targetProfile.id ? { ...profile, model: targetModel } : profile
+    )));
+    setActiveId(targetProfile.id);
+    setWorkMode("single");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    setNotice(
+      missing.length
+        ? `已复用失败任务的提示词和 ${restored.length} 个素材；${missing.length} 个本地素材未在当前项目找到：${missing.join("、")}`
+        : `已复用失败任务的提示词和 ${restored.length} 个参考素材，请检查后手动开始生成`,
+    );
   }
 
   async function downloadBatch(batch) {
@@ -1395,6 +1511,7 @@ function Workbench({ onLogout }) {
               capability={capability}
               duration={duration}
               fixedContent={fixedContent}
+              fixedContentVersionLabel={sdVersion === "sd25" ? "SD2.5" : "SD2.0"}
               headers={headersFor(activeProfile)}
               notice={notice}
               onNotice={setNotice}
@@ -1463,8 +1580,8 @@ function Workbench({ onLogout }) {
             </div>
 
             <label className="field-label fixed-label" htmlFor="fixed-content">
-              固定内容
-              <span>每次提交自动放在提示词最前方；只在你手动修改时变化，清空素材不会删除</span>
+              固定内容（{sdVersion === "sd25" ? "SD2.5" : "SD2.0"}）
+              <span>两个模型版本分别保存；每次提交自动放在提示词最前方，清空素材不会删除</span>
             </label>
             <textarea
               className="fixed-content"
@@ -1705,6 +1822,7 @@ function Workbench({ onLogout }) {
                               <div className="task-topline"><code>#{task.title || task.id}</code><span className={`task-status ${task.status}`}>● {statusLabel(task.status)}</span></div>
                               <div className="progress-row"><div className="progress-track"><span style={{ width: `${shownProgress}%` }} /></div><b>{shownProgress}%</b></div>
                               {task.error && <p className="task-error">错误：{task.error}</p>}
+                              {task.status === "failed" && <button className="secondary-button" onClick={(event) => { event.stopPropagation(); reuseFailedTask(task); }}>复用本条</button>}
                               {childExpanded && (
                                 <div className="task-details" onClick={(event) => event.stopPropagation()}>
                                   {task.status === "completed" ? (
@@ -1733,6 +1851,7 @@ function Workbench({ onLogout }) {
                     <div>
                       <button className="icon-button" onClick={(event) => { event.stopPropagation(); renameTask(task); }}>✎</button>
                       <span className={`task-status ${task.status}`}>● {statusLabel(task.status)}</span>
+                      {task.status === "failed" && <button className="secondary-button" onClick={(event) => { event.stopPropagation(); reuseFailedTask(task); }}>复用本条</button>}
                       {task.status === "failed" && <button className="delete-button" onClick={(event) => { event.stopPropagation(); deleteTask(task); }}>删除</button>}
                     </div>
                   </div>
@@ -1776,7 +1895,7 @@ function Workbench({ onLogout }) {
               <div className="config-form">
                 <label><span>配置名称</span><input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="例如：主力 API" /></label>
                 <label><span>Base URL</span><input value={draft.baseUrl} onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value, adapter: inferAdapter(event.target.value) })} placeholder="https://api.example.com" /></label>
-                <label><span>接口类型</span><select value={draft.adapter} onChange={(event) => setDraft({ ...draft, adapter: event.target.value })}><option value="fmgo">FMGO / 飞猫</option><option value="paipu">Paipu / Lec</option><option value="viralee">ViralE</option><option value="canseedream">CanSeeDream / 看见梦想</option><option value="lwaigc">LWAIGC 官方统一接口</option><option value="meaicc">MEAICC / 林木森AI</option><option value="ziyuai">Ziyu AI / 紫域AI</option><option value="globalaiopc">GlobalAiOpc / 全球AI</option><option value="maxforai">MaxForAI</option><option value="newapi">New API 通用</option></select></label>
+                <label><span>接口类型</span><select value={draft.adapter} onChange={(event) => setDraft({ ...draft, adapter: event.target.value })}><option value="fmgo">FMGO / 飞猫</option><option value="paipu">Paipu / Lec</option><option value="viralee">ViralE</option><option value="canseedream">CanSeeDream / 看见梦想</option><option value="lwaigc">LWAIGC 官方统一接口</option><option value="meaicc">MEAICC / 林木森AI</option><option value="ziyuai">Ziyu AI / 紫域AI</option><option value="globalaiopc">GlobalAiOpc / 全球AI</option><option value="maxforai">MaxForAI</option><option value="clmm">CLMM Mall</option><option value="pidoi">Pidoi</option><option value="newapi">New API 通用</option></select></label>
                 <label><span>API Key</span><input type="password" value={draftKey} onChange={(event) => setDraftKey(event.target.value)} placeholder="sk-••••••••" /><small>{rememberKey ? "将保存在此浏览器；公共电脑请勿启用。" : "仅保存在当前浏览器会话，不写入源码。"}</small></label>
                 <label className="remember-key-row"><input type="checkbox" checked={rememberKey} onChange={(event) => setRememberKey(event.target.checked)} /><span>在这台浏览器记住当前中转站的 Key</span></label>
                 <label>

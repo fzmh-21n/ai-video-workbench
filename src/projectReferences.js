@@ -1,4 +1,9 @@
 const SECTION_RULES = [
+  { heading: "角色声线", kind: "audio", role: "voice" },
+  { heading: "配音指令", kind: "audio", role: "voice" },
+  { heading: "出场人物", kind: "image", role: "people" },
+  { heading: "出场场景", kind: "image", role: "background" },
+  // 兼容已经保存的旧提示词；新提示词统一使用上面的简化标题。
   { heading: "本段角色声线锁定", kind: "audio", role: "voice" },
   { heading: "本节出场的所有人物", kind: "image", role: "people" },
   { heading: "本节的所有背景", kind: "image", role: "background" },
@@ -24,6 +29,11 @@ function sectionRange(prompt, heading) {
   const markerStart = prompt.indexOf(marker);
   if (markerStart < 0) return null;
   const contentStart = markerStart + marker.length;
+  // 新模板会把两个声音标题紧挨着写成【角色声线】【配音指令】。
+  // 前一个标题没有正文，真正的声音内容由后一个标题负责解析。
+  if (heading === "角色声线" && prompt.slice(contentStart).startsWith("【配音指令】")) {
+    return { markerStart, contentStart, end: contentStart, content: "" };
+  }
   const nextHeading = prompt.slice(contentStart).search(/(?:^|\r?\n)\s*【[^】]+】/);
   const end = nextHeading < 0 ? prompt.length : contentStart + nextHeading;
   return { markerStart, contentStart, end, content: prompt.slice(contentStart, end) };
@@ -67,10 +77,17 @@ function withoutParenthesizedDescription(value) {
 }
 
 function requestedNames(content, role) {
-  const meaningfulLines = content.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const meaningfulLines = content
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !/^[：:，,；;。.\s]+$/.test(line));
   if (role === "voice") {
     return uniqueEntries(
       meaningfulLines.map((line) => {
+        const leadingVoiceNumber = line.match(/^[（(]\s*(声音[0-9０-９]+)\s*[）)]/);
+        if (leadingVoiceNumber) return cleanRequestedName(leadingVoiceNumber[1]);
+        const assignedVoiceNumber = line.match(/^(声音[0-9０-９]+)\s*=/);
+        if (assignedVoiceNumber) return cleanRequestedName(assignedVoiceNumber[1]);
         const voiceLabel = line
           .split(/[：:]/, 1)[0]
           .replace(/\s*【声音[0-9０-９]+】\s*$/, "")

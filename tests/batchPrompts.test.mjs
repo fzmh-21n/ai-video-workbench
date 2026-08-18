@@ -129,6 +129,36 @@ test("supports an arbitrary starting section and western parentheses", () => {
   assert.deepEqual(items.map((item) => item.section), [21, 22]);
 });
 
+test("splits wrapped plot bracket sections and removes generator wrappers", () => {
+  const items = splitBatchPrompts(`_::~OUTPUT_START::~_
+_::~FIELD::~_
+
+剧情[3]：
+
+【本组目标时长】：约14.7秒
+【出场人物】：
+角色图_002_张桂芳油污版
+
+_::~OUTPUT_END::~_
+
+_::~OUTPUT_START::~_
+_::~FIELD::~_
+
+剧情[4]：
+
+【本组目标时长】：约14.6秒
+【出场场景】：
+场景图_002_垃圾油污小区大厅四视角
+
+_::~OUTPUT_END::~_`);
+
+  assert.deepEqual(items.map((item) => item.section), [3, 4]);
+  assert.deepEqual(items.map((item) => item.title), ["剧情[3]", "剧情[4]"]);
+  assert.match(items[0].prompt, /^剧情\[3\]：/);
+  assert.match(items[1].prompt, /^剧情\[4\]：/);
+  assert.doesNotMatch(items.map((item) => item.prompt).join("\n"), /_::~/);
+});
+
 test("runs every batch item while respecting the selected concurrency", async () => {
   let active = 0;
   let maximum = 0;

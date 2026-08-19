@@ -1,5 +1,6 @@
 export const PIDOI_BASE_URL = "https://pidoi.com";
 export const PIDOI_MODELS = [
+  "sora-v3-933-pro",
   "tejiasd",
   "sd-2.0-931-720p",
   "sd-2.0-fast-720p",
@@ -7,6 +8,20 @@ export const PIDOI_MODELS = [
 ];
 
 export function pidoiCapability(model = "tejiasd") {
+  if (model === "sora-v3-933-pro") {
+    return {
+      images: 9,
+      videos: 3,
+      audios: 3,
+      durations: [15],
+      resolutions: ["720p"],
+      ratios: ["16:9", "9:16", "4:3", "3:4", "1:1", "21:9"],
+      seed: false,
+      syncAudio: true,
+      syncAudioFixed: false,
+      _sdVersion: "sd20",
+    };
+  }
   if (model === "sd-2.5-720p") {
     return {
       images: 30,
@@ -57,12 +72,13 @@ export function pidoiVideoPayload(model, input) {
     const payload = {
       model,
       prompt: input.prompt,
-      duration: Number(input.duration),
       aspect_ratio: input.aspectRatio,
-      generate_audio: Boolean(input.syncAudio),
+      resolution: String(input.resolution || pidoiCapability(model).resolutions[0] || "720p").toLowerCase(),
+      seconds: String(input.duration),
     };
-    if (images.length) payload.image_urls = images;
-    if (videos.length) payload.video_urls = videos;
+    if (images.length) payload.image_url = images[0];
+    if (images.length > 1) payload.reference_image_urls = images.slice(1);
+    if (videos.length) payload.reference_videos = videos;
     if (audios.length) payload.audio_urls = audios;
     return payload;
   }
@@ -79,4 +95,23 @@ export function pidoiVideoPayload(model, input) {
   if (audios.length) payload.audios = audios;
   if (input.seed !== null && input.seed !== undefined) payload.seed = Number(input.seed);
   return payload;
+}
+
+export function pidoiLimitIssue(model, materials = [], duration) {
+  if (model !== "sora-v3-933-pro") return "";
+  const capability = pidoiCapability(model);
+  if (!capability.durations.includes(Number(duration))) return `${model} 当前只支持 15 秒`;
+  if (materials.length > 12) return `${model} 单次请求的图片、视频和音频合计最多 12 个，当前为 ${materials.length} 个`;
+  if (materials.some((item) => item?.kind === "image" && item?.subType === "last_frame"))
+    return `${model} 不支持尾帧图，请改为参考图或删除尾帧素材`;
+  for (const kind of ["video", "audio"]) {
+    const label = kind === "video" ? "参考视频" : "参考音频";
+    const selected = materials.filter((item) => item?.kind === kind);
+    const knownDurations = selected.map((item) => Number(item?.durationSeconds)).filter((value) => Number.isFinite(value) && value > 0);
+    const invalid = knownDurations.find((value) => value < 2 || value > 15);
+    if (invalid != null) return `${label}单条时长必须为 2–15 秒，当前检测到 ${invalid} 秒`;
+    const total = knownDurations.reduce((sum, value) => sum + value, 0);
+    if (total > 15) return `${label}总时长不能超过 15 秒，当前为 ${total} 秒`;
+  }
+  return "";
 }

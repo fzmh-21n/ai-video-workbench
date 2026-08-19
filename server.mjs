@@ -50,7 +50,7 @@ import {
 } from "./src/globalAiOpcCatalog.js";
 import { MAXFORAI_VIDEO_MODELS, maxforaiVideoPayload } from "./src/maxforaiCatalog.js";
 import { CLMM_BASE_URL, clmmLimitIssue, clmmModels, clmmVideoPayload } from "./src/clmmCatalog.js";
-import { PIDOI_BASE_URL, PIDOI_MODELS, pidoiVideoPayload } from "./src/pidoiCatalog.js";
+import { PIDOI_BASE_URL, PIDOI_MODELS, pidoiLimitIssue, pidoiVideoPayload } from "./src/pidoiCatalog.js";
 import { normalizedTaskProgress } from "./src/taskProgress.js";
 import { taskFailureDetails } from "./src/upstreamTaskFailure.js";
 import { friendlyUpstreamError } from "./src/upstreamError.js";
@@ -1620,6 +1620,10 @@ app.post("/api/tasks", upload.array("references", 50), async (req, res, next) =>
     validateProviderLimits(config, meta, requestedDuration);
     if (config.adapter === "clmm") {
       const issue = clmmLimitIssue(config.model, meta, requestedDuration);
+      if (issue) throw httpError(400, issue);
+    }
+    if (config.adapter === "pidoi") {
+      const issue = pidoiLimitIssue(config.model, meta, requestedDuration);
       if (issue) throw httpError(400, issue);
     }
     const prepareStartedAt = Date.now();

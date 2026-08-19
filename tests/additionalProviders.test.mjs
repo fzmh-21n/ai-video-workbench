@@ -14,7 +14,7 @@ import {
   clmmModels,
   clmmVideoPayload,
 } from "../src/clmmCatalog.js";
-import { pidoiVideoPayload } from "../src/pidoiCatalog.js";
+import { pidoiCapability, pidoiLimitIssue, pidoiVideoPayload } from "../src/pidoiCatalog.js";
 
 const materials = [
   { kind: "image", url: "https://example.com/a.png" },
@@ -103,21 +103,66 @@ test("builds the exact Pidoi tejiasd request", () => {
   assert.deepEqual(capabilityFor({ adapter: "pidoi", model: "tejiasd" }).resolutions, ["720p"]);
 });
 
-test("builds documented Pidoi SD2 request without changing tejiasd fields", () => {
+test("builds documented Pidoi SD2 request with the universal video fields", () => {
   const payload = pidoiVideoPayload("sd-2.0-931-720p", {
-    prompt: "测试", duration: 15, aspectRatio: "9:16", materials, syncAudio: true,
+    prompt: "测试", duration: 15, resolution: "720p", aspectRatio: "9:16", materials, syncAudio: true,
   });
   assert.deepEqual(payload, {
     model: "sd-2.0-931-720p",
     prompt: "测试",
-    duration: 15,
     aspect_ratio: "9:16",
-    generate_audio: true,
-    image_urls: ["https://example.com/a.png"],
-    video_urls: ["https://example.com/a.mp4"],
+    resolution: "720p",
+    seconds: "15",
+    image_url: "https://example.com/a.png",
+    reference_videos: ["https://example.com/a.mp4"],
     audio_urls: ["https://example.com/a.wav"],
   });
-  assert.equal("resolution" in payload, false);
+});
+
+test("builds documented Pidoi SD2.5 request with the same universal video fields", () => {
+  const payload = pidoiVideoPayload("sd-2.5-720p", {
+    prompt: "测试", duration: 20, resolution: "720p", aspectRatio: "16:9", materials, syncAudio: true,
+  });
+  assert.equal(payload.seconds, "20");
+  assert.equal(payload.resolution, "720p");
+  assert.equal(payload.image_url, "https://example.com/a.png");
+  assert.deepEqual(payload.reference_videos, ["https://example.com/a.mp4"]);
+  assert.deepEqual(payload.audio_urls, ["https://example.com/a.wav"]);
+  assert.equal("duration" in payload, false);
+  assert.equal("generate_audio" in payload, false);
+});
+
+test("builds the documented Pidoi sora-v3-933-pro universal request", () => {
+  const richMaterials = [
+    { kind: "image", url: "https://example.com/main.jpg" },
+    { kind: "image", url: "https://example.com/ref-1.jpg" },
+    { kind: "video", url: "https://example.com/motion.mp4", durationSeconds: 5 },
+    { kind: "audio", url: "https://example.com/voice.wav", durationSeconds: 4 },
+  ];
+  assert.deepEqual(pidoiVideoPayload("sora-v3-933-pro", {
+    prompt: "保持人物一致", duration: 15, aspectRatio: "21:9", materials: richMaterials, syncAudio: true,
+  }), {
+    model: "sora-v3-933-pro",
+    prompt: "保持人物一致",
+    aspect_ratio: "21:9",
+    resolution: "720p",
+    seconds: "15",
+    image_url: "https://example.com/main.jpg",
+    reference_image_urls: ["https://example.com/ref-1.jpg"],
+    reference_videos: ["https://example.com/motion.mp4"],
+    audio_urls: ["https://example.com/voice.wav"],
+  });
+  assert.deepEqual(pidoiCapability("sora-v3-933-pro").durations, [15]);
+});
+
+test("enforces Pidoi universal-reference duration, total-file, and tail-frame rules", () => {
+  assert.match(pidoiLimitIssue("sora-v3-933-pro", Array.from({ length: 13 }, () => ({ kind: "image" })), 15), /最多 12 个/);
+  assert.match(pidoiLimitIssue("sora-v3-933-pro", [{ kind: "image", subType: "last_frame" }], 15), /不支持尾帧图/);
+  assert.match(pidoiLimitIssue("sora-v3-933-pro", [{ kind: "audio", durationSeconds: 16 }], 15), /2–15 秒/);
+  assert.match(pidoiLimitIssue("sora-v3-933-pro", [
+    { kind: "video", durationSeconds: 8 }, { kind: "video", durationSeconds: 8 },
+  ], 15), /总时长不能超过 15 秒/);
+  assert.equal(pidoiLimitIssue("sora-v3-933-pro", [{ kind: "audio", durationSeconds: 5 }], 15), "");
 });
 
 test("exposes the documented Pidoi SD2.5 limits", () => {

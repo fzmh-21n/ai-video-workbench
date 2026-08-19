@@ -8,10 +8,18 @@ import {
   inferAdapter,
   migrateSavedProfile,
   modelForSdVersion,
+  preferredDurationForVersion,
   preferredModelForSdVersion,
   sdVersionForProfile,
   sdVersionForModel,
 } from "../src/providerCatalog.js";
+
+test("selects 15 seconds for SD2.0 and the model maximum for SD2.5", () => {
+  assert.equal(preferredDurationForVersion({ durations: [4, 10, 15] }, "sd20"), 15);
+  assert.equal(preferredDurationForVersion({ durations: [4, 15, 29] }, "sd25"), 29);
+  assert.equal(preferredDurationForVersion({ durations: [30] }, "sd25"), 30);
+  assert.equal(preferredDurationForVersion({ durations: ["auto"] }, "sd25"), "auto");
+});
 import {
   LWAIGC_VIDEO_MODELS,
   lwaigcCapability,

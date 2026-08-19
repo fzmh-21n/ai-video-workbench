@@ -1,8 +1,14 @@
 const SECTION_MARKER = /^(?:(\d+)\.\s*[（(]([^\r\n]*?)[）)]\s*|剧情\s*[\[【]\s*(\d+)\s*[\]】]\s*[：:]?\s*)$/gm;
 const OUTPUT_WRAPPER = /^\s*_::~(?:OUTPUT_START|OUTPUT_END|FIELD)::~_\s*$/gm;
+const DECORATIVE_SECTION_BANNER = /^\s*={5,}\s*\r?\n\s*剧情\s*[\[【]\s*\d+\s*[\]】]\s*[：:]?\s*\r?\n\s*={5,}\s*$/gm;
 
 export function splitBatchPrompts(text) {
-  const source = String(text || "").replace(/^\uFEFF/, "").trim();
+  const source = String(text || "")
+    .replace(/^\uFEFF/, "")
+    // 合集文件可能先用“==== / 剧情[n] / ====”做目录横幅，随后在
+    // OUTPUT_START 内再次写真正章节标题。横幅不属于提示词，先移除以免重复拆节。
+    .replace(DECORATIVE_SECTION_BANNER, "")
+    .trim();
   if (!source) return [];
   const markers = [...source.matchAll(SECTION_MARKER)];
   return markers.map((marker, index) => {

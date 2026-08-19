@@ -68,6 +68,18 @@ test("exposes the documented MEAICC Seedance 2.0 limits", () => {
   assert.deepEqual(capabilityFor({ adapter: "meaicc", model: "seedance-2.0" }), capability);
 });
 
+test("separates MEAICC SD2.5 duration and material capacity from SD2.0", () => {
+  const capability = meaiccCapability("sd-2.5-c1");
+  assert.deepEqual({
+    images: capability.images,
+    audios: capability.audios,
+    videos: capability.videos,
+    firstDuration: capability.durations[0],
+    lastDuration: capability.durations.at(-1),
+  }, { images: 30, audios: 10, videos: 10, firstDuration: 4, lastDuration: 30 });
+  assert.equal(meaiccLimitIssue("sd-2.5-c1", materials(30, 10, 10), 30), "");
+});
+
 test("maps MEAICC only to the SD2.0 switch", () => {
   assert.equal(preferredModelForSdVersion("meaicc", "sd20"), "seedance-2.0");
   assert.equal(preferredModelForSdVersion("meaicc", "sd25"), "");

@@ -178,6 +178,7 @@ export const FALLBACK_MODEL_LABELS = {
     yingtao_pool: "樱桃 SD2.5 满血 · 720P · 30秒 · 2990积分",
   },
   pidoi: {
+    "sora-v3-933-pro": "Sora V3 933 Pro · 720P · 15秒 · 9图/3音频/3视频",
     tejiasd: "卡脸 933 · 特价 SD2.0",
     "sd-2.0-931-720p": "SD2.0 931 · 720P · 4–15秒",
     "sd-2.0-fast-720p": "SD2.0 Fast · 480P请求档 · 4–15秒",
@@ -209,7 +210,7 @@ const SD_VERSION_MODELS = {
     sd20: "sd_2.0_fast_discount_720p",
   },
   pidoi: {
-    sd20: "sd-2.0-931-720p",
+    sd20: "sora-v3-933-pro",
     sd25: "sd-2.5-720p",
   },
 };
@@ -463,7 +464,7 @@ function rawCapabilityFor(profile) {
   }
 
   if (adapter === "lwaigc") return lwaigcCapability(profile?.model);
-  if (adapter === "meaicc") return meaiccCapability();
+  if (adapter === "meaicc") return meaiccCapability(profile?.model);
   if (adapter === "ziyuai") {
     const live = profile?.routeCapabilities?.[profile?.model];
     return live
@@ -492,6 +493,14 @@ export function capabilityFor(profile) {
     return { ...capability, images: 9, audios: 3, videos: 3 };
   }
   return capability;
+}
+
+export function preferredDurationForVersion(capability, version) {
+  const durations = Array.isArray(capability?.durations) ? capability.durations : [];
+  const numeric = durations.filter((value) => typeof value === "number" && Number.isFinite(value));
+  if (version === "sd20" && numeric.includes(15)) return 15;
+  if (version === "sd25" && numeric.length) return Math.max(...numeric);
+  return durations[0] ?? 15;
 }
 
 export function capabilityLimitIssue(profile, materials, duration) {

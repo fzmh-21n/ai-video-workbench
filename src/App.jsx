@@ -8,6 +8,7 @@ import {
   migrateSavedProfile,
   modelForSdVersion,
   pollDelayForAdapter,
+  preferredDurationForVersion,
   sdVersionForProfile,
 } from "./providerCatalog.js";
 import {
@@ -458,10 +459,7 @@ function Workbench({ onLogout }) {
     if (page > pageCount) setPage(pageCount);
   }, [page, pageCount]);
   useEffect(() => {
-    if (sdVersion === "sd20" && capability.durations.includes(15))
-      setDuration(15);
-    else if (!capability.durations.includes(Number(duration)))
-      setDuration(capability.durations[0]);
+    setDuration(preferredDurationForVersion(capability, sdVersion));
     if (!capability.resolutions.includes(resolution))
       setResolution(capability.resolutions[0]);
     if (!capability.ratios.includes(ratio)) setRatio(capability.ratios[0]);

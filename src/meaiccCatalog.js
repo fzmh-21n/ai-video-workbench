@@ -1,6 +1,21 @@
 export const MEAICC_VIDEO_MODELS = ["seedance-2.0"];
 
-export function meaiccCapability() {
+export function meaiccCapability(model = "") {
+  const isSd25 = /(?:^|[-_.])(?:sd|seedance)[-_.]?2[-_.]?5(?:[-_.]|$)/i.test(String(model));
+  if (isSd25) {
+    return {
+      images: 30,
+      videos: 10,
+      audios: 10,
+      durations: Array.from({ length: 27 }, (_, index) => index + 4),
+      resolutions: ["720p"],
+      ratios: ["16:9", "9:16", "1:1"],
+      seed: false,
+      syncAudio: false,
+      syncAudioFixed: false,
+      _sdVersion: "sd25",
+    };
+  }
   return {
     images: 9,
     videos: 3,
@@ -11,6 +26,7 @@ export function meaiccCapability() {
     seed: false,
     syncAudio: false,
     syncAudioFixed: false,
+    _sdVersion: "sd20",
   };
 }
 
@@ -41,7 +57,7 @@ export function meaiccVideoPayload(model, input) {
 
 export function meaiccLimitIssue(model, materials, duration) {
   if (!String(model || "").trim()) return "请选择 MEAICC 视频模型";
-  const capability = meaiccCapability();
+  const capability = meaiccCapability(model);
   const counts = (materials || []).reduce(
     (result, item) => {
       const kind = ["image", "audio", "video"].includes(item?.kind) ? item.kind : "image";
@@ -57,11 +73,15 @@ export function meaiccLimitIssue(model, materials, duration) {
       return `${model} 的${label}参考最多 ${limit} 个，当前提交了 ${counts[kind]} 个`;
     }
   }
-  if (!capability.durations.includes(duration)) return `${model} 不支持 ${duration} 秒，请选择 10 秒或 15 秒`;
+  if (!capability.durations.includes(duration)) {
+    const first = capability.durations[0];
+    const last = capability.durations.at(-1);
+    return `${model} 不支持 ${duration} 秒，请选择 ${first === last ? `${first} 秒` : `${first}–${last} 秒`}`;
+  }
   const inputVideoSeconds = (materials || [])
     .filter((item) => item?.kind === "video")
     .reduce((total, item) => total + (Number(item.durationSeconds) || 0), 0);
-  if (inputVideoSeconds + duration > 25) {
+  if (capability._sdVersion !== "sd25" && inputVideoSeconds + duration > 25) {
     return `输入视频与输出视频总时长不能超过 25 秒；当前为 ${inputVideoSeconds + duration} 秒`;
   }
   return "";

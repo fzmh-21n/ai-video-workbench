@@ -102,6 +102,29 @@ test("matches numbered audio files from voice assignment lines", () => {
   assert.equal(result.missing.length, 0);
 });
 
+test("matches every inline assignment in the compact voice lock heading", () => {
+  const prompt = [
+    "【声音锁定】：张桂芳=声音1 王丽华=声音2",
+    "（（no srt, no BGM））",
+    "[0.0-3.5秒] 🎤（声音2）台词内容",
+  ].join("\n");
+  const result = planProjectReferences(prompt, [audio("声音1.wav"), audio("声音2.wav")]);
+  assert.deepEqual(result.matches.map((item) => item.requested), ["声音1", "声音2"]);
+  assert.match(result.annotatedPrompt, /张桂芳=@声音1=声音1 王丽华=@声音2=声音2/);
+  assert.match(result.annotatedPrompt, /\n\[0\.0-3\.5秒\] 🎤（声音2）台词内容$/);
+  assert.equal(result.missing.length, 0);
+});
+
+test("matches compact numbered voices under the numbered voice lock heading", () => {
+  const prompt = [
+    "【声音编号锁定】：声音1张桂芳 / 声音5老马 / 声音6小陈",
+    "[0.0-1.1秒] 🎤（声音5）台词内容",
+  ].join("\n");
+  const result = planProjectReferences(prompt, [audio("声音1.wav"), audio("声音5.wav"), audio("声音6.wav")]);
+  assert.deepEqual(result.matches.map((item) => item.requested), ["声音1", "声音5", "声音6"]);
+  assert.equal(result.missing.length, 0);
+});
+
 test("matches a complete filename exactly before extension fallback", () => {
   const plan = planProjectReferences(
     "【本节出场的所有人物】\n011_人物1.jpg",

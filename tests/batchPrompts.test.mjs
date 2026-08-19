@@ -159,6 +159,36 @@ _::~OUTPUT_END::~_`);
   assert.doesNotMatch(items.map((item) => item.prompt).join("\n"), /_::~/);
 });
 
+test("ignores decorative plot banners in Seedance prompt collections", () => {
+  const items = splitBatchPrompts(`Seedance 2.0 分节提示词合集
+收录范围：剧情[6]—剧情[7]
+
+========================================
+剧情[6]
+========================================
+
+_::~OUTPUT_START::~_
+_::~FIELD::~_
+剧情[6]：
+【本组目标时长】：约14.9秒
+_::~OUTPUT_END::~_
+
+========================================
+剧情[7]
+========================================
+
+_::~OUTPUT_START::~_
+_::~FIELD::~_
+剧情[7]：
+【本组目标时长】：约14.8秒
+_::~OUTPUT_END::~_`);
+
+  assert.equal(items.length, 2);
+  assert.deepEqual(items.map((item) => item.section), [6, 7]);
+  assert.deepEqual(items.map((item) => item.title), ["剧情[6]", "剧情[7]"]);
+  assert.doesNotMatch(items.map((item) => item.prompt).join("\n"), /={5,}|_::~/);
+});
+
 test("runs every batch item while respecting the selected concurrency", async () => {
   let active = 0;
   let maximum = 0;

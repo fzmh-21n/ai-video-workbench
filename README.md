@@ -13,7 +13,7 @@
 - FMGO / 飞猫
 - Paipu / Lec API
 - CLMM Mall（动态读取 `/v1/api/pricing` 模型）
-- Pidoi（`tejiasd`）
+- Pidoi（`sora-v3-933-pro`、`tejiasd` 等）
 - ViralE
 - CanSeeDream / 看见梦想
 - LWAIGC
@@ -181,7 +181,7 @@ http://localhost:8787/
 - FMGO：`https://api.fmgo.top`
 - Paipu：`https://api.paipu.net`
 - CLMM Mall：`https://clmm-mall.top`（接口前缀 `/v1`）
-- Pidoi：`https://pidoi.com`（卡脸 933、SD2.0 931、SD2.0 Fast、SD2.5 720P）
+- Pidoi：`https://pidoi.com`（通用 SD 模型 `sora-v3-933-pro`、卡脸 933、SD2.0 931、SD2.0 Fast、SD2.5 720P）
 - ViralE：`https://api.viralee.top`
 - CanSeeDream：`https://see.ximeiedu.org`
 - LWAIGC：`https://ai.lwaigc.cn`

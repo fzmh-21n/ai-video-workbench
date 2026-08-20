@@ -1,6 +1,6 @@
 const SECTION_MARKER = /^(?:(\d+)\.\s*[（(]([^\r\n]*?)[）)]\s*|剧情\s*[\[【]\s*(\d+)\s*[\]】]\s*[：:]?\s*)$/gm;
 const OUTPUT_WRAPPER = /^\s*_::~(?:OUTPUT_START|OUTPUT_END|FIELD)::~_\s*$/gm;
-const DECORATIVE_SECTION_BANNER = /^\s*={5,}\s*\r?\n\s*剧情\s*[\[【]\s*\d+\s*[\]】]\s*[：:]?\s*\r?\n\s*={5,}\s*$/gm;
+const DECORATIVE_SECTION_BANNER = /^\s*[=═]{5,}\s*\r?\n\s*剧情\s*[\[【]\s*\d+\s*[\]】]\s*[：:]?\s*\r?\n\s*[=═]{5,}\s*$/gm;
 
 export function splitBatchPrompts(text) {
   const source = String(text || "")
@@ -11,7 +11,7 @@ export function splitBatchPrompts(text) {
     .trim();
   if (!source) return [];
   const markers = [...source.matchAll(SECTION_MARKER)];
-  return markers.map((marker, index) => {
+  const candidates = markers.map((marker, index) => {
     const start = marker.index;
     const end = markers[index + 1]?.index ?? source.length;
     const section = Number(marker[1] || marker[3]);
@@ -28,8 +28,19 @@ export function splitBatchPrompts(text) {
       expanded: index === 0,
       overrideEnabled: false,
       overrides: {},
+      _sourceIndex: index,
     };
   });
+  // 某些合集会同时写“章节目录横幅”和真正的剧情标题。即使横幅样式
+  // 尚未被识别，也只保留同一章节号中内容最完整的一项，避免整批翻倍。
+  const bySection = new Map();
+  for (const item of candidates) {
+    const current = bySection.get(item.section);
+    if (!current || item.prompt.length > current.prompt.length) bySection.set(item.section, item);
+  }
+  return [...bySection.values()]
+    .sort((left, right) => left._sourceIndex - right._sourceIndex)
+    .map(({ _sourceIndex, ...item }, index) => ({ ...item, id: `section-${item.section}-${index}`, expanded: index === 0 }));
 }
 
 export function batchSerializable(items) {

@@ -36,7 +36,9 @@ function sectionRange(prompt, heading) {
   if (heading === "角色声线" && prompt.slice(contentStart).startsWith("【配音指令】")) {
     return { markerStart, contentStart, end: contentStart, content: "" };
   }
-  const nextHeading = prompt.slice(contentStart).search(/(?:^|\r?\n)\s*【[^】]+】/);
+  // 标题既可能独占一行，也可能像单条提示词一样全部写在同一行。
+  // 【声音1】是声线内容里的编号，不是新模块标题。
+  const nextHeading = prompt.slice(contentStart).search(/【(?!声音[0-9０-９]+】)[^】]+】/);
   const end = nextHeading < 0 ? prompt.length : contentStart + nextHeading;
   return { markerStart, contentStart, end, content: prompt.slice(contentStart, end) };
 }
@@ -81,7 +83,7 @@ function withoutParenthesizedDescription(value) {
 function requestedNames(content, role) {
   const meaningfulLines = content
     .split(/\r?\n/)
-    .map((line) => line.trim())
+    .map((line) => line.trim().replace(/^[：:]\s*/, ""))
     .filter((line) => line && !/^[：:，,；;。.\s]+$/.test(line));
   if (role === "voice") {
     return uniqueEntries(
@@ -137,6 +139,34 @@ function bestAsset(requested, kind, assets) {
 
   const stemMatches = candidates.filter((asset) => fileStem(assetFileName(asset)) === target);
   return stemMatches.length === 1 ? stemMatches[0] : null;
+}
+
+function legacyNumberedReferences(prompt, assets) {
+  const matches = [];
+  const pattern = /@(Image|Audio)\d+\s*=\s*([^、，,；;）)\]\}\r\n]+)/g;
+  for (const token of String(prompt).matchAll(pattern)) {
+    const kind = token[1] === "Image" ? "image" : "audio";
+    const role = kind === "image" ? "people" : "voice";
+    const requested = cleanMatchValue(token[2]);
+    const asset = bestAsset(requested, kind, assets);
+    if (asset) matches.push({ kind, role, requested, asset, token: token[0] });
+  }
+  return matches;
+}
+
+function inlineVoiceReferences(prompt, assets, claimedAssetKeys) {
+  const matches = [];
+  const seen = new Set();
+  const pattern = /[（(]\s*(声音[0-9０-９]+)\s*[）)]/g;
+  for (const token of String(prompt).matchAll(pattern)) {
+    const requested = cleanMatchValue(token[1]);
+    if (seen.has(requested)) continue;
+    seen.add(requested);
+    const asset = bestAsset(requested, "audio", assets);
+    if (!asset || claimedAssetKeys.has(asset.key)) continue;
+    matches.push({ kind: "audio", role: "voice", requested, asset, token: token[0] });
+  }
+  return matches;
 }
 
 function annotateContent(content, matches, role) {
@@ -204,6 +234,18 @@ export function planProjectReferences(prompt, assets) {
     }
   }
 
+  // 复用任务或手动复制的提示词可能已经带有 @Image1/@Audio1。
+  // 仍按等号后的项目文件名重新认领素材，并换回可读的项目别名。
+  const legacyMatches = legacyNumberedReferences(prompt, assets);
+  for (const legacy of legacyMatches) {
+    if (!matches.some((match) => match.kind === legacy.kind && match.asset.key === legacy.asset.key)) {
+      matches.push({ ...legacy, heading: "__legacy__" });
+    }
+  }
+  const claimedAudioKeys = new Set(matches.filter((match) => match.kind === "audio").map((match) => match.asset.key));
+  const inlineVoiceMatches = inlineVoiceReferences(prompt, assets, claimedAudioKeys);
+  for (const voice of inlineVoiceMatches) matches.push({ ...voice, heading: "__inline_voice__" });
+
   let annotatedPrompt = prompt;
   const ranges = SECTION_RULES
     .map((rule) => ({ rule, range: sectionRange(annotatedPrompt, rule.heading) }))
@@ -213,6 +255,14 @@ export function planProjectReferences(prompt, assets) {
     const sectionMatches = matches.filter((match) => match.heading === rule.heading);
     const content = annotateContent(range.content, sectionMatches, rule.role);
     annotatedPrompt = `${annotatedPrompt.slice(0, range.contentStart)}${content}${annotatedPrompt.slice(range.end)}`;
+  }
+  for (const legacy of legacyMatches) {
+    const alias = fileStem(assetFileName(legacy.asset));
+    annotatedPrompt = annotatedPrompt.split(legacy.token).join(`@${alias}=${legacy.requested}`);
+  }
+  for (const voice of inlineVoiceMatches) {
+    const alias = fileStem(assetFileName(voice.asset));
+    annotatedPrompt = annotatedPrompt.replace(voice.token, `（@${alias}=${voice.requested}）`);
   }
   return { annotatedPrompt, matches, missing };
 }

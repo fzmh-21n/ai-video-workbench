@@ -189,6 +189,45 @@ _::~OUTPUT_END::~_`);
   assert.doesNotMatch(items.map((item) => item.prompt).join("\n"), /={5,}|_::~/);
 });
 
+test("ignores full-width decorative banners without duplicating every section", () => {
+  const items = splitBatchPrompts(`═══════════════════════════════════════
+剧情[167]
+═══════════════════════════════════════
+_::~OUTPUT_START::~_
+_::~FIELD::~_
+剧情[167]：
+【本组剧情任务】：第一段完整提示词
+_::~OUTPUT_END::~_
+═══════════════════════════════════════
+剧情[168]
+═══════════════════════════════════════
+_::~OUTPUT_START::~_
+_::~FIELD::~_
+剧情[168]：
+【本组剧情任务】：第二段完整提示词
+_::~OUTPUT_END::~_
+═══════════════════════════════════════`);
+
+  assert.equal(items.length, 2);
+  assert.deepEqual(items.map((item) => item.section), [167, 168]);
+  assert.match(items[0].prompt, /第一段完整提示词/);
+  assert.match(items[1].prompt, /第二段完整提示词/);
+});
+
+test("keeps the fuller entry when an unknown banner duplicates a section number", () => {
+  const items = splitBatchPrompts(`剧情[21]
+-----
+剧情[21]：
+【本组目标时长】：15秒
+【本组剧情任务】：这才是真正的完整提示词
+
+剧情[22]：
+【本组剧情任务】：下一节`);
+  assert.equal(items.length, 2);
+  assert.deepEqual(items.map((item) => item.section), [21, 22]);
+  assert.match(items[0].prompt, /真正的完整提示词/);
+});
+
 test("runs every batch item while respecting the selected concurrency", async () => {
   let active = 0;
   let maximum = 0;

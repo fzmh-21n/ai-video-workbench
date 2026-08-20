@@ -52,6 +52,62 @@ test("matches the new people and scene section headings", () => {
   assert.doesNotMatch(result.annotatedPrompt, /冷色灯光/);
 });
 
+test("stops inline sections at the next heading and matches the scene", () => {
+  const prompt = "【出场人物】：角色图_003_王丽华、角色图_005_老马【出场场景】：场景图_022_业主反馈会议室四视角【本组首镜姿态继承】：王丽华开口";
+  const assets = [
+    image("角色图_003_王丽华.png"),
+    image("角色图_005_老马.png"),
+    image("场景图_022_业主反馈会议室四视角.png"),
+  ];
+  const plan = planProjectReferences(prompt, assets);
+  assert.equal(plan.matches.length, 3);
+  assert.match(plan.annotatedPrompt, /@场景图_022_业主反馈会议室四视角=场景图_022_业主反馈会议室四视角，【本组首镜姿态继承】/);
+});
+
+test("matches the first batch person after a Chinese heading colon when later people are already annotated", () => {
+  const prompts = [
+    "【出场人物】：角色图_003_王丽华、@角色图_004_刘姐=角色图_004_刘姐，、@角色图_005_老马=角色图_005_老马，【出场场景】：场景图_022_业主反馈会议室四视角",
+    "【出场人物】：角色图_003_王丽华、@角色图_004_刘姐=角色图_004_刘姐，、@角色图_006_小陈=角色图_006_小陈，【出场场景】：场景图_022_业主反馈会议室四视角",
+    "【出场人物】：角色图_003_王丽华、@角色图_006_小陈=角色图_006_小陈，、@角色图_001_张桂芳正常=角色图_001_张桂芳正常，【出场场景】：场景图_022_业主反馈会议室四视角",
+  ];
+  const assets = [
+    image("角色图_001_张桂芳正常.png"),
+    image("角色图_003_王丽华.png"),
+    image("角色图_004_刘姐.png"),
+    image("角色图_005_老马.png"),
+    image("角色图_006_小陈.png"),
+    image("场景图_022_业主反馈会议室四视角.png"),
+  ];
+  for (const prompt of prompts) {
+    const plan = planProjectReferences(prompt, assets);
+    assert.match(plan.annotatedPrompt, /@角色图_003_王丽华=角色图_003_王丽华/);
+    assert.ok(plan.matches.some((match) => match.asset.key === "image:角色图_003_王丽华.png"));
+  }
+});
+
+test("reclaims old Image and Audio tags from a reused single prompt", () => {
+  const prompt = "【出场人物】：@Image3 =角色图_003_王丽华、角色图_005_老马【出场场景】：场景图_022_业主反馈会议室四视角\n🎤（@Audio1 =声音2）台词";
+  const assets = [
+    image("角色图_003_王丽华.png"),
+    image("角色图_005_老马.png"),
+    image("场景图_022_业主反馈会议室四视角.png"),
+    audio("声音2.wav"),
+  ];
+  const plan = planProjectReferences(prompt, assets);
+  assert.match(plan.annotatedPrompt, /@角色图_003_王丽华=角色图_003_王丽华/);
+  assert.match(plan.annotatedPrompt, /@声音2=声音2/);
+  assert.equal(new Set(plan.matches.map((match) => match.asset.key)).size, 4);
+});
+
+test("matches unique parenthesized voices when a single prompt has no voice section", () => {
+  const prompt = "第一句 🎤（声音2）王丽华说话。第二句（声音5）老马说话。第三句（声音2）王丽华继续说话。";
+  const plan = planProjectReferences(prompt, [audio("声音2.wav"), audio("声音5.wav")]);
+  assert.equal(plan.matches.length, 2);
+  assert.match(plan.annotatedPrompt, /（@声音2=声音2）/);
+  assert.match(plan.annotatedPrompt, /（@声音5=声音5）/);
+  assert.equal((plan.annotatedPrompt.match(/@声音2=/g) || []).length, 1);
+});
+
 test("matches voices under adjacent role voice and dubbing instruction headings", () => {
   const prompt = [
     "【角色声线】【配音指令】",

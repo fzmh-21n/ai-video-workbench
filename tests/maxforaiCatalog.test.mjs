@@ -9,6 +9,26 @@ test("includes MaxForAI with its official base URL and video catalog", () => {
   assert.equal(profile.mediaUploadUrl, "https://maxforai.top/v1/assets");
   assert.equal(inferAdapter(profile.baseUrl), "maxforai");
   assert.deepEqual(FALLBACK_MODELS.maxforai, MAXFORAI_VIDEO_MODELS);
+  assert.ok(MAXFORAI_VIDEO_MODELS.includes("cc-2.0-933"));
+});
+
+test("uses the documented MaxForAI cc-2.0-933 request fields", () => {
+  const payload = maxforaiVideoPayload("cc-2.0-933", {
+    prompt: "test", duration: 15, aspectRatio: "16:9", resolution: "720p", syncAudio: true,
+    materials: [{ kind: "image", url: "https://example.com/a.png" }],
+  });
+  assert.equal(payload.model, "cc-2.0-933");
+  assert.equal(payload.seconds, 15);
+  assert.equal(payload.ratio, "16:9");
+  assert.deepEqual(payload.images, ["https://example.com/a.png"]);
+  assert.equal("duration" in payload, false);
+  assert.equal("aspect_ratio" in payload, false);
+  assert.equal("resolution" in payload, false);
+
+  const capability = capabilityFor({ adapter: "maxforai", model: "cc-2.0-933" });
+  assert.equal(capability.images, 9);
+  assert.equal(capability.audios, 3);
+  assert.equal(capability.videos, 3);
 });
 
 test("uses MaxForAI official Seedance parameter names", () => {

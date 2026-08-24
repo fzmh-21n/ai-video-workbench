@@ -22,6 +22,10 @@ export const LWAIGC_VIDEO_MODELS = [
   "hn-sd431-fast",
   "mf-seedance2.5",
   "wf-sd2.5-720p",
+  "wf-sd2.5-3030-720p",
+  "wf-2.5官渠",
+  "gt-sd2.5",
+  "gt-sd2.5-face",
   "MiniMax-H3",
   "grok-imagine-video-1.5-preview",
 ];
@@ -80,10 +84,22 @@ export function lwaigcCapability(modelName) {
     return { ...common, images: 4, audios: 1, durations: [10, 15], resolutions: ["720p"] };
   }
   if (model === "mf-seedance2.5") {
-    return { ...common, images: 30, videos: 10, audios: 10, durations: range(4, 30), resolutions: ["480p", "720p"] };
+    return { ...common, images: 30, videos: 10, audios: 10, durations: range(4, 30), resolutions: ["480p", "720p"], _sdVersion: "sd25" };
   }
   if (model === "wf-sd2.5-720p") {
-    return { ...common, images: 30, videos: 10, audios: 10, durations: range(4, 29), resolutions: ["720p"] };
+    return { ...common, images: 30, videos: 10, audios: 10, durations: range(4, 30), resolutions: ["720p"], _sdVersion: "sd25" };
+  }
+  if (model === "wf-sd2.5-3030-720p") {
+    return { ...common, images: 30, videos: 3, audios: 0, durations: [30], resolutions: ["720p"], _sdVersion: "sd25" };
+  }
+  if (model === "wf-2.5官渠") {
+    return { ...common, images: 30, videos: 10, audios: 10, durations: range(4, 30), resolutions: ["480p", "720p"], _sdVersion: "sd25" };
+  }
+  if (model === "gt-sd2.5") {
+    return { ...common, images: 30, videos: 10, audios: 10, durations: [30], resolutions: ["720p"], _sdVersion: "sd25" };
+  }
+  if (model === "gt-sd2.5-face") {
+    return { ...common, durations: range(4, 30), resolutions: ["720p"], _sdVersion: "sd25" };
   }
   if (model === "MiniMax-H3") {
     return { ...common, videos: 0, durations: range(5, 15), resolutions: ["2K"] };
@@ -124,7 +140,7 @@ export function lwaigcVideoPayload(model, input, clientTaskId) {
   }
 
   payload.aspect_ratio = input.aspectRatio;
-  if (["mg-sd431-mini", "mg-sd431-fast", "mg-sd431-Pro", "mf-seedance2.5"].includes(model)) {
+  if (["mg-sd431-mini", "mg-sd431-fast", "mg-sd431-Pro", "mf-seedance2.5", "wf-2.5官渠"].includes(model)) {
     payload.resolution = input.resolution;
   }
   if (images.length) payload.image_urls = images;
@@ -136,7 +152,7 @@ export function lwaigcVideoPayload(model, input, clientTaskId) {
 export function lwaigcLimitIssue(model, materials, duration) {
   if (!LWAIGC_VIDEO_MODELS.includes(model)) return "请选择 LWAIGC 视频模型";
   const detected = lwaigcCapability(model);
-  const capability = /(?:seedance|sd)[-.]?2[.-]?5|sd25/i.test(model)
+  const capability = detected._sdVersion === "sd25" || /(?:seedance|sd)[-.]?2[.-]?5|sd25/i.test(model)
     ? detected
     : { ...detected, images: 9, audios: 3, videos: 3 };
   const counts = (materials || []).reduce(

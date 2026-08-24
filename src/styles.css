@@ -213,6 +213,23 @@ input, select {
 .submit-row { display: flex; gap: 9px; }
 .primary-button { border: 0 !important; background: linear-gradient(135deg, #d89a2e, #c98212) !important; color: #fff !important; padding: 11px 20px !important; border-radius: 9px !important; font-weight: 700; }
 
+.image-provider-config {
+  display: grid; grid-template-columns: minmax(180px, .8fr) minmax(240px, 1.3fr) auto;
+  gap: 10px; align-items: end; margin-bottom: 16px; padding: 12px;
+  border: 1px solid #e4d4ba; border-radius: 11px; background: #fffaf1;
+}
+.image-provider-config > label > span { display: block; margin-bottom: 6px; color: #756755; font-size: 12px; }
+.image-provider-config input, .image-provider-config select { width: 100%; }
+.image-provider-config .remember-key-row { display: flex; align-items: center; gap: 7px; min-height: 40px; }
+.image-provider-config .remember-key-row input { width: auto; min-height: auto; accent-color: #c98a20; }
+.image-provider-config .remember-key-row span { margin: 0; white-space: nowrap; }
+.image-reference-zone { min-height: 145px; margin-bottom: 14px; }
+.image-reference-zone.drag-active {
+  border-color: #169b8f; background: #eefbf8; box-shadow: 0 0 0 3px rgba(22, 155, 143, .1);
+}
+.image-settings-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 12px 0; }
+.task-details .image-result { display: block; width: 100%; max-height: 680px; object-fit: contain; border-radius: 10px; background: #eee8dc; margin-bottom: 10px; }
+.task-details .download-button { display: inline-flex; margin: 8px 8px 0 0; cursor: pointer; }
 .task-panel { display: flex; flex-direction: column; }
 .task-controls {
   padding: 10px 12px; border-bottom: 1px solid #eadcc8; background: #fffdfa;
@@ -261,6 +278,10 @@ input, select {
 .task-card p { margin: 8px 0 0; color: #8b7965; font-size: 13px; }
 .task-error { color: #b84b3d !important; }
 .task-network-warning { color: #a46d12 !important; }
+.task-review-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-top: 10px; }
+.task-review-actions button { padding: 7px 10px !important; font-size: 12px; }
+.task-review-badge { padding: 6px 9px; border: 1px solid #efb9ad; border-radius: 20px; background: #fff0ec; color: #bd4e3d; font-size: 12px; font-weight: 700; }
+.task-regeneration-link { color: #9a6c1e !important; }
 .task-details { margin: 14px -14px -14px; padding: 14px; border-top: 1px solid #e7d8c2; background: #fffdf9; cursor: default; }
 .task-details video { display: block; width: 100%; max-height: 520px; border-radius: 10px; background: #111; margin-bottom: 10px; }
 .task-details details { margin-top: 10px; }
@@ -369,6 +390,7 @@ input, select {
   .profile-list button { min-width: 170px; }
   .batch-card-head { align-items: flex-start; flex-direction: column; }
   .batch-overrides { grid-template-columns: 1fr; }
+  .image-provider-config { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 520px) {
@@ -380,4 +402,5 @@ input, select {
   .batch-task-actions { width: 100%; }
   .batch-task-actions button { flex: 1; }
   .task-topline, .pagination { align-items: flex-start; flex-direction: column; }
+  .image-settings-grid { grid-template-columns: 1fr; }
 }

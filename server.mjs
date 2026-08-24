@@ -49,7 +49,16 @@ import {
   globalAiOpcStatusPath,
 } from "./src/globalAiOpcCatalog.js";
 import { MAXFORAI_VIDEO_MODELS, maxforaiVideoPayload } from "./src/maxforaiCatalog.js";
-import { CLMM_BASE_URL, clmmLimitIssue, clmmModels, clmmVideoPayload } from "./src/clmmCatalog.js";
+import {
+  CANSEEDREAM_IMAGE_MODELS,
+  FMGO_IMAGE_MODELS,
+  canSeeDreamImagePayload,
+  fmgoGeminiImagePayload,
+  fmgoGptImagePayload,
+  isFmgoGeminiImageModel,
+  isFmgoGptImageModel,
+} from "./src/imageCatalog.js";
+import { CLMM_BASE_URL, CLMM_PRICING_URL, clmmLimitIssue, clmmModels, clmmVideoPayload } from "./src/clmmCatalog.js";
 import { PIDOI_BASE_URL, PIDOI_MODELS, pidoiLimitIssue, pidoiVideoPayload } from "./src/pidoiCatalog.js";
 import { normalizedTaskProgress } from "./src/taskProgress.js";
 import { taskFailureDetails } from "./src/upstreamTaskFailure.js";
@@ -422,9 +431,12 @@ function taskIdFrom(body) {
   return String(
     body?.id ||
       body?.task_id ||
+      body?.cstask ||
       body?.task?.id ||
+      body?.task?.cstask ||
       body?.data?.id ||
       body?.data?.task_id ||
+      body?.data?.cstask ||
       body?.jobId ||
       body?.data?.jobId ||
       "",
@@ -471,6 +483,31 @@ function videoUrlsFrom(body, base) {
 
 function videoUrlFrom(body, base) {
   return videoUrlsFrom(body, base)[0] || null;
+}
+
+function imageUrlsFrom(body, base) {
+  const direct = [
+    body?.content?.image_url,
+    body?.image_url,
+    body?.result?.url,
+    body?.result?.data,
+    body?.data,
+    body?.output?.url,
+    body?.url,
+  ].flatMap((candidate) => Array.isArray(candidate) ? candidate : [candidate]);
+  const values = direct.flatMap((candidate) => {
+    if (typeof candidate === "string") return [candidate];
+    return [candidate?.url, candidate?.image_url, candidate?.b64_json ? `data:image/png;base64,${candidate.b64_json}` : null];
+  });
+  const message = body?.result?.choices?.[0]?.message?.content || body?.choices?.[0]?.message?.content;
+  if (typeof message === "string") {
+    values.push(...(message.match(/https?:\/\/[^\s)"']+|data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=]+/gi) || []));
+  }
+  return [...new Set(values.flatMap((candidate) => {
+    if (typeof candidate !== "string" || !candidate.trim()) return [];
+    if (/^data:image\//i.test(candidate)) return [candidate];
+    try { return [new URL(candidate, base).toString()]; } catch { return []; }
+  }))];
 }
 
 function dateText(value) {
@@ -1289,6 +1326,96 @@ async function createVideo(config, input) {
   };
 }
 
+function imageTaskStatusPath(body, fallbackPath, baseUrl) {
+  const value = body?.task?.status_url || body?.status_url;
+  if (typeof value === "string" && value.trim()) {
+    try {
+      const url = new URL(value, baseUrl);
+      if (url.origin === new URL(baseUrl).origin) return `${url.pathname}${url.search}`;
+    } catch {}
+  }
+  return fallbackPath;
+}
+
+async function createImage(config, input, files) {
+  const images = files.map(imageDataUrl);
+  const idempotencyKey = `image_${crypto.randomUUID()}`;
+  if (config.adapter === "fmgo") {
+    if (!FMGO_IMAGE_MODELS.includes(config.model)) throw httpError(400, "请选择 FMGO 图片模型");
+    const asyncHeaders = {
+      Accept: "application/json",
+      Prefer: "respond-async",
+      "X-Flow-Async": "1",
+      "Idempotency-Key": idempotencyKey,
+    };
+    let response;
+    if (isFmgoGptImageModel(config.model)) {
+      const payload = fmgoGptImagePayload(config.model, input);
+      if (files.length) {
+        const form = new FormData();
+        for (const [key, value] of Object.entries(payload)) form.set(key, String(value));
+        for (const file of files) {
+          form.append("image", new Blob([fileBytes(file)], { type: file.mimetype || "image/png" }), file.originalname || "reference.png");
+        }
+        response = await upstream(`${config.baseUrl}/v1/images/edits`, {
+          method: "POST",
+          headers: authHeaders(config, asyncHeaders),
+          body: form,
+        }, 360_000);
+      } else {
+        response = await upstream(`${config.baseUrl}/v1/images/generations`, {
+          method: "POST",
+          headers: authHeaders(config, { ...asyncHeaders, "Content-Type": "application/json" }),
+          body: JSON.stringify(payload),
+        }, 360_000);
+      }
+    } else if (isFmgoGeminiImageModel(config.model)) {
+      response = await upstream(`${config.baseUrl}/v1/chat/completions`, {
+        method: "POST",
+        headers: authHeaders(config, { ...asyncHeaders, "Content-Type": "application/json" }),
+        body: JSON.stringify(fmgoGeminiImagePayload(config.model, { ...input, images })),
+      }, 360_000);
+    } else {
+      throw httpError(400, "请选择 FMGO 图片模型");
+    }
+    const body = await readJson(response);
+    const taskId = taskIdFrom(body);
+    if (!taskId) throw httpError(502, "FMGO 图片任务创建成功但没有返回任务 ID");
+    return {
+      adapter: "fmgo",
+      baseUrl: config.baseUrl,
+      taskId,
+      statusPath: imageTaskStatusPath(body, `/v1/tasks/${encodeURIComponent(taskId)}`, config.baseUrl),
+      model: config.model,
+      mediaType: "image",
+    };
+  }
+
+  if (config.adapter === "canseedream") {
+    if (!CANSEEDREAM_IMAGE_MODELS.includes(config.model)) throw httpError(400, "请选择 CanSeeDream 图片模型");
+    const response = await upstream(`${config.baseUrl}/api/v3/images/generations/tasks`, {
+      method: "POST",
+      headers: authHeaders(config, {
+        "Content-Type": "application/json",
+        "Idempotency-Key": idempotencyKey,
+      }),
+      body: JSON.stringify(canSeeDreamImagePayload({ ...input, images, model: config.model })),
+    }, 360_000);
+    const body = await readJson(response);
+    const taskId = taskIdFrom(body);
+    if (!taskId) throw httpError(502, "CanSeeDream 图片任务创建成功但没有返回任务 ID");
+    return {
+      adapter: "canseedream",
+      baseUrl: config.baseUrl,
+      taskId,
+      statusPath: `/api/v3/images/generations/tasks/${encodeURIComponent(taskId)}`,
+      model: config.model,
+      mediaType: "image",
+    };
+  }
+  throw httpError(400, "图片生成目前仅支持 FMGO 和 CanSeeDream");
+}
+
 function verifyJobConfig(config, job) {
   if (config.baseUrl !== job.baseUrl || config.adapter !== job.adapter)
     throw httpError(400, "任务所属中转站与当前配置不一致");
@@ -1510,7 +1637,7 @@ app.get("/api/config/models", async (req, res, next) => {
       return res.json(catalog);
     }
     if (config.adapter === "clmm") {
-      const response = await upstream(`${CLMM_BASE_URL}/v1/api/pricing`, { headers: authHeaders(config) });
+      const response = await upstream(CLMM_PRICING_URL, { headers: authHeaders(config) });
       const models = clmmModels(await readJson(response));
       if (!models.length) throw httpError(502, "CLMM Mall 当前没有返回可用视频模型");
       return res.json({ models });
@@ -1528,7 +1655,7 @@ app.get("/api/config/models", async (req, res, next) => {
     let models = list.map((item) => (typeof item === "string" ? item : item?.id || item?.name)).filter(Boolean);
     if (config.adapter === "lwaigc") {
       const documentedVideoModels = new Set(LWAIGC_VIDEO_MODELS);
-      models = models.filter((model) => documentedVideoModels.has(model));
+      models = [...new Set([...models.filter((model) => documentedVideoModels.has(model)), ...LWAIGC_VIDEO_MODELS])];
     }
     if (config.adapter === "globalaiopc") {
       models = [...new Set([...models, ...GLOBAL_AIOPC_MODELS])];
@@ -1591,6 +1718,108 @@ app.post("/api/materials", upload.array("references", 50), async (req, res, next
     next(error);
   } finally {
     cleanupFiles(files);
+  }
+});
+
+app.post("/api/image-tasks", upload.array("references", 16), async (req, res, next) => {
+  const files = Array.isArray(req.files) ? req.files : [];
+  try {
+    for (const file of files) {
+      fileBytes(file);
+      if (!String(file.mimetype || "").startsWith("image/")) throw httpError(400, "图片生成只支持上传图片参考素材");
+    }
+    const config = providerConfig(req);
+    if (!['fmgo', 'canseedream'].includes(config.adapter)) throw httpError(400, "图片生成目前仅支持 FMGO 和 CanSeeDream");
+    const prompt = String(req.body.prompt || "").trim();
+    if (!prompt) throw httpError(400, "提示词不能为空");
+    const input = {
+      prompt,
+      aspectRatio: ["Default", "auto", "8:1", "4:1", "21:9", "16:9", "5:4", "4:3", "3:2", "1:1", "2:3", "3:4", "4:5", "9:16", "1:4", "1:8"].includes(req.body.aspectRatio)
+        ? req.body.aspectRatio
+        : "1:1",
+      size: ["auto", "1024x1024", "1536x1024", "1024x1536", "2048x2048", "2048x1152", "3840x2160", "2160x3840", "1K", "2K", "4K"].includes(req.body.size)
+        ? req.body.size
+        : "auto",
+      quality: ["auto", "medium"].includes(req.body.quality) ? req.body.quality : "auto",
+    };
+    const job = await createImage(config, input, files);
+    res.status(202).json({
+      tasks: [{
+        id: encodeJob(job),
+        status: "queued",
+        progress: 0,
+        createdAt: new Date().toLocaleString("zh-CN", { hour12: false }),
+      }],
+    });
+  } catch (error) {
+    next(error);
+  } finally {
+    cleanupFiles(files);
+  }
+});
+
+app.get("/api/image-tasks/:id", async (req, res, next) => {
+  try {
+    const config = providerConfig(req);
+    const job = decodeJob(req.params.id);
+    verifyJobConfig(config, job);
+    if (job.mediaType !== "image") throw httpError(400, "这不是图片生成任务");
+    const response = await upstream(`${config.baseUrl}${job.statusPath}`, { headers: authHeaders(config) });
+    const body = await readJson(response);
+    const status = normalizeStatus(body?.status || body?.state || body?.task?.status || body?.data?.status);
+    const failure = status === "failed" ? taskFailureDetails(body) : null;
+    res.json({
+      id: req.params.id,
+      status,
+      progress: normalizedTaskProgress(status, body?.progress ?? body?.task?.progress ?? body?.data?.progress ?? 0),
+      imageUrl: status === "completed" ? `/api/image-tasks/${encodeURIComponent(req.params.id)}/content` : undefined,
+      error: failure?.reason,
+      cost: body?.cost ?? body?.usage?.cost ?? body?.metadata?.cost,
+      completedAt: dateText(body?.completed_at || body?.completedAt),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/image-tasks/:id/content", async (req, res, next) => {
+  try {
+    const config = providerConfig(req);
+    const job = decodeJob(req.params.id);
+    verifyJobConfig(config, job);
+    if (job.mediaType !== "image") throw httpError(400, "这不是图片生成任务");
+    const statusResponse = await upstream(`${config.baseUrl}${job.statusPath}`, { headers: authHeaders(config) });
+    const body = await readJson(statusResponse);
+    const status = normalizeStatus(body?.status || body?.state || body?.task?.status || body?.data?.status);
+    if (status !== "completed") throw httpError(409, "图片尚未生成完成");
+    const imageUrl = imageUrlsFrom(body, config.baseUrl)[0];
+    if (!imageUrl) throw httpError(502, "任务已完成但没有返回图片地址");
+    if (/^data:image\//i.test(imageUrl)) {
+      const match = imageUrl.match(/^data:(image\/[a-z0-9.+-]+);base64,(.+)$/i);
+      if (!match) throw httpError(502, "上游返回的图片 Base64 无效");
+      res.type(match[1]).send(Buffer.from(match[2], "base64"));
+      return;
+    }
+    const resultUrl = publicUrl(imageUrl, "图片地址");
+    const providerUrl = new URL(config.baseUrl);
+    const headers = {
+      Accept: "image/*,*/*",
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140.0 Safari/537.36",
+      Referer: `${providerUrl.origin}/`,
+    };
+    let response = await upstream(resultUrl, { headers }, 360_000);
+    if (!response.ok && (resultUrl.origin === providerUrl.origin || sameSiteHost(resultUrl, providerUrl))) {
+      await response.body?.cancel().catch(() => {});
+      response = await upstream(resultUrl, { headers: { ...headers, Authorization: `Bearer ${config.apiKey}` } }, 360_000);
+    }
+    if (!response.ok) {
+      const statusCode = response.status;
+      await response.body?.cancel().catch(() => {});
+      throw httpError(statusCode, `读取生成图片失败（HTTP ${statusCode}）`);
+    }
+    streamResponse(response, res);
+  } catch (error) {
+    next(error);
   }
 });
 

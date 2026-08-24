@@ -1,4 +1,4 @@
-const SECTION_MARKER = /^(?:(\d+)\.\s*[（(]([^\r\n]*?)[）)]\s*|剧情\s*[\[【]\s*(\d+)\s*[\]】]\s*[：:]?\s*)$/gm;
+const SECTION_MARKER = /^(?:(\d+)\.[^\S\r\n]*[（(]([^\r\n]*?)[）)][^\S\r\n]*|剧情[^\S\r\n]*[\[【][^\S\r\n]*(\d+)[^\S\r\n]*[\]】][^\S\r\n]*(?:[：:][^\S\r\n]*([^\r\n]*?))?[^\S\r\n]*)$/gm;
 const OUTPUT_WRAPPER = /^\s*_::~(?:OUTPUT_START|OUTPUT_END|FIELD)::~_\s*$/gm;
 const DECORATIVE_SECTION_BANNER = /^\s*[=═]{5,}\s*\r?\n\s*剧情\s*[\[【]\s*\d+\s*[\]】]\s*[：:]?\s*\r?\n\s*[=═]{5,}\s*$/gm;
 
@@ -15,7 +15,7 @@ export function splitBatchPrompts(text) {
     const start = marker.index;
     const end = markers[index + 1]?.index ?? source.length;
     const section = Number(marker[1] || marker[3]);
-    const title = marker[2]?.trim() || `剧情[${section}]`;
+    const title = marker[2]?.trim() || marker[4]?.trim() || `剧情[${section}]`;
     return {
       id: `section-${section}-${index}`,
       section,

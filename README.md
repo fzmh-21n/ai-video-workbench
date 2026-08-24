@@ -12,7 +12,7 @@
 
 - FMGO / 飞猫
 - Paipu / Lec API
-- CLMM Mall（动态读取 `/v1/api/pricing` 模型）
+- CLMM Mall（动态读取 `/api/pricing` 视频模型，支持 SD2.0 / SD2.5）
 - Pidoi（`sora-v3-933-pro`、`tejiasd` 等）
 - ViralE
 - CanSeeDream / 看见梦想

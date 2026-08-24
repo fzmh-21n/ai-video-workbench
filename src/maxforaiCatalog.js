@@ -1,6 +1,7 @@
 export const MAXFORAI_BASE_URL = "https://maxforai.top";
 
 export const MAXFORAI_VIDEO_MODELS = [
+  "cc-2.0-933",
   "mg-sd431-fast", "mg-sd431-mini", "mg-sd431-Pro", "mg-seedance-2.5",
   "zy-特价豆包900", "zy-SD满血933",
   "firefly-seedance2-1080p", "firefly-seedance2-480p", "firefly-seedance2-720p",
@@ -48,12 +49,13 @@ export function maxforaiCapability(model) {
 }
 
 export function maxforaiVideoPayload(model, input) {
-  const officialSeedance = /^sd-(?:2\.0|fast|mini)-/i.test(model);
+  const ccSeedance = model === "cc-2.0-933";
+  const officialSeedance = ccSeedance || /^sd-(?:2\.0|fast|mini)-/i.test(model);
   const payload = officialSeedance
     ? {
         model,
         prompt: input.prompt,
-        seconds: String(input.duration),
+        seconds: ccSeedance ? Number(input.duration) : String(input.duration),
         ratio: input.aspectRatio,
         generate_audio: Boolean(input.syncAudio),
       }

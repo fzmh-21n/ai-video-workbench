@@ -538,6 +538,9 @@ export function sdVersionForProfile(profile) {
   if (profile?.adapter === "ziyuai") {
     return rawCapabilityFor(profile)._sdVersion || "sd20";
   }
+  if (profile?.adapter === "lwaigc") {
+    return rawCapabilityFor(profile)._sdVersion || sdVersionForModel(profile?.model);
+  }
   return sdVersionForModel(profile?.model);
 }
 
@@ -546,7 +549,7 @@ export function modelForSdVersion(profile, version, availableModels) {
   if (currentModel && sdVersionForProfile(profile) === version) return currentModel;
 
   const preferred = preferredModelForSdVersion(profile?.adapter, version);
-  const dynamicAdapters = new Set(["canseedream", "ziyuai", "maxforai"]);
+  const dynamicAdapters = new Set(["canseedream", "ziyuai", "maxforai", "clmm"]);
   if (!dynamicAdapters.has(profile?.adapter)) return preferred;
   const candidates = Array.isArray(availableModels) && availableModels.length
     ? availableModels

@@ -37,6 +37,7 @@ import { orderedDownloadFilename, orderedDownloadTasks } from "./taskDownload.js
 import { syncAudioForProfile, withSyncAudioPreference } from "./syncAudioPreference.js";
 import { loadFixedContentByVersion, withFixedContentForVersion } from "./fixedContentStore.js";
 import { reusableAssetFor, taskReuseSnapshot } from "./taskReuse.js";
+import { regeneratedTaskRecord, reviewedTask } from "./taskRegeneration.js";
 import {
   filesFromProjectDirectory,
   loadProjectDirectory,
@@ -44,6 +45,7 @@ import {
   saveProjectDirectory,
 } from "./projectFolderStore.js";
 import BatchPanel from "./BatchPanel.jsx";
+import ImageWorkbench from "./ImageWorkbench.jsx";
 import {
   clearDiagnostics,
   diagnosticHeaders,
@@ -171,6 +173,7 @@ export default function App() {
   const [loginPassword, setLoginPassword] = useState("");
   const [loginError, setLoginError] = useState("");
   const [loggingIn, setLoggingIn] = useState(false);
+  const [generationMode, setGenerationMode] = useState(() => localStorage.getItem("ai-workbench-generation-mode-v1") || "video");
 
   useEffect(() => {
     let cancelled = false;
@@ -236,10 +239,16 @@ export default function App() {
     );
   }
 
-  return <Workbench onLogout={logout} />;
+  const switchGenerationMode = (mode) => {
+    localStorage.setItem("ai-workbench-generation-mode-v1", mode);
+    setGenerationMode(mode);
+  };
+  return generationMode === "image"
+    ? <ImageWorkbench onVideoMode={() => switchGenerationMode("video")} onLogout={logout} />
+    : <Workbench onImageMode={() => switchGenerationMode("image")} onLogout={logout} />;
 }
 
-function Workbench({ onLogout }) {
+function Workbench({ onImageMode, onLogout }) {
   const [workMode, setWorkMode] = useState(() => localStorage.getItem("video-workbench-mode-v1") || "single");
   const [profiles, setProfiles] = useState(() => {
     const saved = loadJson(PROFILE_KEY, null);
@@ -301,6 +310,7 @@ function Workbench({ onLogout }) {
   const [expandedTaskId, setExpandedTaskId] = useState(null);
   const [expandedBatchId, setExpandedBatchId] = useState(null);
   const [downloadingBatchId, setDownloadingBatchId] = useState(null);
+  const [regeneratingTaskId, setRegeneratingTaskId] = useState(null);
   const [videoBlob, setVideoBlob] = useState(null);
   const [mention, setMention] = useState(null);
   const [mentionIndex, setMentionIndex] = useState(0);
@@ -1315,6 +1325,246 @@ function Workbench({ onLogout }) {
     );
   }
 
+  async function setTaskDissatisfied(task, dissatisfied) {
+    const updated = reviewedTask(task, dissatisfied);
+    await putTask(updated);
+    setTaskRefreshVersion((value) => value + 1);
+    setNotice(dissatisfied ? "已标记为不满意；可以按原参数重新生成，旧视频会保留" : "已取消不满意标记");
+  }
+
+  async function regenerateTask(task) {
+    if (task.status !== "completed" || task.reviewStatus !== "dissatisfied") return;
+    const targetProfile = profiles.find((profile) => profile.id === task.profileId);
+    if (!targetProfile || !keyFor(targetProfile)) {
+      setNotice("需要先补全该任务所属中转站的 API Key，原视频和不满意标记均已保留");
+      if (targetProfile) {
+        setDraft(targetProfile);
+        setDraftKey(keyFor(targetProfile));
+      }
+      setConfigOpen(true);
+      return;
+    }
+
+    const snapshot = task.reuseSnapshot || {};
+    const targetModel = task.model || targetProfile.model;
+    const submissionProfile = { ...targetProfile, model: targetModel };
+    const targetCapability = capabilityFor(submissionProfile);
+    const targetVersion = sdVersionForProfile(submissionProfile);
+    const versionFixedContent = fixedContentByVersion[targetVersion] || "";
+    let reusablePrompt = String(snapshot.prompt || task.prompt || "");
+    if (!snapshot.prompt && versionFixedContent && reusablePrompt.startsWith(versionFixedContent)) {
+      reusablePrompt = reusablePrompt.slice(versionFixedContent.length).replace(/^\s+/, "");
+    }
+
+    const restored = [];
+    const missing = [];
+    for (const [index, reference] of (snapshot.references || []).entries()) {
+      const asset = reusableAssetFor(reference, projectAssets);
+      if (asset?.file) {
+        restored.push({
+          id: uid("ref"),
+          kind: reference.kind || asset.kind,
+          file: asset.file,
+          name: asset.file.name,
+          alias: reference.alias || fileStem(asset.file.name),
+          projectAssetKey: asset.key,
+          subType: reference.subType || "reference",
+          durationSeconds: reference.durationSeconds || await readMediaDuration(asset.file, reference.kind || asset.kind),
+        });
+      } else if (reference.url) {
+        restored.push({
+          id: uid("ref"),
+          kind: reference.kind || kindFromUrl(reference.url, "image"),
+          url: reference.url,
+          name: reference.name || `素材 ${index + 1}`,
+          alias: reference.alias || "",
+          subType: reference.subType || "reference",
+          durationSeconds: reference.durationSeconds || null,
+        });
+      } else {
+        missing.push(reference.name || `素材 ${index + 1}`);
+      }
+    }
+
+    if (!snapshot.references && projectAssets.length) {
+      const plan = planProjectReferences(reusablePrompt, projectAssets);
+      const selectedAssets = [...new Map(plan.matches.map((match) => [match.asset.key, match.asset])).values()];
+      const durations = await Promise.all(selectedAssets.map((asset) => readMediaDuration(asset.file, asset.kind)));
+      selectedAssets.forEach((asset, index) => restored.push({
+        id: uid("ref"),
+        kind: asset.kind,
+        file: asset.file,
+        name: asset.file.name,
+        alias: asset.stem,
+        projectAssetKey: asset.key,
+        subType: "reference",
+        durationSeconds: durations[index] || null,
+      }));
+      if (plan.matches.length) reusablePrompt = plan.annotatedPrompt;
+    }
+
+    if (missing.length) {
+      setNotice(`原视频和不满意标记已保留。请重新打开原项目资产后再试，当前缺少：${missing.join("、")}`);
+      return;
+    }
+
+    const restoredReferences = reindexReferences(restored);
+    const counts = restoredReferences.reduce((result, item) => ({
+      ...result,
+      [item.kind]: (result[item.kind] || 0) + 1,
+    }), {});
+    const unsupported = Object.keys(REFERENCE_LIMITS).filter(
+      (kind) => (counts[kind] || 0) > (targetCapability[`${kind}s`] ?? 0),
+    );
+    if (unsupported.length) {
+      setNotice(`原模型 ${targetModel} 当前不支持原任务的素材数量：${unsupported.map((kind) => `${KIND_LABELS[kind]} ${counts[kind]} 个`).join("；")}`);
+      return;
+    }
+
+    const targetDuration = snapshot.duration ?? task.duration ?? preferredDurationForVersion(targetCapability, targetVersion);
+    const targetResolution = snapshot.resolution || task.resolution || targetCapability.resolutions[0];
+    const targetRatio = snapshot.ratio || task.aspectRatio || targetCapability.ratios[0];
+    const targetSeed = snapshot.seed ?? task.seed ?? "";
+    const targetSyncAudio = snapshot.syncAudio ?? true;
+    const targetAutoReference = snapshot.autoReference ?? true;
+    if (submissionProfile.adapter === "meaicc") {
+      const inputVideoSeconds = restoredReferences
+        .filter((item) => item.kind === "video")
+        .reduce((total, item) => total + (Number(item.durationSeconds) || 0), 0);
+      if (inputVideoSeconds + Number(targetDuration) > 25) {
+        setNotice(`MEAICC 要求输入视频与输出视频总时长不超过 25 秒；当前为 ${inputVideoSeconds + Number(targetDuration)} 秒`);
+        return;
+      }
+    }
+
+    const translatedPrompt = internalizeProjectAliases(reusablePrompt.trim(), restoredReferences);
+    const submittedPrompt = [versionFixedContent.trim(), translatedPrompt].filter(Boolean).join("\n\n");
+    if (!submittedPrompt) {
+      setNotice("原任务缺少可复用的提示词，无法重新生成");
+      return;
+    }
+    if (!window.confirm(`将按原模型 ${targetModel}、原时长和原素材重新提交 1 条任务，可能再次产生费用。旧视频会保留，是否继续？`)) return;
+
+    const requestId = uid("task-regeneration");
+    const submitStartedAt = performance.now();
+    setRegeneratingTaskId(task.id);
+    setNotice("正在按原参数重新提交，旧视频会继续保留…");
+    recordDiagnostic({
+      adapter: submissionProfile.adapter,
+      providerName: submissionProfile.name,
+      model: targetModel,
+      requestId,
+      stage: "client_task_regeneration_started",
+      retryOfTaskId: task.id,
+      mode: task.batchId ? "batch" : "single",
+    });
+    try {
+      const form = new FormData();
+      form.set("prompt", submittedPrompt);
+      form.set("duration", String(targetDuration));
+      form.set("resolution", targetResolution);
+      form.set("aspectRatio", targetRatio);
+      form.set("seed", targetSeed);
+      form.set("quantity", "1");
+      form.set("syncAudio", String(targetSyncAudio));
+      form.set("autoReference", String(targetAutoReference));
+      let fileIndex = 0;
+      const referenceMeta = restoredReferences.map((item) => {
+        const meta = {
+          tag: item.tag,
+          kind: item.kind,
+          name: item.name,
+          subType: item.subType || "reference",
+          durationSeconds: item.durationSeconds || null,
+          url: item.url || "",
+          fileIndex: item.file ? fileIndex++ : null,
+        };
+        if (item.file) form.append("references", item.file, item.file.name);
+        return meta;
+      });
+      form.set("referenceMeta", JSON.stringify(referenceMeta));
+      const response = await fetch("/api/tasks", {
+        method: "POST",
+        headers: { ...headersFor(submissionProfile), ...diagnosticHeaders({ requestId }) },
+        body: form,
+      });
+      const body = await response.json().catch(() => ({}));
+      recordDiagnostic({
+        adapter: submissionProfile.adapter,
+        providerName: submissionProfile.name,
+        model: targetModel,
+        requestId,
+        stage: response.ok ? "client_task_regeneration_completed" : "client_task_regeneration_failed",
+        durationMs: Math.round(performance.now() - submitStartedAt),
+        status: response.status,
+        taskCount: body.tasks?.length || 0,
+        retryOfTaskId: task.id,
+        error: response.ok ? "" : body.message || "重新生成提交失败",
+      });
+      if (!response.ok) {
+        const message = body.message || "重新生成提交失败";
+        if (body.submissionUnknown || body.code === "SUBMISSION_UNKNOWN") {
+          throw new Error(`${message} 请不要立即再次点击重新生成。`);
+        }
+        throw new Error(message);
+      }
+      const created = Array.isArray(body.tasks) ? body.tasks : [body];
+      const createdAtMs = Date.now();
+      const reuseSnapshot = taskReuseSnapshot({
+        prompt: reusablePrompt,
+        references: restoredReferences,
+        duration: targetDuration,
+        resolution: targetResolution,
+        ratio: targetRatio,
+        seed: targetSeed,
+        quantity: 1,
+        syncAudio: targetSyncAudio,
+        autoReference: targetAutoReference,
+      });
+      const savedTasks = await allTasks();
+      const priorRegenerations = savedTasks.filter((item) => item.retryOfTaskId === task.id).length;
+      const sourceTask = {
+        ...task,
+        retryAttempt: Math.max(Number(task.retryAttempt || 0), priorRegenerations),
+      };
+      const taskRecords = created.map((createdTask, index) => regeneratedTaskRecord({
+        sourceTask,
+        createdTask: {
+          ...createdTask,
+          submitDurationMs: Math.round(performance.now() - submitStartedAt),
+        },
+        profile: submissionProfile,
+        model: targetModel,
+        prompt: submittedPrompt,
+        reuseSnapshot,
+        diagnosticRequestId: requestId,
+        createdAtMs: createdAtMs + index,
+        nextPollAt: createdAtMs + pollDelayForAdapter(submissionProfile.adapter),
+        index,
+      }));
+      await putTasks(taskRecords);
+      setPage(1);
+      setTaskStatusFilter("all");
+      setTaskProjectFilter("all");
+      setTaskRefreshVersion((value) => value + 1);
+      setNotice(task.batchId ? "已按原参数重新提交，并保留在原批次和原章节" : "已按原参数重新提交新任务，旧视频已保留");
+    } catch (error) {
+      recordDiagnostic({
+        adapter: submissionProfile.adapter,
+        providerName: submissionProfile.name,
+        model: targetModel,
+        requestId,
+        stage: "client_task_regeneration_exception",
+        durationMs: Math.round(performance.now() - submitStartedAt),
+        retryOfTaskId: task.id,
+        error: error.message || "重新生成提交失败",
+      });
+      setNotice(`${error.message || "重新生成提交失败"}；原视频和不满意标记均已保留`);
+    } finally {
+      setRegeneratingTaskId(null);
+    }
+  }
+
   async function downloadBatch(batch) {
     const completed = orderedDownloadTasks(
       batch.tasks.filter((task) => task.status === "completed" && task.videoUrl),
@@ -1457,6 +1707,7 @@ function Workbench({ onLogout }) {
           </div>
         </div>
         <div className="provider-switcher">
+          <button className="secondary-button" onClick={onImageMode}>图片生成</button>
           <div className="model-version-switch" role="group" aria-label="Seedance 模型版本">
             <span>模型版本</span>
             <button
@@ -1787,6 +2038,7 @@ function Workbench({ onLogout }) {
                 const batchExpanded = expandedBatchId === entry.id;
                 const completedCount = entry.tasks.filter((task) => task.status === "completed").length;
                 const failedCount = entry.tasks.filter((task) => task.status === "failed").length;
+                const dissatisfiedCount = entry.tasks.filter((task) => task.reviewStatus === "dissatisfied").length;
                 const progress = entry.tasks.length
                   ? Math.round(entry.tasks.reduce((total, task) => total + normalizedTaskProgress(task.status, task.progress), 0) / entry.tasks.length)
                   : 0;
@@ -1795,7 +2047,7 @@ function Workbench({ onLogout }) {
                     <div className="batch-task-group-head" onClick={() => setExpandedBatchId(batchExpanded ? null : entry.id)}>
                       <div className="batch-task-group-summary">
                         <strong>▸ 批量任务｜{entry.title}</strong>
-                        <span>共 {entry.tasks.length} 条 · 已生成 {completedCount} · 生成中 {entry.tasks.length - completedCount - failedCount} · 失败 {failedCount}</span>
+                        <span>共 {entry.tasks.length} 条 · 已生成 {completedCount} · 生成中 {entry.tasks.length - completedCount - failedCount} · 失败 {failedCount}{dissatisfiedCount ? ` · 不满意 ${dissatisfiedCount}` : ""}</span>
                       </div>
                       <div className="batch-task-actions">
                         <button
@@ -1821,6 +2073,20 @@ function Workbench({ onLogout }) {
                               <div className="progress-row"><div className="progress-track"><span style={{ width: `${shownProgress}%` }} /></div><b>{shownProgress}%</b></div>
                               {task.error && <p className="task-error">错误：{task.error}</p>}
                               {task.status === "failed" && <button className="secondary-button" onClick={(event) => { event.stopPropagation(); reuseFailedTask(task); }}>复用本条</button>}
+                              {task.status === "completed" && (
+                                <div className="task-review-actions" onClick={(event) => event.stopPropagation()}>
+                                  {task.reviewStatus === "dissatisfied" ? (
+                                    <>
+                                      <span className="task-review-badge">不满意</span>
+                                      <button className="primary-button" disabled={regeneratingTaskId === task.id} onClick={() => regenerateTask(task)}>{regeneratingTaskId === task.id ? "重新提交中…" : "重新生成"}</button>
+                                      <button className="secondary-button" onClick={() => setTaskDissatisfied(task, false)}>取消标记</button>
+                                    </>
+                                  ) : (
+                                    <button className="secondary-button" onClick={() => setTaskDissatisfied(task, true)}>标记不满意</button>
+                                  )}
+                                </div>
+                              )}
+                              {task.retryOfTaskId && <p className="task-regeneration-link">由上一条不满意视频重新生成</p>}
                               {childExpanded && (
                                 <div className="task-details" onClick={(event) => event.stopPropagation()}>
                                   {task.status === "completed" ? (
@@ -1854,12 +2120,26 @@ function Workbench({ onLogout }) {
                     </div>
                   </div>
                   <div className="progress-row"><div className="progress-track"><span style={{ width: `${shownProgress}%` }} /></div><b>{shownProgress}%</b></div>
+                  {task.status === "completed" && (
+                    <div className="task-review-actions" onClick={(event) => event.stopPropagation()}>
+                      {task.reviewStatus === "dissatisfied" ? (
+                        <>
+                          <span className="task-review-badge">不满意</span>
+                          <button className="primary-button" disabled={regeneratingTaskId === task.id} onClick={() => regenerateTask(task)}>{regeneratingTaskId === task.id ? "重新提交中…" : "重新生成"}</button>
+                          <button className="secondary-button" onClick={() => setTaskDissatisfied(task, false)}>取消标记</button>
+                        </>
+                      ) : (
+                        <button className="secondary-button" onClick={() => setTaskDissatisfied(task, true)}>标记不满意</button>
+                      )}
+                    </div>
+                  )}
                   {task.cost != null && <p>本次消耗：{task.cost}</p>}
                   <p>项目：{task.projectName || "未归类"}</p>
                   <p>中转站：{task.providerName} · 模型：{task.model}</p>
                   <p>创建：{task.createdAt || "—"}{task.completedAt ? ` · 完成：${task.completedAt}` : ""}</p>
                   {task.error && <p className="task-error">错误：{task.error}</p>}
                   {task.networkWarning && <p className="task-network-warning">{task.networkWarning}</p>}
+                  {task.retryOfTaskId && <p className="task-regeneration-link">由上一条不满意视频重新生成</p>}
                   {expanded && (
                     <div className="task-details" onClick={(event) => event.stopPropagation()}>
                       {task.status === "completed" ? (

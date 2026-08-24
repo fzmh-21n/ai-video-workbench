@@ -53,7 +53,7 @@ test("includes LWAIGC as a built-in OpenAI-compatible provider", () => {
     mediaUploadUrl: "https://ai.lwaigc.cn/v1/assets",
   });
   assert.equal(inferAdapter(profile.baseUrl), "lwaigc");
-  assert.equal(LWAIGC_VIDEO_MODELS.length, 25);
+  assert.equal(LWAIGC_VIDEO_MODELS.length, 29);
 });
 
 test("applies the documented LWAIGC capacity for Seedance 2.5", () => {
@@ -64,6 +64,42 @@ test("applies the documented LWAIGC capacity for Seedance 2.5", () => {
   assert.deepEqual(capability.resolutions, ["480p", "720p"]);
   assert.equal(capability.durations.at(0), 4);
   assert.equal(capability.durations.at(-1), 30);
+});
+
+test("defines the six documented LWAIGC Seedance 2.5 models exactly", () => {
+  const expected = {
+    "mf-seedance2.5": { images: 30, videos: 10, audios: 10, durations: [4, 30], resolutions: ["480p", "720p"] },
+    "wf-sd2.5-720p": { images: 30, videos: 10, audios: 10, durations: [4, 30], resolutions: ["720p"] },
+    "wf-sd2.5-3030-720p": { images: 30, videos: 3, audios: 0, durations: [30, 30], resolutions: ["720p"] },
+    "wf-2.5官渠": { images: 30, videos: 10, audios: 10, durations: [4, 30], resolutions: ["480p", "720p"] },
+    "gt-sd2.5": { images: 30, videos: 10, audios: 10, durations: [30, 30], resolutions: ["720p"] },
+    "gt-sd2.5-face": { images: 9, videos: 3, audios: 3, durations: [4, 30], resolutions: ["720p"] },
+  };
+
+  for (const [model, limits] of Object.entries(expected)) {
+    assert.ok(LWAIGC_VIDEO_MODELS.includes(model), model);
+    const capability = capabilityFor({ adapter: "lwaigc", model });
+    assert.deepEqual(
+      {
+        images: capability.images,
+        videos: capability.videos,
+        audios: capability.audios,
+        durations: [capability.durations.at(0), capability.durations.at(-1)],
+        resolutions: capability.resolutions,
+      },
+      limits,
+      model,
+    );
+    assert.equal(sdVersionForProfile({ adapter: "lwaigc", model }), "sd25", model);
+  }
+});
+
+test("enforces the fixed 30-second no-audio LWAIGC WF model", () => {
+  const model = "wf-sd2.5-3030-720p";
+  assert.equal(lwaigcLimitIssue(model, materials(30, 0, 3), 30), "");
+  assert.match(lwaigcLimitIssue(model, materials(30, 1, 3), 30), /音频参考最多 0 个/);
+  assert.match(lwaigcLimitIssue(model, materials(30, 0, 4), 30), /视频参考最多 3 个/);
+  assert.match(lwaigcLimitIssue(model, materials(30, 0, 3), 29), /不支持 29 秒/);
 });
 
 test("switches LWAIGC between the documented SD2.0 and SD2.5 models", () => {
@@ -188,8 +224,8 @@ test("rejects every SD2.5 one-over-capacity boundary and a 31 second request", (
   assert.match(lwaigcLimitIssue(model, materials(30, 10, 10), 31), /不支持 31 秒/);
 });
 
-test("defines sane capabilities for all 25 documented LWAIGC video models", () => {
-  assert.equal(new Set(LWAIGC_VIDEO_MODELS).size, 25);
+test("defines sane capabilities for all 29 documented LWAIGC video models", () => {
+  assert.equal(new Set(LWAIGC_VIDEO_MODELS).size, 29);
   for (const model of LWAIGC_VIDEO_MODELS) {
     const capability = lwaigcCapability(model);
     assert.ok(capability.images >= 1 && capability.images <= 30, `${model} 图片上限无效`);
@@ -209,10 +245,10 @@ test("sends resolution only for LWAIGC models that require it", () => {
     aspectRatio: "16:9",
     materials: [],
   };
-  for (const model of ["mg-sd431-mini", "mg-sd431-fast", "mg-sd431-Pro", "mf-seedance2.5"]) {
+  for (const model of ["mg-sd431-mini", "mg-sd431-fast", "mg-sd431-Pro", "mf-seedance2.5", "wf-2.5官渠"]) {
     assert.equal(lwaigcVideoPayload(model, input, "client_dynamic").resolution, "720p", model);
   }
-  for (const model of ["firefly-seedance2-720p", "sd2-431-720p-pro", "wf-sd2.5-720p", "MiniMax-H3"]) {
+  for (const model of ["firefly-seedance2-720p", "sd2-431-720p-pro", "wf-sd2.5-720p", "wf-sd2.5-3030-720p", "gt-sd2.5", "gt-sd2.5-face", "MiniMax-H3"]) {
     assert.equal("resolution" in lwaigcVideoPayload(model, input, "client_fixed"), false, model);
   }
 });

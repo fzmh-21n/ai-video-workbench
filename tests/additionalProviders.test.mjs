@@ -6,9 +6,12 @@ import {
   capabilityFor,
   inferAdapter,
   migrateSavedProfile,
+  modelForSdVersion,
   pollDelayForAdapter,
 } from "../src/providerCatalog.js";
 import {
+  CLMM_PRICING_URL,
+  clmmCapability,
   clmmLimitIssue,
   clmmModelRules,
   clmmModels,
@@ -53,6 +56,47 @@ test("reads CLMM pricing model names without removing channel prefixes", () => {
   ]);
 });
 
+test("uses the live CLMM pricing endpoint and reads its current model_name schema", () => {
+  assert.equal(CLMM_PRICING_URL, "https://clmm-mall.top/api/pricing");
+  assert.deepEqual(clmmModels({ data: [
+    {
+      model_name: "mg-seedance-2.5-720p",
+      supported_endpoint_types: ["openai-video"],
+    },
+    {
+      model_name: "gpt-5.6-luna",
+      supported_endpoint_types: ["openai"],
+    },
+  ] }), ["mg-seedance-2.5-720p"]);
+});
+
+test("exposes CLMM SD2.5 limits and switches to a live SD2.5 model", () => {
+  const capability = clmmCapability("mg-seedance-2.5-720p");
+  assert.deepEqual(
+    {
+      images: capability.images,
+      videos: capability.videos,
+      audios: capability.audios,
+      durations: capability.durations,
+      resolutions: capability.resolutions,
+      version: capability._sdVersion,
+    },
+    {
+      images: 30,
+      videos: 10,
+      audios: 10,
+      durations: Array.from({ length: 16 }, (_, index) => index + 15),
+      resolutions: ["720p"],
+      version: "sd25",
+    },
+  );
+  assert.equal(modelForSdVersion(
+    { adapter: "clmm", model: "mg-seedance-2.0-720p" },
+    "sd25",
+    ["mg-seedance-2.0-720p", "mg-seedance-2.5-720p"],
+  ), "mg-seedance-2.5-720p");
+});
+
 test("parses CLMM fixed duration, resolution, image and no-video suffixes", () => {
   assert.deepEqual(clmmModelRules("op-video-720P-10s-gz-2img-nv"), {
     model: "op-video-720P-10s-gz-2img-nv",
@@ -81,6 +125,23 @@ test("builds CLMM fixed and adjustable duration requests", () => {
   assert.equal(adjustable.seconds, "1");
   assert.equal(adjustable.mySeconds, "6");
   assert.equal(adjustable.size, "720x1280");
+});
+
+test("builds CLMM SD2.5 ordinary and fixed-duration requests", () => {
+  const ordinary = clmmVideoPayload("mg-seedance-2.5-720p", {
+    prompt: "保持人物一致", duration: 20, aspectRatio: "16:9", materials,
+  });
+  assert.equal(ordinary.seconds, "20");
+  assert.equal("mySeconds" in ordinary, false);
+  assert.equal(ordinary.resolution, "720p");
+  assert.deepEqual(ordinary.reference_audios, ["https://example.com/a.wav"]);
+
+  const fixed = clmmVideoPayload("seedance-2.5-720p-gz-30s", {
+    prompt: "保持人物一致", duration: 30, aspectRatio: "9:16", materials,
+  });
+  assert.equal(fixed.seconds, "1");
+  assert.equal(fixed.mySeconds, "30");
+  assert.equal(fixed.size, "720x1280");
 });
 
 test("builds the exact Pidoi tejiasd request", () => {

@@ -159,6 +159,35 @@ _::~OUTPUT_END::~_`);
   assert.doesNotMatch(items.map((item) => item.prompt).join("\n"), /_::~/);
 });
 
+test("splits wrapped plot sections whose title follows the bracket number", () => {
+  const items = splitBatchPrompts(`_::~OUTPUT_START::~_
+_::~FIELD::~_
+
+剧情[1]：踹门质问三万元
+
+【本组目标时长】：14-16秒（默认15.0秒）
+【本组剧情任务】：第一节完整内容
+
+_::~OUTPUT_END::~_
+
+_::~OUTPUT_START::~_
+_::~FIELD::~_
+
+剧情[2]：病房劝阻被当场拒绝
+
+【本组目标时长】：14-16秒（默认15.0秒）
+【本组剧情任务】：第二节完整内容
+
+_::~OUTPUT_END::~_`);
+
+  assert.equal(items.length, 2);
+  assert.deepEqual(items.map((item) => item.section), [1, 2]);
+  assert.deepEqual(items.map((item) => item.title), ["踹门质问三万元", "病房劝阻被当场拒绝"]);
+  assert.match(items[0].prompt, /^剧情\[1\]：踹门质问三万元/);
+  assert.match(items[1].prompt, /第二节完整内容/);
+  assert.doesNotMatch(items.map((item) => item.prompt).join("\n"), /_::~/);
+});
+
 test("ignores decorative plot banners in Seedance prompt collections", () => {
   const items = splitBatchPrompts(`Seedance 2.0 分节提示词合集
 收录范围：剧情[6]—剧情[7]

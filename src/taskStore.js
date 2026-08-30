@@ -73,6 +73,35 @@ export async function putTask(task) {
   return putTasks([task]);
 }
 
+export function mergePolledTaskUpdate(stored, update) {
+  return normalizedTask({
+    ...stored,
+    ...update,
+    id: stored.id,
+    projectName: stored.projectName,
+    title: stored.title,
+    profileId: stored.profileId,
+  });
+}
+
+export async function putPolledTaskUpdates(updates) {
+  if (!Array.isArray(updates) || !updates.length) return;
+  const database = await openTaskDatabase();
+  const transaction = database.transaction(STORE_NAME, "readwrite");
+  const store = transaction.objectStore(STORE_NAME);
+  for (const update of updates) {
+    const request = store.get(update.id);
+    request.onsuccess = () => {
+      if (request.result) store.put(mergePolledTaskUpdate(request.result, update));
+    };
+  }
+  await transactionDone(transaction);
+}
+
+export async function markTaskDownloaded(id, downloadedAtMs = Date.now()) {
+  return putPolledTaskUpdates([{ id, downloadedAtMs }]);
+}
+
 export async function removeTask(id) {
   return removeTasks([id]);
 }
@@ -125,29 +154,25 @@ export async function listTasks({ page = 1, pageSize = 10, status, query, projec
   return { items, total };
 }
 
-async function pendingByStatus(database, status, remaining) {
-  if (remaining <= 0) return [];
+async function pendingByStatus(database, status) {
   const transaction = database.transaction(STORE_NAME, "readonly");
   const index = transaction.objectStore(STORE_NAME).index("status");
-  const items = [];
-  await new Promise((resolve, reject) => {
-    const request = index.openCursor(IDBKeyRange.only(status), "next");
-    request.onerror = () => reject(request.error || new Error("读取生成中任务失败"));
-    request.onsuccess = () => {
-      const cursor = request.result;
-      if (!cursor || items.length >= remaining) return resolve();
-      items.push(cursor.value);
-      cursor.continue();
-    };
-  });
-  return items;
+  return requestResult(index.getAll(IDBKeyRange.only(status)));
+}
+
+export function selectPendingTasks(tasks, limit = 10) {
+  return [...tasks]
+    .sort((left, right) =>
+      Number(left.nextPollAt || 0) - Number(right.nextPollAt || 0) ||
+      Number(left.updatedAtMs || left.createdAtMs || 0) - Number(right.updatedAtMs || right.createdAtMs || 0))
+    .slice(0, limit);
 }
 
 export async function getPendingTasks(limit = 10) {
   const database = await openTaskDatabase();
-  const queued = await pendingByStatus(database, "queued", limit);
-  const processing = await pendingByStatus(database, "processing", limit - queued.length);
-  return [...queued, ...processing];
+  const queued = await pendingByStatus(database, "queued");
+  const processing = await pendingByStatus(database, "processing");
+  return selectPendingTasks([...queued, ...processing], limit);
 }
 
 export async function getFailedTasks(limit = 10) {

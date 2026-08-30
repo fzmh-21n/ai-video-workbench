@@ -3,14 +3,83 @@ import test from "node:test";
 
 import {
   batchSubmissionPlan,
+  batchSourceNames,
+  batchItemsForSource,
+  batchStatusGroup,
   canBatchMatch,
+  canBatchResubmit,
   canBatchSubmit,
   deterministicBatchStopReason,
+  filterBatchItems,
   parseRecoveredTaskIds,
+  providerBatchSubmissionPlan,
   runOrderedStaggered,
   runWithConcurrency,
   splitBatchPrompts,
 } from "../src/batchPrompts.js";
+
+test("selects only the chapters imported from one TXT source", () => {
+  const items = [
+    { id: "a", sourceName: "第01章.txt" },
+    { id: "b", sourceName: "第02章.txt" },
+    { id: "c", sourceName: "第01章.txt" },
+  ];
+  assert.deepEqual(batchItemsForSource(items, "第01章.txt").map((item) => item.id), ["a", "c"]);
+  assert.deepEqual(batchItemsForSource(items, "第02章.txt").map((item) => item.id), ["b"]);
+});
+
+test("filters batch chapters by the user-facing status groups", () => {
+  const items = [
+    { id: "a", status: "pending" },
+    { id: "b", status: "matched" },
+    { id: "c", status: "submitting" },
+    { id: "d", status: "generating" },
+    { id: "e", status: "generated" },
+    { id: "f", status: "generation_failed" },
+  ];
+  assert.equal(batchStatusGroup("submitted"), "generating");
+  assert.equal(batchStatusGroup("submission_unknown"), "failed");
+  assert.deepEqual(filterBatchItems(items, "generating").map((item) => item.id), ["c", "d"]);
+  assert.deepEqual(filterBatchItems(items, "failed").map((item) => item.id), ["f"]);
+  assert.equal(filterBatchItems(items, "all").length, items.length);
+});
+
+test("forces FMGO SS batches into the provider-safe serial plan", () => {
+  assert.deepEqual(
+    providerBatchSubmissionPlan({ adapter: "fmgo", model: "ss-v2-fast" }, "limited_rush", 20),
+    {
+      concurrency: 1,
+      staggerMs: 5000,
+      groupSize: 30,
+      cooldownMs: 300000,
+      providerLimited: true,
+    },
+  );
+  assert.deepEqual(
+    providerBatchSubmissionPlan({ adapter: "fmgo", model: "feimiao-v2-fast-720p-15s" }, "ordered_rush", 3),
+    { concurrency: 3, staggerMs: 350 },
+  );
+});
+
+test("pauses between weighted provider submission groups", async () => {
+  const events = [];
+  const waits = [];
+  await runOrderedStaggered(
+    [{ section: 1, quantity: 2 }, { section: 2, quantity: 1 }, { section: 3, quantity: 2 }],
+    1,
+    0,
+    async (item) => events.push(`submit-${item.section}`),
+    {
+      groupSize: 3,
+      cooldownMs: 25,
+      weightOf: (item) => item.quantity,
+      sleep: async (milliseconds) => waits.push(milliseconds),
+      onGroupCooldown: ({ completedGroups, submitted }) => events.push(`cooldown-${completedGroups}-${submitted}`),
+    },
+  );
+  assert.deepEqual(events, ["submit-1", "submit-2", "cooldown-1-2", "submit-3"]);
+  assert.deepEqual(waits, [25]);
+});
 
 test("splits numbered Chinese prompt sections without splitting SC markers", () => {
   const items = splitBatchPrompts(`3.（第三节，总时长15秒 / 共3镜）\n【本节出场的所有人物】\n001_甲\n镜头1 / SC1\n内容\n\n4.（第四节，总时长15秒 / 共4镜）\n镜头1 / SC1\n内容`);
@@ -272,7 +341,7 @@ test("runs every batch item while respecting the selected concurrency", async ()
   assert.deepEqual(completed.sort(), [1, 2, 3, 4, 5]);
 });
 
-test("skips active and completed chapters during later batch operations", () => {
+test("skips active and completed chapters during ordinary later batch operations", () => {
   for (const status of ["submitting", "submitted", "generating", "generated"]) {
     assert.equal(canBatchMatch({ status }), false);
     assert.equal(canBatchSubmit({ status }), false);
@@ -283,4 +352,18 @@ test("skips active and completed chapters during later batch operations", () => 
   assert.equal(canBatchSubmit({ status: "matched" }), true);
   assert.equal(canBatchSubmit({ status: "failed" }), true);
   assert.equal(canBatchSubmit({ status: "not_submitted" }), true);
+  assert.equal(canBatchResubmit({ status: "generated" }), true);
+  assert.equal(canBatchResubmit({ status: "generating" }), false);
+  assert.equal(canBatchResubmit({ status: "failed" }), false);
+});
+
+test("lists every imported TXT source once in import order", () => {
+  assert.deepEqual(batchSourceNames([
+    { sourceName: "第07章_15秒视频提示词.txt" },
+    { sourceName: "第07章_15秒视频提示词.txt" },
+    { sourceName: "第08章_15秒视频提示词.txt" },
+  ], "第08章_15秒视频提示词.txt"), [
+    "第07章_15秒视频提示词.txt",
+    "第08章_15秒视频提示词.txt",
+  ]);
 });

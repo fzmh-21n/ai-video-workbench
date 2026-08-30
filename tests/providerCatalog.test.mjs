@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   DEFAULT_PROFILES,
+  FALLBACK_MODELS,
   capabilityLimitIssue,
   capabilityFor,
   inferAdapter,
@@ -13,6 +14,40 @@ import {
   sdVersionForProfile,
   sdVersionForModel,
 } from "../src/providerCatalog.js";
+
+test("treats FMGO ss-v2-fast as the same mixed-reference video family", () => {
+  assert.ok(FALLBACK_MODELS.fmgo.includes("ss-v2-fast"));
+  const capability = capabilityFor({ adapter: "fmgo", model: "ss-v2-fast" });
+  assert.deepEqual(
+    {
+      images: capability.images,
+      audios: capability.audios,
+      videos: capability.videos,
+      durations: capability.durations,
+      resolutions: capability.resolutions,
+      ratios: capability.ratios,
+    },
+    {
+      images: 9,
+      audios: 3,
+      videos: 3,
+      durations: [6, 8, 10, 12, 15],
+      resolutions: ["480p", "720p"],
+      ratios: ["16:9", "9:16", "1:1", "2:3", "3:2"],
+    },
+  );
+});
+
+test("includes the documented FMGO ss-v2 model with its official options", () => {
+  assert.ok(FALLBACK_MODELS.fmgo.includes("ss-v2"));
+  const capability = capabilityFor({ adapter: "fmgo", model: "ss-v2" });
+  assert.deepEqual(capability.durations, [10, 15]);
+  assert.deepEqual(capability.resolutions, ["480p", "720p"]);
+  assert.deepEqual(capability.ratios, ["16:9", "9:16", "1:1", "2:3", "3:2"]);
+  assert.equal(capability.images, 9);
+  assert.equal(capability.audios, 3);
+  assert.equal(capability.videos, 3);
+});
 
 test("selects 15 seconds for SD2.0 and the model maximum for SD2.5", () => {
   assert.equal(preferredDurationForVersion({ durations: [4, 10, 15] }, "sd20"), 15);
@@ -57,23 +92,23 @@ test("includes LWAIGC as a built-in OpenAI-compatible provider", () => {
 });
 
 test("applies the documented LWAIGC capacity for Seedance 2.5", () => {
-  const capability = capabilityFor({ adapter: "lwaigc", model: "mf-seedance2.5" });
+  const capability = capabilityFor({ adapter: "lwaigc", model: "wf-sd2.5-720p" });
   assert.equal(capability.images, 30);
   assert.equal(capability.videos, 10);
   assert.equal(capability.audios, 10);
-  assert.deepEqual(capability.resolutions, ["480p", "720p"]);
+  assert.deepEqual(capability.resolutions, ["720p"]);
   assert.equal(capability.durations.at(0), 4);
   assert.equal(capability.durations.at(-1), 30);
 });
 
 test("defines the six documented LWAIGC Seedance 2.5 models exactly", () => {
   const expected = {
-    "mf-seedance2.5": { images: 30, videos: 10, audios: 10, durations: [4, 30], resolutions: ["480p", "720p"] },
     "wf-sd2.5-720p": { images: 30, videos: 10, audios: 10, durations: [4, 30], resolutions: ["720p"] },
     "wf-sd2.5-3030-720p": { images: 30, videos: 3, audios: 0, durations: [30, 30], resolutions: ["720p"] },
-    "wf-2.5官渠": { images: 30, videos: 10, audios: 10, durations: [4, 30], resolutions: ["480p", "720p"] },
-    "gt-sd2.5": { images: 30, videos: 10, audios: 10, durations: [30, 30], resolutions: ["720p"] },
-    "gt-sd2.5-face": { images: 9, videos: 3, audios: 3, durations: [4, 30], resolutions: ["720p"] },
+    "gt-sd2.5-480p": { images: 30, videos: 10, audios: 10, durations: [4, 30], resolutions: ["480p"] },
+    "gt-sd2.5-720p": { images: 30, videos: 10, audios: 10, durations: [4, 30], resolutions: ["720p"] },
+    "gt-sd2.5-1000": { images: 10, videos: 0, audios: 0, durations: [4, 30], resolutions: ["720p"] },
+    "gt-sd2.5-301010": { images: 30, videos: 10, audios: 10, durations: [30, 30], resolutions: ["720p"] },
   };
 
   for (const [model, limits] of Object.entries(expected)) {
@@ -102,6 +137,15 @@ test("enforces the fixed 30-second no-audio LWAIGC WF model", () => {
   assert.match(lwaigcLimitIssue(model, materials(30, 0, 3), 29), /不支持 29 秒/);
 });
 
+test("enforces the documented GT 1000 and 301010 limits", () => {
+  assert.equal(lwaigcLimitIssue("gt-sd2.5-1000", materials(10, 0, 0), 12), "");
+  assert.match(lwaigcLimitIssue("gt-sd2.5-1000", materials(11, 0, 0), 12), /图片参考最多 10 个/);
+  assert.match(lwaigcLimitIssue("gt-sd2.5-1000", materials(10, 1, 0), 12), /音频参考最多 0 个/);
+  assert.match(lwaigcLimitIssue("gt-sd2.5-1000", materials(10, 0, 1), 12), /视频参考最多 0 个/);
+  assert.equal(lwaigcLimitIssue("gt-sd2.5-301010", materials(30, 10, 10), 30), "");
+  assert.match(lwaigcLimitIssue("gt-sd2.5-301010", materials(30, 10, 10), 29), /不支持 29 秒/);
+});
+
 test("switches LWAIGC between the documented SD2.0 and SD2.5 models", () => {
   const sd20Model = preferredModelForSdVersion("lwaigc", "sd20");
   const sd25Model = preferredModelForSdVersion("lwaigc", "sd25");
@@ -121,7 +165,7 @@ test("switches LWAIGC between the documented SD2.0 and SD2.5 models", () => {
 });
 
 test("builds the documented LWAIGC video payload with exact field names", () => {
-  const payload = lwaigcVideoPayload("mf-seedance2.5", {
+  const payload = lwaigcVideoPayload("wf-sd2.5-720p", {
     prompt: "测试提示词",
     duration: 15,
     resolution: "720p",
@@ -134,12 +178,11 @@ test("builds the documented LWAIGC video payload with exact field names", () => 
   }, "client_test_1");
 
   assert.deepEqual(payload, {
-    model: "mf-seedance2.5",
+    model: "wf-sd2.5-720p",
     client_task_id: "client_test_1",
     prompt: "测试提示词",
     seconds: 15,
     aspect_ratio: "16:9",
-    resolution: "720p",
     image_urls: ["https://ai.lwaigc.cn/v1/assets/image"],
     video_urls: ["https://ai.lwaigc.cn/v1/assets/video"],
     audio_urls: ["https://ai.lwaigc.cn/v1/assets/audio"],
@@ -213,7 +256,7 @@ test("accepts and serializes the full SD2.5 capacity of 50 references", () => {
   assert.equal(payload.audio_urls.length, 10);
   assert.equal(payload.video_urls.length, 10);
   assert.equal(payload.seconds, 30);
-  assert.equal(payload.resolution, "720p");
+  assert.equal("resolution" in payload, false);
 });
 
 test("rejects every SD2.5 one-over-capacity boundary and a 31 second request", () => {
@@ -245,17 +288,17 @@ test("sends resolution only for LWAIGC models that require it", () => {
     aspectRatio: "16:9",
     materials: [],
   };
-  for (const model of ["mg-sd431-mini", "mg-sd431-fast", "mg-sd431-Pro", "mf-seedance2.5", "wf-2.5官渠"]) {
+  for (const model of ["mg-sd431-mini", "mg-sd431-fast", "mg-sd431-Pro"]) {
     assert.equal(lwaigcVideoPayload(model, input, "client_dynamic").resolution, "720p", model);
   }
-  for (const model of ["firefly-seedance2-720p", "sd2-431-720p-pro", "wf-sd2.5-720p", "wf-sd2.5-3030-720p", "gt-sd2.5", "gt-sd2.5-face", "MiniMax-H3"]) {
+  for (const model of ["firefly-seedance2-720p", "sd2-431-720p-pro", "wf-sd2.5-720p", "wf-sd2.5-3030-720p", "gt-sd2.5-480p", "gt-sd2.5-720p", "gt-sd2.5-1000", "gt-sd2.5-301010", "MiniMax-H3"]) {
     assert.equal("resolution" in lwaigcVideoPayload(model, input, "client_fixed"), false, model);
   }
 });
 
 test("maps the SD version switch for both supported relay adapters", () => {
   assert.equal(preferredModelForSdVersion("lwaigc", "sd20"), "firefly-seedance2-720p");
-  assert.equal(preferredModelForSdVersion("lwaigc", "sd25"), "mf-seedance2.5");
+  assert.equal(preferredModelForSdVersion("lwaigc", "sd25"), "wf-sd2.5-720p");
   assert.equal(preferredModelForSdVersion("paipu", "sd20"), "lec-seedance-videos-standard");
   assert.equal(preferredModelForSdVersion("paipu", "sd25"), "lec-seedance-2-5");
   assert.equal(preferredModelForSdVersion("fmgo", "sd25"), "");

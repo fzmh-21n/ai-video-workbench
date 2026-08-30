@@ -1,6 +1,7 @@
 export const MAXFORAI_BASE_URL = "https://maxforai.top";
 
 export const MAXFORAI_VIDEO_MODELS = [
+  "wan3.0th",
   "cc-2.0-933",
   "mg-sd431-fast", "mg-sd431-mini", "mg-sd431-Pro", "mg-seedance-2.5",
   "zy-特价豆包900", "zy-SD满血933",
@@ -24,6 +25,21 @@ function resolutionFor(model) {
 
 export function maxforaiCapability(model) {
   const value = String(model || "").toLowerCase();
+  if (value === "wan3.0th") {
+    return {
+      images: 10,
+      videos: 5,
+      audios: 5,
+      durations: Array.from({ length: 27 }, (_, index) => index + 4),
+      resolutions: ["720p"],
+      ratios: ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"],
+      seed: false,
+      syncAudio: true,
+      syncAudioFixed: false,
+      _sdVersion: "sd20",
+      _preserveLimits: true,
+    };
+  }
   const sd25 = value.includes("2.5") || value.includes("sd2-5");
   const h3 = value.includes("minimax_h3") || value.includes("minimax-h3");
   const fixed933 = value === "zy-sd满血933";
@@ -50,7 +66,7 @@ export function maxforaiCapability(model) {
 
 export function maxforaiVideoPayload(model, input) {
   const ccSeedance = model === "cc-2.0-933";
-  const officialSeedance = ccSeedance || /^sd-(?:2\.0|fast|mini)-/i.test(model);
+  const officialSeedance = model === "wan3.0th" || ccSeedance || /^sd-(?:2\.0|fast|mini)-/i.test(model);
   const payload = officialSeedance
     ? {
         model,

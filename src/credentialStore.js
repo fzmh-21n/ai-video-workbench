@@ -1,3 +1,5 @@
+import { normalizeApiKey } from "./apiKey.js";
+
 const API_KEY_PREFIX = "video-api-key:";
 const MEDIA_KEY_PREFIX = "video-media-key:";
 const REMEMBER_PREFIX = "video-remember-key:";
@@ -21,8 +23,8 @@ export function readCredentials(profileId, local = localStorage, session = sessi
   const apiKeyName = `${API_KEY_PREFIX}${profileId}`;
   const mediaKeyName = `${MEDIA_KEY_PREFIX}${profileId}`;
   return {
-    apiKey: storageValue(local, apiKeyName) || storageValue(session, apiKeyName),
-    mediaKey: storageValue(local, mediaKeyName) || storageValue(session, mediaKeyName),
+    apiKey: normalizeApiKey(storageValue(local, apiKeyName) || storageValue(session, apiKeyName)),
+    mediaKey: normalizeApiKey(storageValue(local, mediaKeyName) || storageValue(session, mediaKeyName)),
     remember: storageValue(local, `${REMEMBER_PREFIX}${profileId}`) === "true",
   };
 }
@@ -34,8 +36,8 @@ export function saveCredentials(
   session = sessionStorage,
 ) {
   const values = [
-    [`${API_KEY_PREFIX}${profileId}`, String(apiKey).trim()],
-    [`${MEDIA_KEY_PREFIX}${profileId}`, String(mediaKey).trim()],
+    [`${API_KEY_PREFIX}${profileId}`, normalizeApiKey(apiKey)],
+    [`${MEDIA_KEY_PREFIX}${profileId}`, normalizeApiKey(mediaKey)],
   ];
   const persistent = Boolean(remember);
   for (const [key, value] of values) {

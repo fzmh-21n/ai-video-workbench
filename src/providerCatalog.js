@@ -112,6 +112,8 @@ export const FALLBACK_MODELS = {
     "omni",
     "feimiao-v2",
     "feimiao-v2-fast",
+    "ss-v2",
+    "ss-v2-fast",
     "feimiao-v2-431",
     "feimiao-v2-431-fast",
   ],
@@ -166,6 +168,9 @@ export const FALLBACK_MODELS = {
 };
 
 export const FALLBACK_MODEL_LABELS = {
+  maxforai: {
+    "wan3.0th": "WAN 3.0 TH · 720P · 4–30秒 · 10图/5视频/5音频",
+  },
   lwaigc: {
     "dq-sd933-pro": "DQ Seedance 2.0 · 卡脸 · 720P · 4–15秒",
     "dq-sd933-pro-face": "DQ Seedance 2.0 · 不卡脸 · 720P · 4–15秒",
@@ -183,13 +188,14 @@ export const FALLBACK_MODEL_LABELS = {
     "sd-2.0-931-720p": "SD2.0 931 · 720P · 4–15秒",
     "sd-2.0-fast-720p": "SD2.0 Fast · 480P请求档 · 4–15秒",
     "sd-2.5-720p": "SD2.5 · 720P · 4–29秒",
+    "wan30-720p": "WAN 3.0 · 720P · 4–30秒 · 10图/5视频/5音频",
   },
 };
 
 const SD_VERSION_MODELS = {
   lwaigc: {
     sd20: "firefly-seedance2-720p",
-    sd25: "mf-seedance2.5",
+    sd25: "wf-sd2.5-720p",
   },
   paipu: {
     sd20: "lec-seedance-videos-standard",
@@ -249,14 +255,16 @@ function rawCapabilityFor(profile) {
 
   if (adapter === "fmgo") {
     const encodedVariant = model.match(/-(480p|720p|1080p)-(\d+)s$/i);
-    const allowsMixedReferences = model.startsWith("feimiao-v2");
+    const isSs = model === "ss-v2";
+    const isSsFast = model === "ss-v2-fast";
+    const allowsMixedReferences = model.startsWith("feimiao-v2") || model.startsWith("ss-v2");
     const images = model.startsWith("sora-")
       ? 1
       : model.startsWith("veo-3.1")
         ? 3
         : model === "omni"
           ? 7
-          : model.startsWith("feimiao-v2")
+          : allowsMixedReferences
             ? 9
             : 7;
     return {
@@ -266,12 +274,17 @@ function rawCapabilityFor(profile) {
       // 前端武断拦截，按工作台素材区上限提交，由上游返回实际结果。
       videos: allowsMixedReferences ? 3 : base.videos,
       audios: allowsMixedReferences ? 3 : base.audios,
-      durations: encodedVariant
+      durations: isSs || isSsFast
+        ? isSsFast ? [6, 8, 10, 12, 15] : [10, 15]
+        : encodedVariant
         ? [Number(encodedVariant[2])]
         : [4, 6, 8, 10, 12, 15],
-      resolutions: encodedVariant
+      resolutions: isSs || isSsFast
+        ? ["480p", "720p"]
+        : encodedVariant
         ? [encodedVariant[1].toLowerCase()]
         : ["480p", "720p", "1080p"],
+      ratios: isSs || isSsFast ? ["16:9", "9:16", "1:1", "2:3", "3:2"] : base.ratios,
     };
   }
 
@@ -489,7 +502,7 @@ export function capabilityFor(profile) {
           : "sd20"
       )
     : capability._sdVersion || sdVersionForModel(profile?.model);
-  if (version !== "sd25") {
+  if (version !== "sd25" && !capability._preserveLimits) {
     return { ...capability, images: 9, audios: 3, videos: 3 };
   }
   return capability;

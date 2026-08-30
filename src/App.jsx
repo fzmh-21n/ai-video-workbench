@@ -21,7 +21,9 @@ import {
   getFailedTasks,
   getPendingTasks,
   listTasks,
+  markTaskDownloaded,
   projectNames as getTaskProjectNames,
+  putPolledTaskUpdates,
   putTask,
   putTasks,
   removeTask as removeStoredTask,
@@ -32,8 +34,10 @@ import {
   readCredentials,
   saveCredentials,
 } from "./credentialStore.js";
+import { normalizeApiKey } from "./apiKey.js";
 import { normalizedTaskProgress } from "./taskProgress.js";
-import { orderedDownloadFilename, orderedDownloadTasks } from "./taskDownload.js";
+import { downloadTaskBuckets, orderedDownloadFilename } from "./taskDownload.js";
+import { taskContentRequestUrl } from "./taskContent.js";
 import { syncAudioForProfile, withSyncAudioPreference } from "./syncAudioPreference.js";
 import { loadFixedContentByVersion, withFixedContentForVersion } from "./fixedContentStore.js";
 import { reusableAssetFor, taskReuseSnapshot } from "./taskReuse.js";
@@ -45,7 +49,17 @@ import {
   saveProjectDirectory,
 } from "./projectFolderStore.js";
 import BatchPanel from "./BatchPanel.jsx";
+import CostDashboard from "./CostDashboard.jsx";
+import TaskProjectManager from "./TaskProjectManager.jsx";
 import ImageWorkbench from "./ImageWorkbench.jsx";
+import {
+  UNCLASSIFIED_PROJECT,
+  addTaskProject,
+  assignTasksToProject,
+  loadActiveTaskProject,
+  loadTaskProjects,
+  saveTaskProjects,
+} from "./taskProjects.js";
 import {
   clearDiagnostics,
   diagnosticHeaders,
@@ -268,6 +282,10 @@ function Workbench({ onImageMode, onLogout }) {
   const [taskStatusFilter, setTaskStatusFilter] = useState("all");
   const [taskProjectFilter, setTaskProjectFilter] = useState("all");
   const [taskProjectOptions, setTaskProjectOptions] = useState([]);
+  const [taskProjects, setTaskProjects] = useState(loadTaskProjects);
+  const [activeTaskProject, setActiveTaskProject] = useState(loadActiveTaskProject);
+  const [selectedTaskIds, setSelectedTaskIds] = useState([]);
+  const [selectedTargetProject, setSelectedTargetProject] = useState(loadActiveTaskProject);
   const [taskQuery, setTaskQuery] = useState("");
   const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
   const [fixedContentByVersion, setFixedContentByVersion] = useState(() => {
@@ -295,6 +313,8 @@ function Workbench({ onImageMode, onLogout }) {
   const [notice, setNotice] = useState("请选择中转站并完成 API 配置");
   const [submitting, setSubmitting] = useState(false);
   const [configOpen, setConfigOpen] = useState(false);
+  const [costOpen, setCostOpen] = useState(false);
+  const [taskProjectOpen, setTaskProjectOpen] = useState(false);
   const [draft, setDraft] = useState(profiles[0]);
   const [draftKey, setDraftKey] = useState("");
   const [draftUploadKey, setDraftUploadKey] = useState("");
@@ -375,8 +395,17 @@ function Workbench({ onImageMode, onLogout }) {
     return entries.sort((a, b) => b.createdAtMs - a.createdAtMs);
   }, [tasks]);
   const taskCount = taskEntries.length;
+  const availableTaskProjectOptions = useMemo(
+    () => [...new Set([...taskProjects, ...taskProjectOptions, UNCLASSIFIED_PROJECT])],
+    [taskProjects, taskProjectOptions],
+  );
   const pageCount = Math.max(1, Math.ceil(taskCount / PAGE_SIZE));
   const visibleEntries = taskEntries.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  const visibleTaskIds = visibleEntries.flatMap((entry) => entry.type === "batch"
+    ? entry.tasks.map((task) => task.id)
+    : [entry.task.id]);
+  const allVisibleTasksSelected = visibleTaskIds.length > 0
+    && visibleTaskIds.every((id) => selectedTaskIds.includes(id));
   const mentionSuggestions = useMemo(() => {
     if (!mention) return [];
     const query = mention.query.toLowerCase();
@@ -401,6 +430,9 @@ function Workbench({ onImageMode, onLogout }) {
     localStorage.setItem(SYNC_AUDIO_PREFERENCES_KEY, JSON.stringify(syncAudioPreferences));
   }, [syncAudioPreferences]);
   useEffect(() => localStorage.setItem("video-workbench-mode-v1", workMode), [workMode]);
+  useEffect(() => {
+    saveTaskProjects(taskProjects, activeTaskProject);
+  }, [taskProjects, activeTaskProject]);
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -459,11 +491,13 @@ function Workbench({ onImageMode, onLogout }) {
     setPage(1);
     setExpandedTaskId(null);
     setExpandedBatchId(null);
+    setSelectedTaskIds([]);
   }, [taskStatusFilter, taskProjectFilter, taskQuery]);
   useEffect(() => {
     setExpandedTaskId(null);
     setExpandedBatchId(null);
     setVideoBlob(null);
+    setSelectedTaskIds([]);
   }, [page]);
   useEffect(() => {
     if (page > pageCount) setPage(pageCount);
@@ -511,14 +545,14 @@ function Workbench({ onImageMode, onLogout }) {
     return {
       ...diagnosticHeaders(),
       "x-api-base-url": profile.baseUrl.trim(),
-      "x-api-key": (explicitKey ?? keyFor(profile)).trim(),
+      "x-api-key": normalizeApiKey(explicitKey ?? keyFor(profile)),
       // HTTP 请求头只允许 Latin-1；中文模型名先编码，服务端再还原。
       "x-api-model": encodeURIComponent(profile.model.trim()),
       "x-api-adapter": profile.adapter,
       "x-media-upload-url": (profile.mediaUploadUrl || "").trim(),
       "x-media-upload-key":
         mediaKeyFor(profile) ||
-        (explicitKey ?? keyFor(profile)).trim(),
+        normalizeApiKey(explicitKey ?? keyFor(profile)),
     };
   }
 
@@ -614,6 +648,13 @@ function Workbench({ onImageMode, onLogout }) {
                   networkWarning: `网络暂时不稳定（HTTP ${response.status}），任务仍在保留并会自动重试`,
                 };
               }
+              if (response.status === 409 && /另一把 API Key/.test(String(body.message || ""))) {
+                return {
+                  id: task.id,
+                  nextPollAt,
+                  networkWarning: body.message,
+                };
+              }
               return { id: task.id, status: "failed", error: body.message };
             } catch {
               return {
@@ -637,7 +678,7 @@ function Workbench({ onImageMode, onLogout }) {
           })
           .filter(Boolean);
         if (changed.length) {
-          await putTasks(changed);
+          await putPolledTaskUpdates(changed);
           setTaskRefreshVersion((value) => value + 1);
         }
       } finally {
@@ -1187,7 +1228,8 @@ function Workbench({ onImageMode, onLogout }) {
             syncAudio,
             autoReference,
           }),
-          projectName: projectName || "未归类",
+          projectName: activeTaskProject || UNCLASSIFIED_PROJECT,
+          assetProjectName: projectName || "",
           diagnosticRequestId: requestId,
           submitDurationMs: Math.round(performance.now() - submitStartedAt),
           createdAtMs: createdAtMs + index,
@@ -1216,7 +1258,7 @@ function Workbench({ onImageMode, onLogout }) {
   }
 
   async function loadVideo(task) {
-    if (videoBlob?.taskId === task.id || !task.videoUrl) return;
+    if (videoBlob?.taskId === task.id) return;
     const profile = profiles.find((item) => item.id === task.profileId);
     if (!profile || !keyFor(profile)) {
       setNotice("需要重新填写该任务所属中转站的 API Key");
@@ -1224,7 +1266,12 @@ function Workbench({ onImageMode, onLogout }) {
     }
     setNotice("正在读取视频…");
     try {
-      const response = await fetch(task.videoUrl, { headers: headersFor(profile) });
+      const contentUrls = [taskContentRequestUrl(task), task.videoUrl].filter((url, index, values) => url && values.indexOf(url) === index);
+      let response;
+      for (const contentUrl of contentUrls) {
+        response = await fetch(contentUrl, { headers: headersFor(profile) });
+        if (response.ok) break;
+      }
       if (!response.ok) {
         const body = await response.json().catch(() => ({}));
         throw new Error(body.message || "读取视频失败");
@@ -1234,6 +1281,70 @@ function Workbench({ onImageMode, onLogout }) {
       setNotice("视频已加载");
     } catch (error) {
       setNotice(error.message || "读取视频失败");
+    }
+  }
+
+  function selectFavoriteModel(profileId, model) {
+    const profile = profiles.find((item) => item.id === profileId);
+    if (!profile) {
+      setNotice("这个常用模型所属的中转站配置已经不存在");
+      return;
+    }
+    setProfiles((current) => current.map((item) => item.id === profileId ? { ...item, model } : item));
+    setActiveId(profileId);
+    setNotice(`已从常用模型切换到 ${profile.name} · ${model}`);
+  }
+
+  function createTaskProject(name) {
+    const next = addTaskProject(taskProjects, name);
+    const createdName = next[next.length - 1];
+    setTaskProjects(next);
+    setActiveTaskProject(createdName);
+    setTaskProjectFilter(createdName);
+    setNotice(`已新建并切换到任务项目“${createdName}”，之后提交的单条和批量任务都会归入该项目`);
+  }
+
+  function selectTaskProject(name) {
+    const normalized = String(name || UNCLASSIFIED_PROJECT);
+    setActiveTaskProject(normalized);
+    setTaskProjectFilter(normalized);
+    setNotice(`已切换到任务项目“${normalized}”，之后新提交的任务都会归入该项目`);
+  }
+
+  function toggleTaskSelection(taskId) {
+    setSelectedTaskIds((current) => current.includes(taskId)
+      ? current.filter((id) => id !== taskId)
+      : [...current, taskId]);
+  }
+
+  function toggleTaskSelectionGroup(taskIds) {
+    setSelectedTaskIds((current) => {
+      const allSelected = taskIds.every((id) => current.includes(id));
+      return allSelected
+        ? current.filter((id) => !taskIds.includes(id))
+        : [...new Set([...current, ...taskIds])];
+    });
+  }
+
+  async function moveTasksToProject(taskIds, projectName) {
+    const ids = [...new Set((taskIds || []).filter(Boolean))];
+    if (!ids.length) {
+      setNotice("请先勾选要归类的任务");
+      return;
+    }
+    try {
+      const updated = assignTasksToProject(tasks, ids, projectName);
+      const changed = updated.filter((task) => ids.includes(task.id));
+      if (!changed.length) throw new Error("当前列表中没有找到所选任务");
+      await putTasks(changed);
+      if (projectName !== UNCLASSIFIED_PROJECT && !taskProjects.includes(projectName))
+        setTaskProjects((current) => [...current, projectName]);
+      setSelectedTaskIds([]);
+      setSelectedTargetProject(projectName);
+      setTaskRefreshVersion((value) => value + 1);
+      setNotice(`已将 ${changed.length} 条任务归入“${projectName}”，项目条数和预计成本已重新归类`);
+    } catch (error) {
+      setNotice(error.message || "任务项目调整失败");
     }
   }
 
@@ -1476,6 +1587,7 @@ function Workbench({ onImageMode, onLogout }) {
           name: item.name,
           subType: item.subType || "reference",
           durationSeconds: item.durationSeconds || null,
+          sizeBytes: item.file?.size || null,
           url: item.url || "",
           fileIndex: item.file ? fileIndex++ : null,
         };
@@ -1545,7 +1657,7 @@ function Workbench({ onImageMode, onLogout }) {
       await putTasks(taskRecords);
       setPage(1);
       setTaskStatusFilter("all");
-      setTaskProjectFilter("all");
+      setTaskProjectFilter(activeTaskProject || UNCLASSIFIED_PROJECT);
       setTaskRefreshVersion((value) => value + 1);
       setNotice(task.batchId ? "已按原参数重新提交，并保留在原批次和原章节" : "已按原参数重新提交新任务，旧视频已保留");
     } catch (error) {
@@ -1565,49 +1677,86 @@ function Workbench({ onImageMode, onLogout }) {
     }
   }
 
-  async function downloadBatch(batch) {
-    const completed = orderedDownloadTasks(
-      batch.tasks.filter((task) => task.status === "completed" && task.videoUrl),
-    );
-    if (!completed.length) return setNotice("该批次目前还没有可下载的成功视频");
-    const skipped = batch.tasks.length - completed.length;
-    setDownloadingBatchId(batch.id);
+  async function downloadTaskCollection(taskCollection, downloadId, collectionLabel = "批次", options = {}) {
+    const { pending: completed, alreadyDownloaded, unavailable: skippedTasks } = downloadTaskBuckets(taskCollection, options);
+    if (!completed.length) {
+      setNotice(alreadyDownloaded.length
+        ? `该${collectionLabel}当前成功的视频都已下载，无需重复下载`
+        : `该${collectionLabel}目前还没有可下载的成功视频`);
+      return { downloadedTaskIds: [], alreadyDownloaded: alreadyDownloaded.length, unavailable: skippedTasks.length };
+    }
+    const skipped = skippedTasks.length;
+    setDownloadingBatchId(downloadId);
     let downloaded = 0;
     let unavailable = 0;
+    const downloadErrors = [];
+    const downloadedTaskIds = [];
+    const markErrors = [];
     try {
       const downloadOne = async (index) => {
         const task = completed[index];
         try {
-          const profile = profiles.find((item) => item.id === task.profileId);
-          if (!profile || !keyFor(profile)) throw new Error("所属中转站缺少 API Key");
           setNotice(`正在按章节顺序下载：第 ${index + 1}/${completed.length} 个 · 已成功 ${downloaded} · 不可用 ${unavailable}`);
-          const response = await fetch(task.videoUrl, { headers: headersFor(profile) });
-          if (!response.ok) {
-            const body = await response.json().catch(() => ({}));
-            throw new Error(body.message || `HTTP ${response.status}`);
+          let response;
+          let body = {};
+          let downloadedTask = task;
+          const candidateTasks = [task, ...(task.downloadAlternatives || [])];
+          for (const candidateTask of candidateTasks) {
+            const profile = profiles.find((item) => item.id === candidateTask.profileId);
+            if (!profile || !keyFor(profile)) {
+              body = { message: "所属中转站缺少 API Key" };
+              continue;
+            }
+            const contentUrls = [taskContentRequestUrl(candidateTask), candidateTask.videoUrl].filter((url, index, values) => url && values.indexOf(url) === index);
+            for (const contentUrl of contentUrls) {
+              response = await fetch(contentUrl, { headers: headersFor(profile) });
+              if (response.ok) {
+                downloadedTask = candidateTask;
+                break;
+              }
+              body = await response.json().catch(() => ({}));
+            }
+            if (response.ok) break;
+          }
+          if (!response?.ok) {
+            throw new Error(body.message || (response ? `HTTP ${response.status}` : "没有可用的任务记录"));
           }
           const url = URL.createObjectURL(await response.blob());
           const link = document.createElement("a");
           link.href = url;
-          link.download = orderedDownloadFilename(task, index, completed.length);
+          link.download = orderedDownloadFilename({ ...downloadedTask, batchTitle: task.batchTitle, batchSection: task.batchSection }, index, completed.length);
           document.body.appendChild(link);
           link.click();
           link.remove();
           window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
           downloaded += 1;
+          downloadedTaskIds.push(task.id);
+          try {
+            await markTaskDownloaded(downloadedTask.id);
+          } catch {
+            markErrors.push(task.title || task.id);
+          }
           await new Promise((resolve) => window.setTimeout(resolve, 150));
-        } catch {
+        } catch (error) {
           unavailable += 1;
+          downloadErrors.push(`${task.title || task.id}：${error.message || "下载地址不可用"}`);
         }
         setNotice(`正在按章节顺序下载：已处理 ${downloaded + unavailable}/${completed.length} · 已成功 ${downloaded} · 不可用 ${unavailable}`);
       };
       for (let index = 0; index < completed.length; index += 1) await downloadOne(index);
-      setNotice(`批次下载尝试完成：实际开始下载 ${downloaded} 个，结果地址不可用 ${unavailable} 个${skipped ? `，另跳过生成失败或未完成任务 ${skipped} 条` : ""}`);
+      setTaskRefreshVersion((value) => value + 1);
+      setNotice(`${collectionLabel}下载尝试完成：本次新下载 ${downloaded} 个${alreadyDownloaded.length ? `，跳过已下载 ${alreadyDownloaded.length} 个` : ""}，结果地址不可用 ${unavailable} 个${skipped ? `，另跳过生成失败或未完成任务 ${skipped} 条` : ""}${downloadErrors.length ? `；首个错误：${downloadErrors[0]}` : ""}${markErrors.length ? `；有 ${markErrors.length} 个下载记录未能保存，下次可能重复下载` : ""}`);
+      return { downloadedTaskIds, alreadyDownloaded: alreadyDownloaded.length, unavailable: unavailable + skipped };
     } catch (error) {
       setNotice(error.message || "批次下载失败");
+      return { downloadedTaskIds, alreadyDownloaded: alreadyDownloaded.length, unavailable: unavailable + skipped };
     } finally {
       setDownloadingBatchId(null);
     }
+  }
+
+  async function downloadBatch(batch) {
+    return downloadTaskCollection(batch.tasks, batch.id, "批次");
   }
 
   function toggleTask(task) {
@@ -1737,6 +1886,8 @@ function Workbench({ onImageMode, onLogout }) {
           <span className="network-pill" title="不继承环境变量代理；系统网卡/TUN代理仍会接管请求">直连防丢包</span>
           <button className="secondary-button" title="只导出当前选择的中转，不包含其他中转" disabled={!!diagnosticBusy} onClick={downloadDiagnostics}>{diagnosticBusy === "exporting" ? "导出中…" : "仅导出当前中转日志"}</button>
           <button className="secondary-button" disabled={!!diagnosticBusy} onClick={resetDiagnostics}>{diagnosticBusy === "clearing" ? "清空中…" : "清空本次日志"}</button>
+          <button className="task-project-button" onClick={() => setTaskProjectOpen(true)}>任务项目：{activeTaskProject}</button>
+          <button className="secondary-button" onClick={() => setCostOpen(true)}>成本统计</button>
           <button className="secondary-button" onClick={() => openConfig()}>中转站管理</button>
           <button className="logout-button" onClick={onLogout}>退出登录</button>
         </div>
@@ -1766,16 +1917,18 @@ function Workbench({ onImageMode, onLogout }) {
               onNotice={setNotice}
               onProjectFolder={selectProjectFolder}
               onChooseProjectFolder={chooseProjectFolder}
+              onDownloadTasks={downloadTaskCollection}
               onRestoreProjectFolder={restoreProjectFolder}
               onTasksAdded={() => {
                 setPage(1);
                 setTaskStatusFilter("all");
-                setTaskProjectFilter("all");
+                setTaskProjectFilter(activeTaskProject || UNCLASSIFIED_PROJECT);
                 setTaskRefreshVersion((value) => value + 1);
               }}
               projectAssets={projectAssets}
               projectNeedsPermission={projectNeedsPermission}
               projectName={projectName}
+              taskProjectName={activeTaskProject}
               quantity={quantity}
               ratio={ratio}
               readMediaDuration={readMediaDuration}
@@ -2011,7 +2164,7 @@ function Workbench({ onImageMode, onLogout }) {
             </select>
             <select aria-label="任务项目" value={taskProjectFilter} onChange={(event) => setTaskProjectFilter(event.target.value)}>
               <option value="all">全部项目</option>
-              {taskProjectOptions.map((name) => <option key={name} value={name}>{name}</option>)}
+              {availableTaskProjectOptions.map((name) => <option key={name} value={name}>{name}</option>)}
             </select>
             <input aria-label="搜索任务" value={taskQuery} onChange={(event) => setTaskQuery(event.target.value)} placeholder="搜索名称、编号或模型" />
             <div className="task-backup-buttons">
@@ -2029,6 +2182,14 @@ function Workbench({ onImageMode, onLogout }) {
               />
             </div>
           </div>
+          <div className="task-project-bulk-bar">
+            <label><input type="checkbox" checked={allVisibleTasksSelected} onChange={() => toggleTaskSelectionGroup(visibleTaskIds)} />全选本页</label>
+            <span>已选 {selectedTaskIds.length} 条</span>
+            <select aria-label="批量归入任务项目" value={selectedTargetProject} onChange={(event) => setSelectedTargetProject(event.target.value)}>
+              {availableTaskProjectOptions.map((name) => <option key={name} value={name}>{name}</option>)}
+            </select>
+            <button className="secondary-button" disabled={!selectedTaskIds.length} onClick={() => moveTasksToProject(selectedTaskIds, selectedTargetProject)}>将所选归入项目</button>
+          </div>
           <div className="task-list">
             {!visibleEntries.length && (
               <div className="empty-tasks"><span>▶</span><h3>{taskDatabaseReady ? "没有符合条件的任务" : "正在读取任务记录"}</h3><p>任务记录保存在本机浏览器数据库中，不保存视频文件。</p></div>
@@ -2037,6 +2198,7 @@ function Workbench({ onImageMode, onLogout }) {
               if (entry.type === "batch") {
                 const batchExpanded = expandedBatchId === entry.id;
                 const completedCount = entry.tasks.filter((task) => task.status === "completed").length;
+                const downloadedCount = entry.tasks.filter((task) => task.downloadedAtMs).length;
                 const failedCount = entry.tasks.filter((task) => task.status === "failed").length;
                 const dissatisfiedCount = entry.tasks.filter((task) => task.reviewStatus === "dissatisfied").length;
                 const progress = entry.tasks.length
@@ -2045,9 +2207,10 @@ function Workbench({ onImageMode, onLogout }) {
                 return (
                   <article className={`batch-task-group ${batchExpanded ? "expanded" : ""}`} key={entry.id}>
                     <div className="batch-task-group-head" onClick={() => setExpandedBatchId(batchExpanded ? null : entry.id)}>
+                      <label className="task-select-box" title="选择或取消本批次全部任务" onClick={(event) => event.stopPropagation()}><input type="checkbox" checked={entry.tasks.every((task) => selectedTaskIds.includes(task.id))} onChange={() => toggleTaskSelectionGroup(entry.tasks.map((task) => task.id))} /></label>
                       <div className="batch-task-group-summary">
                         <strong>▸ 批量任务｜{entry.title}</strong>
-                        <span>共 {entry.tasks.length} 条 · 已生成 {completedCount} · 生成中 {entry.tasks.length - completedCount - failedCount} · 失败 {failedCount}{dissatisfiedCount ? ` · 不满意 ${dissatisfiedCount}` : ""}</span>
+                        <span>共 {entry.tasks.length} 条 · 已生成 {completedCount} · 已下载 {downloadedCount} · 生成中 {entry.tasks.length - completedCount - failedCount} · 失败 {failedCount}{dissatisfiedCount ? ` · 不满意 ${dissatisfiedCount}` : ""}</span>
                       </div>
                       <div className="batch-task-actions">
                         <button
@@ -2069,8 +2232,9 @@ function Workbench({ onImageMode, onLogout }) {
                           const shownProgress = normalizedTaskProgress(task.status, task.progress);
                           return (
                             <article className={`task-card batch-child-task ${childExpanded ? "expanded" : ""}`} key={task.id} onClick={() => toggleTask(task)}>
-                              <div className="task-topline"><code>#{task.title || task.id}</code><span className={`task-status ${task.status}`}>● {statusLabel(task.status)}</span></div>
+                              <div className="task-topline"><label className="task-select-box" onClick={(event) => event.stopPropagation()}><input type="checkbox" checked={selectedTaskIds.includes(task.id)} onChange={() => toggleTaskSelection(task.id)} /></label><code>#{task.title || task.id}</code><span className={`task-status ${task.status}`}>● {statusLabel(task.status)}</span>{task.downloadedAtMs && <span className="task-download-badge">✓ 已下载</span>}</div>
                               <div className="progress-row"><div className="progress-track"><span style={{ width: `${shownProgress}%` }} /></div><b>{shownProgress}%</b></div>
+                              <label className="task-project-assignment" onClick={(event) => event.stopPropagation()}><span>任务项目</span><select value={task.projectName || UNCLASSIFIED_PROJECT} onChange={(event) => moveTasksToProject([task.id], event.target.value)}>{availableTaskProjectOptions.map((name) => <option key={name} value={name}>{name}</option>)}</select></label>
                               {task.error && <p className="task-error">错误：{task.error}</p>}
                               {task.status === "failed" && <button className="secondary-button" onClick={(event) => { event.stopPropagation(); reuseFailedTask(task); }}>复用本条</button>}
                               {task.status === "completed" && (
@@ -2111,15 +2275,17 @@ function Workbench({ onImageMode, onLogout }) {
               return (
                 <article className={`task-card ${expanded ? "expanded" : ""}`} key={task.id} onClick={() => toggleTask(task)}>
                   <div className="task-topline">
-                    <code title={task.id}>#{task.title || task.id}</code>
+                    <div className="task-title-with-select"><label className="task-select-box" onClick={(event) => event.stopPropagation()}><input type="checkbox" checked={selectedTaskIds.includes(task.id)} onChange={() => toggleTaskSelection(task.id)} /></label><code title={task.id}>#{task.title || task.id}</code></div>
                     <div>
                       <button className="icon-button" onClick={(event) => { event.stopPropagation(); renameTask(task); }}>✎</button>
                       <span className={`task-status ${task.status}`}>● {statusLabel(task.status)}</span>
+                      {task.downloadedAtMs && <span className="task-download-badge">✓ 已下载</span>}
                       {task.status === "failed" && <button className="secondary-button" onClick={(event) => { event.stopPropagation(); reuseFailedTask(task); }}>复用本条</button>}
                       {task.status === "failed" && <button className="delete-button" onClick={(event) => { event.stopPropagation(); deleteTask(task); }}>删除</button>}
                     </div>
                   </div>
                   <div className="progress-row"><div className="progress-track"><span style={{ width: `${shownProgress}%` }} /></div><b>{shownProgress}%</b></div>
+                  <label className="task-project-assignment" onClick={(event) => event.stopPropagation()}><span>任务项目</span><select value={task.projectName || UNCLASSIFIED_PROJECT} onChange={(event) => moveTasksToProject([task.id], event.target.value)}>{availableTaskProjectOptions.map((name) => <option key={name} value={name}>{name}</option>)}</select></label>
                   {task.status === "completed" && (
                     <div className="task-review-actions" onClick={(event) => event.stopPropagation()}>
                       {task.reviewStatus === "dissatisfied" ? (
@@ -2209,6 +2375,27 @@ function Workbench({ onImageMode, onLogout }) {
             </div>
           </section>
         </div>
+      )}
+      {costOpen && (
+        <CostDashboard
+          modelOptions={modelOptions}
+          onClose={() => setCostOpen(false)}
+          onSelectModel={selectFavoriteModel}
+          profiles={profiles}
+        />
+      )}
+      {taskProjectOpen && (
+        <TaskProjectManager
+          activeProject={activeTaskProject}
+          onClose={() => setTaskProjectOpen(false)}
+          onCreate={createTaskProject}
+          onSelect={selectTaskProject}
+          onTasksChanged={(count, projectName) => {
+            setTaskRefreshVersion((value) => value + 1);
+            setNotice(`已将 ${count} 条历史任务移动到“${projectName}”；原项目不再保留这些任务`);
+          }}
+          projects={taskProjects}
+        />
       )}
     </main>
   );

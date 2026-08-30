@@ -1,11 +1,16 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
-  batchSubmissionPlan,
   batchSerializable,
+  batchItemsForSource,
+  batchSourceNames,
+  batchStatusGroup,
   canBatchMatch,
+  canBatchResubmit,
   canBatchSubmit,
   deterministicBatchStopReason,
+  filterBatchItems,
   parseRecoveredTaskIds,
+  providerBatchSubmissionPlan,
   runOrderedStaggered,
   splitBatchPrompts,
 } from "./batchPrompts.js";
@@ -16,6 +21,7 @@ import { pollDelayForAdapter } from "./providerCatalog.js";
 import { normalizedTaskProgress } from "./taskProgress.js";
 import { diagnosticHeaders, recordDiagnostic } from "./diagnostics.js";
 import { configuredUploadBatchSize } from "./uploadPolicy.js";
+import { batchItemDownloadCandidates, preferredBatchDownloadTasks } from "./taskDownload.js";
 
 const STORAGE_KEY = "video-workbench-batch-v1";
 const CONCURRENCY_OPTIONS = [1, 2, 3, 5, 10, 20];
@@ -55,6 +61,18 @@ function countsFor(references) {
   });
 }
 
+function withDownloadedFlags(items, storedTasks) {
+  return (items || []).map((item) => {
+    const candidates = batchItemDownloadCandidates(item, storedTasks);
+    const downloadedCount = candidates.some((task) => task.downloadedAtMs) ? 1 : 0;
+    return {
+      ...item,
+      downloadedCount,
+      downloaded: downloadedCount > 0,
+    };
+  });
+}
+
 function likelyAssetName(value) {
   const text = String(value || "").trim();
   if (!text) return false;
@@ -84,11 +102,13 @@ export default function BatchPanel({
   onNotice,
   onProjectFolder,
   onChooseProjectFolder,
+  onDownloadTasks,
   onRestoreProjectFolder,
   onTasksAdded,
   projectAssets,
   projectNeedsPermission,
   projectName,
+  taskProjectName,
   quantity,
   ratio,
   readMediaDuration,
@@ -114,6 +134,8 @@ export default function BatchPanel({
   const [busy, setBusy] = useState("");
   const [recoverOpen, setRecoverOpen] = useState(false);
   const [recoverText, setRecoverText] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [finalDownloading, setFinalDownloading] = useState(false);
   const textInput = useRef(null);
   const recoveredBatchRef = useRef("");
   const slowNoticeBatchRef = useRef("");
@@ -225,6 +247,25 @@ export default function BatchPanel({
     value[item.status] = (value[item.status] || 0) + 1;
     return value;
   }, {}), [items]);
+  const statusGroupCounts = useMemo(() => items.reduce((value, item) => {
+    const group = batchStatusGroup(item.status);
+    value[group] = (value[group] || 0) + 1;
+    return value;
+  }, {}), [items]);
+  const visibleItems = useMemo(() => filterBatchItems(items, statusFilter), [items, statusFilter]);
+  const downloadedSections = items.filter((item) => item.downloaded).length;
+  const pendingDownloadSections = Math.max(0, Number(summary.generated || 0) - downloadedSections);
+  const finalDownloadAvailable = items.length > 0 && pendingDownloadSections > 0;
+  const trackedDownloadKey = useMemo(() => items.flatMap((item) => item.taskIds || []).sort().join("|"), [items]);
+
+  useEffect(() => {
+    if (!trackedDownloadKey) return undefined;
+    let cancelled = false;
+    allTasks().then((stored) => {
+      if (!cancelled) setItems((values) => withDownloadedFlags(values, stored));
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [trackedDownloadKey]);
 
   async function importText(file) {
     if (!file) return;
@@ -511,6 +552,7 @@ export default function BatchPanel({
         name: reference.name,
         subType: reference.subType || "reference",
         durationSeconds: reference.durationSeconds || null,
+        sizeBytes: file?.size || null,
         url: cached?.url || "",
         fileIndex: file ? fileIndex++ : null,
       };
@@ -622,7 +664,8 @@ export default function BatchPanel({
         syncAudio: params.syncAudio,
         autoReference,
       }),
-      projectName: projectName || "未归类",
+      projectName: taskProjectName || "未归类",
+      assetProjectName: projectName || "",
       batchId,
       batchTitle: item.sourceName
         ? item.sourceName.replace(/\.txt$/i, "")
@@ -639,21 +682,28 @@ export default function BatchPanel({
     return records;
   }
 
-  async function submitSelected(selectedItems, confirmAll = false) {
+  async function submitSelected(selectedItems, confirmAll = false, includeGenerated = false) {
     if (!apiKey) return onNotice("请先配置当前中转站的 API Key");
-    const candidates = selectedItems.filter(canBatchSubmit);
+    const candidates = selectedItems.filter((item) => canBatchSubmit(item) || (includeGenerated && canBatchResubmit(item)));
     const blocked = candidates.filter(issueFor);
     const ready = candidates.filter((item) => !issueFor(item));
-    if (!ready.length) return onNotice(blocked.length ? "没有可提交章节，请先处理标红问题" : "没有已匹配且待提交的新章节；提交中和生成中的章节已自动跳过");
+    if (!ready.length) return onNotice(blocked.length
+      ? "没有可提交章节，请先处理标红问题"
+      : includeGenerated
+        ? "当前没有已生成、可以重新提交的章节"
+        : "没有已匹配且待提交的新章节；提交中、生成中和已生成章节已自动跳过");
     const totalTasks = ready.reduce((total, item) => total + Number(parametersFor(item).quantity || 1), 0);
-    const submissionPlan = batchSubmissionPlan(submissionMode, concurrency);
+    const resubmittingCount = ready.filter(canBatchResubmit).length;
+    const submissionPlan = providerBatchSubmissionPlan(activeProfile, submissionMode, concurrency);
     const effectiveConcurrency = submissionPlan.concurrency;
-    const modeLabel = submissionMode === "strict_order"
+    const modeLabel = submissionPlan.providerLimited
+      ? "飞猫 SS 稳定模式（每次1条、间隔5秒；每30条暂停5分钟）"
+      : submissionMode === "strict_order"
       ? "严格顺序（上一节拿到任务ID后再提交下一节）"
       : submissionMode === "limited_rush"
         ? "限量抢占（50ms错峰、固定并发5；不保证中转后台顺序）"
         : "有序抢位（按章节号每350ms发出）";
-    if (confirmAll && !window.confirm(`准备提交 ${ready.length} 节，共创建 ${totalTasks} 条任务。\n中转站：${activeProfile.name}\n模型：${activeProfile.model}\n模式：${modeLabel}\n最大同时在途：${effectiveConcurrency} 节\n\n工作台会先自动预上传全部素材，再开始抢位。确认开始吗？`)) return;
+    if (confirmAll && !window.confirm(`准备提交 ${ready.length} 节，共创建 ${totalTasks} 条任务。${resubmittingCount ? `\n其中 ${resubmittingCount} 节为重新生成，旧视频任务会保留。` : ""}\n中转站：${activeProfile.name}\n模型：${activeProfile.model}\n模式：${modeLabel}\n最大同时在途：${effectiveConcurrency} 节\n\n工作台会先自动预上传全部素材，再开始抢位。确认开始吗？`)) return;
     setBusy("uploading");
     let uploadCache;
     try {
@@ -682,6 +732,7 @@ export default function BatchPanel({
       chapterCount: ready.length,
       concurrency: effectiveConcurrency,
       submissionMode,
+      providerLimited: Boolean(submissionPlan.providerLimited),
     });
     const dispatchResult = await runOrderedStaggered(ready, effectiveConcurrency, submissionPlan.staggerMs, async (item, sequence) => {
       startedItemIds.add(item.id);
@@ -727,7 +778,15 @@ export default function BatchPanel({
             }
           : value));
       }
-    }, { shouldStop: () => Boolean(stopReason) });
+    }, {
+      shouldStop: () => Boolean(stopReason),
+      groupSize: submissionPlan.groupSize,
+      cooldownMs: submissionPlan.cooldownMs,
+      weightOf: (item) => Number(parametersFor(item).quantity || 1),
+      onGroupCooldown: ({ completedGroups, submitted }) => {
+        onNotice(`飞猫 SS 第 ${completedGroups} 轮已提交 ${submitted} 节，正在等待 5 分钟；等待结束后会自动继续下一轮，请不要重复点击。`);
+      },
+    });
     const skippedItems = ready.filter((item) => !startedItemIds.has(item.id));
     if (skippedItems.length) {
       const skippedIds = new Set(skippedItems.map((item) => item.id));
@@ -807,7 +866,8 @@ export default function BatchPanel({
         model: activeProfile.model,
         title: `第${String(assignments[index].chapter.section).padStart(2, "0")}节-${activeProfile.model}`,
         prompt: assignments[index].chapter.prompt,
-        projectName: projectName || "未归类",
+        projectName: taskProjectName || "未归类",
+        assetProjectName: projectName || "",
         batchId,
         batchTitle: `${(sourceName || "批量任务").replace(/\.txt$/i, "")}（找回）`,
         batchSection: assignments[index].chapter.section,
@@ -835,7 +895,34 @@ export default function BatchPanel({
     setItems((values) => values.map((item) => item.id === id ? { ...item, ...patch } : item));
   }
 
+  async function downloadFinalCollection(includeDownloaded = false) {
+    setFinalDownloading(true);
+    try {
+      const stored = await allTasks();
+      const completed = preferredBatchDownloadTasks(items, stored);
+      if (!completed.length) throw new Error("当前还没有取得下载地址的成功视频，请稍后刷新任务状态");
+      const unfinished = Math.max(0, items.length - Number(summary.generated || 0));
+      await onDownloadTasks(completed, `final-${Date.now()}`, `多章节阶段合集（已生成 ${summary.generated || 0}/${items.length} 节${unfinished ? `，其余 ${unfinished} 节暂不下载` : ""}）`, { includeDownloaded });
+      const refreshed = await allTasks();
+      setItems((values) => withDownloadedFlags(values, refreshed));
+    } catch (error) {
+      onNotice(error.message || "最终下载失败");
+    } finally {
+      setFinalDownloading(false);
+    }
+  }
+
   const validUploaded = Object.values(uploaded).filter((value) => Number(value.expiresAt) > Date.now()).length;
+  const importedSourceNames = useMemo(() => batchSourceNames(items, sourceName), [items, sourceName]);
+  const importedSources = useMemo(() => importedSourceNames.map((name) => {
+    const sourceItems = batchItemsForSource(items, name);
+    return {
+      name,
+      items: sourceItems,
+      generated: sourceItems.filter((item) => item.status === "generated").length,
+      canSubmit: sourceItems.some(canBatchSubmit),
+    };
+  }), [importedSourceNames, items]);
 
   return (
     <div className="batch-panel">
@@ -862,7 +949,17 @@ export default function BatchPanel({
       <textarea className="fixed-content" value={fixedContent} onChange={(event) => setFixedContent(event.target.value)} />
 
       <div className="batch-toolbar">
-        <div><strong>{sourceName || "尚未导入 TXT"}</strong><span>{items.length} 节 · 已匹配 {summary.matched || 0} · 生成中 {(summary.generating || 0) + (summary.submitted || 0) + (summary.submitting || 0)} · 已生成 {summary.generated || 0} · 失败 {(summary.failed || 0) + (summary.generation_failed || 0)}</span></div>
+        <div><div className="batch-source-list">{importedSources.length ? importedSources.map((source) => (
+          <div className="batch-source-row" key={source.name}>
+            <strong>{source.name}</strong>
+            <span>{source.generated}/{source.items.length} 节已生成</span>
+            <button
+              type="button"
+              disabled={!!busy || !source.canSubmit}
+              onClick={() => submitSelected(source.items, true)}
+            >{source.generated === source.items.length ? "本章已完成" : "生成本章"}</button>
+          </div>
+        )) : <strong>尚未导入 TXT</strong>}</div><span>{items.length} 节 · 已匹配 {summary.matched || 0} · 生成中 {(summary.generating || 0) + (summary.submitted || 0) + (summary.submitting || 0)} · 已生成 {summary.generated || 0} · 失败 {(summary.failed || 0) + (summary.generation_failed || 0)}</span></div>
         <button disabled={!!busy || !items.length} onClick={matchAll}>{busy === "matching" ? "匹配中…" : "全部一键参考"}</button>
         <button disabled={!!busy || !items.length} onClick={preuploadAll}>{busy === "uploading" ? "上传中…" : `预上传全部素材${validUploaded ? `（${validUploaded}）` : ""}`}</button>
         {activeProfile.adapter === "meaicc" && (
@@ -870,7 +967,40 @@ export default function BatchPanel({
         )}
         <label><span>提交模式</span><select value={submissionMode} onChange={(event) => setSubmissionMode(event.target.value)}><option value="ordered_rush">有序抢位（350ms）</option><option value="limited_rush">限量抢占（50ms）</option><option value="strict_order">严格顺序</option></select></label>
         <label title={submissionMode === "limited_rush" ? "限量抢占固定为5条同时在途" : ""}><span>最大同时在途</span><select value={submissionMode === "limited_rush" ? 5 : submissionMode === "strict_order" ? 1 : concurrency} disabled={submissionMode !== "ordered_rush"} onChange={(event) => setConcurrency(Number(event.target.value))}>{CONCURRENCY_OPTIONS.map((value) => <option key={value} value={value}>{value} 条</option>)}</select></label>
+        <button disabled={!!busy || !(summary.generated || 0)} onClick={() => submitSelected(items.filter(canBatchResubmit), true, true)}>用当前模型重做已生成（{summary.generated || 0}）</button>
         <button className="primary-button" disabled={!!busy || !items.length} onClick={() => submitSelected(items, true)}>{busy === "uploading" ? "自动预上传中…" : busy === "submitting" ? "批量提交中…" : "开始批量提交"}</button>
+      </div>
+
+      <div className="batch-filter-toolbar" aria-label="批量章节状态筛选">
+        {[
+          ["all", "全部", items.length],
+          ["pending", "待匹配/未提交", statusGroupCounts.pending || 0],
+          ["matched", "已匹配", statusGroupCounts.matched || 0],
+          ["generating", "提交中/生成中", statusGroupCounts.generating || 0],
+          ["generated", "已生成", statusGroupCounts.generated || 0],
+          ["failed", "失败/待确认", statusGroupCounts.failed || 0],
+        ].map(([value, label, count]) => (
+          <button
+            key={value}
+            type="button"
+            className={`batch-filter-button batch-filter-${value}${statusFilter === value ? " active" : ""}`}
+            onClick={() => setStatusFilter(value)}
+          >{label}（{count}）</button>
+        ))}
+        <button
+          type="button"
+          className="batch-final-download"
+          disabled={!finalDownloadAvailable || finalDownloading}
+          title="无需等待全部完成；按章号、节号顺序下载当前已经生成成功的视频"
+          onClick={() => downloadFinalCollection(false)}
+        >{finalDownloading ? "下载中…" : pendingDownloadSections > 0 ? `下载新增成功（${pendingDownloadSections}节）` : `已下载（${downloadedSections}节）`}</button>
+        <button
+          type="button"
+          className="batch-final-download"
+          disabled={!(summary.generated || 0) || finalDownloading}
+          title="忽略已下载标记，按章号、节号从头重新下载全部成功视频"
+          onClick={() => downloadFinalCollection(true)}
+        >{finalDownloading ? "下载中…" : `完整重下全部（${summary.generated || 0}节）`}</button>
       </div>
 
       {recoverOpen && activeProfile.adapter === "meaicc" && (
@@ -894,7 +1024,8 @@ export default function BatchPanel({
       <div className="notice" role="status">ⓘ {onNotice && notice}</div>
 
       <div className="batch-list">
-        {items.map((item) => {
+        {!visibleItems.length && <div className="batch-filter-empty">当前筛选状态下没有章节</div>}
+        {visibleItems.map((item) => {
           const counts = countsFor(item.references || []);
           const issue = issueFor(item);
           return (
@@ -904,6 +1035,7 @@ export default function BatchPanel({
                 <span className="batch-card-summary">
                   <span>图{counts.image} · 音{counts.audio} · 视{counts.video}</span>
                   <span className={`batch-status batch-status-${item.status || "pending"}`}>{STATUS_LABELS[item.status] || "待匹配"}</span>
+                  {item.downloaded && <span className="batch-downloaded-badge">✓ 已下载</span>}
                 </span>
               </button>
               {["submitted", "submitting", "generating"].includes(item.status) && (
@@ -932,7 +1064,7 @@ export default function BatchPanel({
                   <div className="batch-card-actions">
                     <button disabled={!!busy} onClick={() => matchOne(item.id)}>本节一键参考</button>
                     <label className="secondary-button file-button">手动添加素材<input type="file" multiple hidden accept="image/*,audio/*,video/*,.mov,.mp4" onChange={(event) => { addManualFiles(item.id, event.target.files); event.target.value = ""; }} /></label>
-                    <button disabled={!!busy || !!issue} onClick={() => submitSelected([item])}>开始生成本节</button>
+                    <button disabled={!!busy || !!issue} onClick={() => submitSelected([item], canBatchResubmit(item), canBatchResubmit(item))}>{canBatchResubmit(item) ? "用当前模型重新生成本节" : "开始生成本节"}</button>
                     {item.status === "submission_unknown" && (
                       <button
                         type="button"

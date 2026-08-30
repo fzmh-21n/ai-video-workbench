@@ -40,6 +40,7 @@ import {
   mediaUploadMode,
   tmpfilesDirectUrl,
 } from "./src/uploadPolicy.js";
+import { normalizeApiKey } from "./src/apiKey.js";
 import { ziyuJobFrom, ziyuJobPayload, ziyuModels, ziyuTaskId } from "./src/ziyuCatalog.js";
 import {
   GLOBAL_AIOPC_BASE_URL,
@@ -70,6 +71,7 @@ import {
 } from "./serverDiagnostics.mjs";
 import { capabilityLimitIssue, submissionTimeoutForAdapter } from "./src/providerCatalog.js";
 import { cosFingerprintKey, cosPublicUrl, normalizeCosConfig } from "./src/cosStorage.js";
+import { directTaskContentPaths, requiresOriginalTaskKey } from "./src/taskContent.js";
 
 // 与飞猫最新插件保持一致：本地中转服务不继承梯子/环境代理。
 // 只影响本工作台进程，不会改动 Windows 或浏览器的代理设置。
@@ -87,6 +89,7 @@ const dataDir = path.join(rootDir, ".workbench-data");
 const uploadDir = path.join(dataDir, "uploads");
 const diagnosticLogPath = path.join(dataDir, "diagnostics.jsonl");
 const cosConfigPath = path.join(dataDir, "cos-config.json");
+const fmgoResultCachePath = path.join(dataDir, "fmgo-result-cache.json");
 const automaticUploadServices = AUTOMATIC_UPLOAD_SERVICES;
 const automaticUploadCircuit = createUploadCircuitBreaker({ failureThreshold: 2 });
 mkdirSync(dataDir, { recursive: true });
@@ -94,6 +97,16 @@ mkdirSync(uploadDir, { recursive: true });
 
 function cosConfig() {
   try { return normalizeCosConfig(JSON.parse(readFileSync(cosConfigPath, "utf8"))); } catch { return null; }
+}
+
+function recoveredFmgoVideoUrl(taskId) {
+  try {
+    const cache = JSON.parse(readFileSync(fmgoResultCachePath, "utf8"));
+    const value = String(cache?.[taskId] || "").trim();
+    return value ? publicUrl(value, "飞猫后台视频地址").toString() : null;
+  } catch {
+    return null;
+  }
 }
 
 function diagnosticEntries() {
@@ -127,6 +140,7 @@ function writeDiagnostic(req, stage, details = {}) {
   const knownSecrets = [req.get("x-api-key"), req.get("x-media-upload-key")]
     .map((value) => String(value || "").trim())
     .filter(Boolean);
+  const normalizedApiKey = normalizeApiKey(req.get("x-api-key"));
   const entry = sanitizeDiagnostic({
     timestamp: new Date().toISOString(),
     source: "server",
@@ -134,6 +148,9 @@ function writeDiagnostic(req, stage, details = {}) {
     stage,
     elapsedMs: Date.now() - startedAt,
     model,
+    apiKeyFingerprint: normalizedApiKey
+      ? crypto.createHash("sha256").update(normalizedApiKey).digest("hex").slice(0, 12)
+      : "",
     ...details,
   }, "", knownSecrets);
   try {
@@ -163,6 +180,8 @@ const FMGO_MODELS = [
   "omni",
   "feimiao-v2",
   "feimiao-v2-fast",
+  "ss-v2",
+  "ss-v2-fast",
   "feimiao-v2-431",
   "feimiao-v2-431-fast",
 ];
@@ -174,6 +193,8 @@ const FMGO_CHAT_MODELS = new Set([
   "veo-3.1-fast",
   "feimiao-v2",
   "feimiao-v2-fast",
+  "ss-v2",
+  "ss-v2-fast",
 ]);
 
 const FMGO_SORA_VIDEO_MODELS = new Set([
@@ -294,7 +315,7 @@ function inferAdapter(url) {
 
 function providerConfig(req, requireModel = true) {
   let resolvedBaseUrl = baseUrl(req.get("x-api-base-url"));
-  const apiKey = String(req.get("x-api-key") || "").trim();
+  const apiKey = normalizeApiKey(req.get("x-api-key"));
   const encodedModel = String(req.get("x-api-model") || "").trim();
   let model = encodedModel;
   try { model = decodeURIComponent(encodedModel); } catch {}
@@ -320,7 +341,7 @@ function providerConfig(req, requireModel = true) {
       : adapter === "maxforai"
           ? `${resolvedBaseUrl}/v1/assets`
       : "";
-  const mediaUploadKey = String(req.get("x-media-upload-key") || "").trim() || apiKey;
+  const mediaUploadKey = normalizeApiKey(req.get("x-media-upload-key")) || apiKey;
   if (!apiKey) throw httpError(400, "请填写 API Key");
   if (requireModel && !model) throw httpError(400, "请选择模型");
   return { baseUrl: resolvedBaseUrl, apiKey, model, adapter, mediaUploadUrl, mediaUploadKey };
@@ -404,6 +425,11 @@ function fallbackModels(adapter) {
 
 function sign(value) {
   return crypto.createHmac("sha256", jobSecret).update(value).digest("base64url");
+}
+
+function apiKeyFingerprint(apiKey) {
+  const normalized = normalizeApiKey(apiKey);
+  return normalized ? crypto.createHash("sha256").update(normalized).digest("hex").slice(0, 12) : "";
 }
 
 function encodeJob(job) {
@@ -1033,13 +1059,16 @@ function fmgoModelName(model, duration, resolution) {
   return model;
 }
 
-function openAiMessage(prompt, materials) {
+function openAiMessage(prompt, materials, useImageUrlForAllMaterials = false) {
   if (!materials.length) return { role: "user", content: prompt };
   return {
     role: "user",
     content: [
       { type: "text", text: prompt },
       ...materials.map((item) => {
+        if (useImageUrlForAllMaterials) {
+          return { type: "image_url", image_url: { url: item.url } };
+        }
         if (item.kind === "audio") {
           return { type: "audio_url", audio_url: { url: item.url } };
         }
@@ -1052,10 +1081,16 @@ function openAiMessage(prompt, materials) {
   };
 }
 
+function isFmgoFeimiaoChatModel(model) {
+  return (
+    /^(?:feimiao-v2(?:-fast)?|ss-v2(?:-fast)?)(?:-(?:480p|720p|1080p)-\d+s)?$/i.test(model)
+  );
+}
+
 function isFmgoChatModel(model) {
   return (
     FMGO_CHAT_MODELS.has(model) ||
-    /^feimiao-v2(?:-fast)?-(?:480p|720p|1080p)-\d+s$/i.test(model)
+    isFmgoFeimiaoChatModel(model)
   );
 }
 
@@ -1084,7 +1119,7 @@ async function createFmgo(config, input) {
       ? 3
       : config.model === "omni"
         ? 7
-        : config.model.startsWith("feimiao-v2")
+        : isFmgoFeimiaoChatModel(config.model)
           ? 9
           : 7;
   const images = input.materials
@@ -1102,12 +1137,12 @@ async function createFmgo(config, input) {
     const videoConfig = {
       duration: input.duration,
       aspectRatio: input.aspectRatio,
-      generateAudio: input.syncAudio,
     };
+    if (!/^ss-v2(?:-fast)?$/i.test(model)) videoConfig.generateAudio = input.syncAudio;
     if (!model.startsWith("sora-")) videoConfig.resolution = input.resolution;
     const payload = {
       model: upstreamModel,
-      messages: [openAiMessage(input.prompt, chatMaterials)],
+      messages: [openAiMessage(input.prompt, chatMaterials, isFmgoFeimiaoChatModel(model))],
       generationConfig: { videoConfig },
       async: true,
     };
@@ -1419,11 +1454,16 @@ async function createImage(config, input, files) {
 function verifyJobConfig(config, job) {
   if (config.baseUrl !== job.baseUrl || config.adapter !== job.adapter)
     throw httpError(400, "任务所属中转站与当前配置不一致");
+  if (requiresOriginalTaskKey(config.adapter) && job.apiKeyFingerprint && job.apiKeyFingerprint !== apiKeyFingerprint(config.apiKey))
+    throw httpError(409, "这条任务是用另一把 API Key 创建的；请切回原 KEY 查询，或用当前 KEY 重新提交新任务");
 }
 
 async function pollJob(config, job) {
   const response = await upstream(`${config.baseUrl}${job.statusPath}`, {
-    headers: authHeaders(config),
+    headers: authHeaders(config, config.adapter === "fmgo"
+      ? { "Cache-Control": "no-cache, no-store", Pragma: "no-cache" }
+      : {}),
+    ...(config.adapter === "fmgo" ? { cache: "no-store" } : {}),
   });
   const responseBody = await readJson(response);
   const body = config.adapter === "ziyuai" ? ziyuJobFrom(responseBody) : responseBody;
@@ -1657,6 +1697,9 @@ app.get("/api/config/models", async (req, res, next) => {
       const documentedVideoModels = new Set(LWAIGC_VIDEO_MODELS);
       models = [...new Set([...models.filter((model) => documentedVideoModels.has(model)), ...LWAIGC_VIDEO_MODELS])];
     }
+    if (config.adapter === "fmgo") {
+      models = [...new Set([...models, ...FMGO_MODELS])];
+    }
     if (config.adapter === "globalaiopc") {
       models = [...new Set([...models, ...GLOBAL_AIOPC_MODELS])];
     }
@@ -1745,7 +1788,7 @@ app.post("/api/image-tasks", upload.array("references", 16), async (req, res, ne
     const job = await createImage(config, input, files);
     res.status(202).json({
       tasks: [{
-        id: encodeJob(job),
+        id: encodeJob({ ...job, apiKeyFingerprint: apiKeyFingerprint(config.apiKey) }),
         status: "queued",
         progress: 0,
         createdAt: new Date().toLocaleString("zh-CN", { hour12: false }),
@@ -1894,7 +1937,16 @@ app.post("/api/tasks", upload.array("references", 50), async (req, res, next) =>
       duration: requestedDuration,
       materialCounts: materials.reduce((result, item) => ({ ...result, [item.kind]: (result[item.kind] || 0) + 1 }), {}),
     });
-    const jobs = await Promise.all(Array.from({ length: quantity }, () => createVideo(config, input)));
+    let jobs;
+    if (config.adapter === "fmgo" && /^ss-v2(?:-fast)?$/i.test(config.model)) {
+      jobs = [];
+      for (let index = 0; index < quantity; index += 1) {
+        if (index) await new Promise((resolve) => setTimeout(resolve, 5000));
+        jobs.push(await createVideo(config, input));
+      }
+    } else {
+      jobs = await Promise.all(Array.from({ length: quantity }, () => createVideo(config, input)));
+    }
     writeDiagnostic(req, "provider_task_ids_received", {
       durationMs: Date.now() - providerStartedAt,
       quantity: jobs.length,
@@ -1902,7 +1954,7 @@ app.post("/api/tasks", upload.array("references", 50), async (req, res, next) =>
     });
     const createdAt = new Date().toLocaleString("zh-CN", { hour12: false });
     const tasks = jobs.map((job) => ({
-      id: encodeJob(job),
+      id: encodeJob({ ...job, apiKeyFingerprint: apiKeyFingerprint(config.apiKey) }),
       status: "queued",
       progress: 0,
       createdAt,
@@ -1941,6 +1993,7 @@ app.post("/api/tasks/recover", async (req, res, next) => {
           taskId,
           statusPath: `/v1/videos/${encodeURIComponent(taskId)}`,
           model: config.model,
+          apiKeyFingerprint: apiKeyFingerprint(config.apiKey),
         }),
         upstreamTaskId: taskId,
         status: "queued",
@@ -1974,6 +2027,7 @@ app.get("/api/tasks/:id", async (req, res, next) => {
       status: result.status,
       progress: result.progress,
       videoUrl: result.status === "completed" ? `/api/tasks/${encodeURIComponent(req.params.id)}/content` : undefined,
+      sourceVideoUrl: result.status === "completed" ? result.videoUrl : undefined,
       error: failure?.reason,
       cost: result.body?.cost ?? result.body?.usage?.cost ?? result.body?.metadata?.cost,
       completedAt: dateText(result.body?.completed_at || result.body?.completedAt),
@@ -1986,29 +2040,63 @@ app.get("/api/tasks/:id", async (req, res, next) => {
 
 app.get("/api/tasks/:id/content", async (req, res, next) => {
   try {
-    const config = providerConfig(req);
     const job = decodeJob(req.params.id);
-    verifyJobConfig(config, job);
     const range = req.get("range");
-    if (config.adapter !== "canseedream" && config.adapter !== "meaicc" && config.adapter !== "ziyuai" && config.adapter !== "globalaiopc" && config.adapter !== "clmm" && config.adapter !== "pidoi") {
+    const recoveredVideoUrl = job.adapter === "fmgo" ? recoveredFmgoVideoUrl(job.taskId) : null;
+    if (recoveredVideoUrl) {
+      const recoveredResponse = await upstream(recoveredVideoUrl, {
+        headers: {
+          Accept: "video/*,*/*",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140.0 Safari/537.36",
+          Referer: "https://www.fmgo.top/",
+          ...(range ? { Range: range } : {}),
+        },
+      }, 1_800_000);
+      if (recoveredResponse.ok) return streamResponse(recoveredResponse, res);
+      await recoveredResponse.body?.cancel().catch(() => {});
+    }
+
+    const config = providerConfig(req);
+    verifyJobConfig(config, job);
+    for (const contentPath of directTaskContentPaths(config.adapter, job.taskId)) {
       const fixedResponse = await upstream(
-        `${config.baseUrl}/v1/videos/${encodeURIComponent(job.taskId)}/content`,
+        `${config.baseUrl}${contentPath}`,
         { headers: authHeaders(config, range ? { Range: range } : {}) },
         1_800_000,
       );
       if (fixedResponse.ok) return streamResponse(fixedResponse, res);
+      await fixedResponse.body?.cancel().catch(() => {});
     }
 
     const cachedVideoUrl = completedVideoUrls.get(`${config.baseUrl}\n${job.taskId}`);
     const result = cachedVideoUrl
       ? { status: "completed", videoUrl: cachedVideoUrl }
+      : recoveredVideoUrl
+        ? { status: "completed", videoUrl: recoveredVideoUrl }
       : await pollJob(config, job);
     if (result.status !== "completed") throw httpError(409, "视频尚未生成完成");
+    const suppliedSourceUrl = req.query.source
+      ? publicUrl(String(req.query.source), "已保存的视频地址").toString()
+      : null;
     const candidateUrls = cachedVideoUrl
       ? [cachedVideoUrl]
-      : videoUrlsFrom(result.body, config.baseUrl);
+      : recoveredVideoUrl
+        ? [recoveredVideoUrl]
+        : videoUrlsFrom(result.body, config.baseUrl);
+    if (suppliedSourceUrl && !candidateUrls.includes(suppliedSourceUrl)) candidateUrls.unshift(suppliedSourceUrl);
     if (result.videoUrl && !candidateUrls.includes(result.videoUrl)) candidateUrls.unshift(result.videoUrl);
-    if (!candidateUrls.length) throw httpError(502, "任务已完成但没有返回视频地址");
+    // 部分 LWAIGC 通道会先把任务标成 completed，随后几秒才写入视频地址。
+    // 下载时短暂复查，避免把尚未同步完成误报成永久地址不可用。
+    if (!candidateUrls.length) {
+      for (let attempt = 0; attempt < 4 && !candidateUrls.length; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        const refreshed = await pollJob(config, job);
+        if (refreshed.status !== "completed") continue;
+        candidateUrls.push(...videoUrlsFrom(refreshed.body, config.baseUrl));
+        if (refreshed.videoUrl && !candidateUrls.includes(refreshed.videoUrl)) candidateUrls.unshift(refreshed.videoUrl);
+      }
+    }
+    if (!candidateUrls.length) throw httpError(502, "任务已完成，但中转站暂时还没有返回视频地址；工作台已自动复查4次，请稍后再下载");
     const providerUrl = new URL(config.baseUrl);
     let lastStatus = 502;
     let attemptedUrls = 0;
@@ -2041,15 +2129,15 @@ app.get("/api/tasks/:id/content", async (req, res, next) => {
     };
     if (await tryCandidateUrls(candidateUrls)) return;
 
-    // MEAICC 的 object 字段通常是带有效期签名的 OSS 地址。缓存地址失效时，
-    // 重新查询任务可以取得一条新的签名地址，再继续本次下载。
-    if (config.adapter === "meaicc" && cachedVideoUrl) {
+    // 中转站返回的视频地址可能带有效期签名。缓存地址失效时，重新查询任务
+    // 取得最新结果地址再试一次；这不仅适用于 MEAICC，LWAIGC、MaxForAI
+    // 等中转也可能使用临时下载地址。
+    if (cachedVideoUrl) {
       completedVideoUrls.delete(`${config.baseUrl}\n${job.taskId}`);
       const refreshed = await pollJob(config, job);
       if (refreshed.status === "completed") {
-        const refreshedUrls = videoUrlsFrom(refreshed.body, config.baseUrl)
-          .filter((url) => !candidateUrls.includes(url));
-        if (refreshed.videoUrl && !refreshedUrls.includes(refreshed.videoUrl) && !candidateUrls.includes(refreshed.videoUrl))
+        const refreshedUrls = videoUrlsFrom(refreshed.body, config.baseUrl);
+        if (refreshed.videoUrl && !refreshedUrls.includes(refreshed.videoUrl))
           refreshedUrls.unshift(refreshed.videoUrl);
         if (await tryCandidateUrls(refreshedUrls)) return;
       }

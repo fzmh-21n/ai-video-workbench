@@ -9,7 +9,35 @@ test("includes MaxForAI with its official base URL and video catalog", () => {
   assert.equal(profile.mediaUploadUrl, "https://maxforai.top/v1/assets");
   assert.equal(inferAdapter(profile.baseUrl), "maxforai");
   assert.deepEqual(FALLBACK_MODELS.maxforai, MAXFORAI_VIDEO_MODELS);
+  assert.ok(MAXFORAI_VIDEO_MODELS.includes("wan3.0th"));
   assert.ok(MAXFORAI_VIDEO_MODELS.includes("cc-2.0-933"));
+});
+
+test("uses the documented MaxForAI wan3.0th request fields", () => {
+  const payload = maxforaiVideoPayload("wan3.0th", {
+    prompt: "test", duration: 15, aspectRatio: "16:9", resolution: "720p", syncAudio: true,
+    materials: [
+      { kind: "image", url: "https://example.com/a.png" },
+      { kind: "video", url: "https://example.com/a.mp4" },
+      { kind: "audio", url: "https://example.com/a.wav" },
+    ],
+  });
+  assert.equal(payload.model, "wan3.0th");
+  assert.equal(payload.seconds, "15");
+  assert.equal(payload.ratio, "16:9");
+  assert.equal(payload.generate_audio, true);
+  assert.deepEqual(payload.images, ["https://example.com/a.png"]);
+  assert.deepEqual(payload.videos, ["https://example.com/a.mp4"]);
+  assert.deepEqual(payload.audios, ["https://example.com/a.wav"]);
+  assert.equal("duration" in payload, false);
+  assert.equal("aspect_ratio" in payload, false);
+  assert.equal("resolution" in payload, false);
+
+  const capability = capabilityFor({ adapter: "maxforai", model: "wan3.0th" });
+  assert.equal(capability.images, 10);
+  assert.equal(capability.videos, 5);
+  assert.equal(capability.audios, 5);
+  assert.deepEqual(capability.durations, Array.from({ length: 27 }, (_, index) => index + 4));
 });
 
 test("uses the documented MaxForAI cc-2.0-933 request fields", () => {

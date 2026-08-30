@@ -79,3 +79,19 @@ test("deleting a provider clears its local and session credentials", () => {
     remember: false,
   });
 });
+
+test("normalizes pasted Bearer prefixes, quotes, and invisible characters", () => {
+  const local = new MemoryStorage();
+  const session = new MemoryStorage();
+  saveCredentials("provider-a", {
+    apiKey: '\uFEFF  Bearer "sk-normal"  ',
+    mediaKey: "'upload-normal'",
+    remember: true,
+  }, local, session);
+
+  assert.deepEqual(readCredentials("provider-a", local, session), {
+    apiKey: "sk-normal",
+    mediaKey: "upload-normal",
+    remember: true,
+  });
+});

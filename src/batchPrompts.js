@@ -64,6 +64,22 @@ export function canBatchSubmit(item) {
   return ["matched", "failed", "generation_failed", "not_submitted"].includes(item?.status);
 }
 
+export function canBatchResubmit(item) {
+  return item?.status === "generated";
+}
+
+export function batchStatusGroup(status) {
+  if (["submitting", "submitted", "generating"].includes(status)) return "generating";
+  if (["failed", "generation_failed", "submission_unknown"].includes(status)) return "failed";
+  if (["pending", "not_submitted"].includes(status) || !status) return "pending";
+  return status;
+}
+
+export function filterBatchItems(items, filter) {
+  if (!filter || filter === "all") return [...(items || [])];
+  return (items || []).filter((item) => batchStatusGroup(item?.status) === filter);
+}
+
 export function batchSubmissionPlan(mode, concurrency) {
   if (mode === "strict_order") return { concurrency: 1, staggerMs: 0 };
   if (mode === "limited_rush") return { concurrency: 5, staggerMs: 50 };
@@ -107,6 +123,30 @@ export function orderedBatchItems(values) {
   ));
 }
 
+export function providerBatchSubmissionPlan(profile, mode, concurrency) {
+  if (profile?.adapter === "fmgo" && /^ss-v2(?:-fast)?$/i.test(String(profile?.model || ""))) {
+    return {
+      concurrency: 1,
+      staggerMs: 5000,
+      groupSize: 30,
+      cooldownMs: 5 * 60 * 1000,
+      providerLimited: true,
+    };
+  }
+  return batchSubmissionPlan(mode, concurrency);
+}
+
+export function batchSourceNames(values, fallback = "") {
+  const names = (values || []).map((item) => String(item?.sourceName || "").trim()).filter(Boolean);
+  if (!names.length && String(fallback || "").trim()) names.push(String(fallback).trim());
+  return [...new Set(names)];
+}
+
+export function batchItemsForSource(items, sourceName) {
+  const target = String(sourceName || "").trim();
+  return (items || []).filter((item) => String(item?.sourceName || "").trim() === target);
+}
+
 export async function runOrderedStaggered(values, concurrency, staggerMs, worker, options = {}) {
   const queue = orderedBatchItems(values);
   const limit = Math.max(1, Math.min(20, Number(concurrency) || 1));
@@ -114,17 +154,33 @@ export async function runOrderedStaggered(values, concurrency, staggerMs, worker
   const active = new Set();
   let lastStartedAt = 0;
   let started = 0;
+  let groupWeight = 0;
+  let completedGroups = 0;
+  const groupSize = Math.max(0, Number(options.groupSize) || 0);
+  const cooldownMs = Math.max(0, Number(options.cooldownMs) || 0);
+  const sleep = options.sleep || ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
 
   for (let index = 0; index < queue.length; index += 1) {
     while (active.size >= limit) await Promise.race(active);
     if (options.shouldStop?.()) break;
 
+    const itemWeight = Math.max(1, Number(options.weightOf?.(queue[index])) || 1);
+    if (groupSize && groupWeight && groupWeight + itemWeight > groupSize) {
+      completedGroups += 1;
+      options.onGroupCooldown?.({ completedGroups, submitted: started, cooldownMs });
+      if (cooldownMs) await sleep(cooldownMs);
+      groupWeight = 0;
+      lastStartedAt = 0;
+      if (options.shouldStop?.()) break;
+    }
+
     const waitMs = lastStartedAt ? lastStartedAt + gap - Date.now() : 0;
-    if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
+    if (waitMs > 0) await sleep(waitMs);
     if (options.shouldStop?.()) break;
 
     lastStartedAt = Date.now();
     started += 1;
+    groupWeight += itemWeight;
     let pending;
     pending = Promise.resolve().then(() => worker(queue[index], index)).finally(() => active.delete(pending));
     active.add(pending);

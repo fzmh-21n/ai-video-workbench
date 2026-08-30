@@ -17,7 +17,7 @@ import {
   clmmModels,
   clmmVideoPayload,
 } from "../src/clmmCatalog.js";
-import { pidoiCapability, pidoiLimitIssue, pidoiVideoPayload } from "../src/pidoiCatalog.js";
+import { PIDOI_MODELS, pidoiCapability, pidoiLimitIssue, pidoiVideoPayload } from "../src/pidoiCatalog.js";
 
 const materials = [
   { kind: "image", url: "https://example.com/a.png" },
@@ -233,4 +233,77 @@ test("exposes the documented Pidoi SD2.5 limits", () => {
   assert.equal(capability.audios, 1);
   assert.deepEqual(capability.durations, Array.from({ length: 26 }, (_, index) => index + 4));
   assert.deepEqual(capability.ratios, ["16:9", "9:16", "1:1"]);
+});
+
+test("adds the documented Pidoi WAN 3.0 model and capability", () => {
+  assert.ok(PIDOI_MODELS.includes("wan30-720p"));
+  const capability = capabilityFor({ adapter: "pidoi", model: "wan30-720p" });
+  assert.deepEqual({
+    images: capability.images,
+    videos: capability.videos,
+    audios: capability.audios,
+    firstDuration: capability.durations[0],
+    lastDuration: capability.durations.at(-1),
+    resolutions: capability.resolutions,
+    ratios: capability.ratios,
+  }, {
+    images: 10,
+    videos: 5,
+    audios: 5,
+    firstDuration: 4,
+    lastDuration: 30,
+    resolutions: ["720p"],
+    ratios: ["16:9", "9:16", "4:3", "3:4", "1:1", "21:9"],
+  });
+});
+
+test("builds Pidoi WAN 3.0 single and multiple reference fields", () => {
+  const single = pidoiVideoPayload("wan30-720p", {
+    prompt: "保持人物一致", duration: 30, resolution: "720p", aspectRatio: "16:9", materials,
+  });
+  assert.deepEqual(single, {
+    model: "wan30-720p",
+    prompt: "保持人物一致",
+    aspect_ratio: "16:9",
+    resolution: "720p",
+    seconds: "30",
+    image_url: "https://example.com/a.png",
+    reference_video: "https://example.com/a.mp4",
+    audio_url: "https://example.com/a.wav",
+  });
+
+  const multiple = pidoiVideoPayload("wan30-720p", {
+    prompt: "多素材", duration: 12, resolution: "720p", aspectRatio: "9:16",
+    materials: [
+      { kind: "image", url: "https://example.com/main.jpg" },
+      { kind: "image", url: "https://example.com/ref.jpg" },
+      { kind: "video", url: "https://example.com/v1.mp4" },
+      { kind: "video", url: "https://example.com/v2.mp4" },
+      { kind: "audio", url: "https://example.com/a1.wav" },
+      { kind: "audio", url: "https://example.com/a2.wav" },
+    ],
+  });
+  assert.deepEqual(multiple.reference_image_urls, ["https://example.com/ref.jpg"]);
+  assert.deepEqual(multiple.reference_videos, ["https://example.com/v1.mp4", "https://example.com/v2.mp4"]);
+  assert.deepEqual(multiple.audio_urls, ["https://example.com/a1.wav", "https://example.com/a2.wav"]);
+  assert.equal("reference_video" in multiple, false);
+  assert.equal("audio_url" in multiple, false);
+});
+
+test("enforces Pidoi WAN 3.0 reference rules", () => {
+  assert.equal(pidoiLimitIssue("wan30-720p", [
+    { kind: "image" },
+    { kind: "video", durationSeconds: 5 },
+    { kind: "audio", durationSeconds: 5 },
+  ], 15), "");
+  assert.match(pidoiLimitIssue("wan30-720p", [{ kind: "video", durationSeconds: 5 }], 30), /输出时长只支持 4–15 秒/);
+  assert.match(pidoiLimitIssue("wan30-720p", [{ kind: "audio", durationSeconds: 5 }], 10), /必须同时提供/);
+  assert.match(pidoiLimitIssue("wan30-720p", [{ kind: "image", subType: "last_frame" }], 10), /不支持尾帧图/);
+  assert.match(pidoiLimitIssue("wan30-720p", Array.from({ length: 11 }, () => ({ kind: "image" })), 10), /图片参考最多 10 张/);
+  assert.match(pidoiLimitIssue("wan30-720p", [
+    { kind: "image" }, { kind: "video", durationSeconds: 8 }, { kind: "video", durationSeconds: 8 },
+  ], 10), /视频总时长不能超过 15 秒/);
+  assert.match(pidoiLimitIssue("wan30-720p", [
+    { kind: "image" }, { kind: "audio", durationSeconds: 5, sizeBytes: 16 * 1024 * 1024 },
+  ], 10), /参考音频单个文件不能超过 15MB/);
 });

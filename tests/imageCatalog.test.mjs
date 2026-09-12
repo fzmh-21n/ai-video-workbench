@@ -5,10 +5,16 @@ import {
   CANSEEDREAM_IMAGE_MODELS,
   CANSEEDREAM_IMAGE_SIZE_LABELS,
   FMGO_IMAGE_MODELS,
+  IMAGE_PROVIDER_PROFILES,
+  QIQI_IMAGE_BASE_URL,
+  QIQI_IMAGE_MODELS,
+  QIQI_IMAGE_SIZE_LABELS,
   canSeeDreamImagePayload,
   fmgoGeminiImagePayload,
   fmgoGptImagePayload,
   imageModelCapability,
+  imageModelsFor,
+  qiqiImagePayload,
 } from "../src/imageCatalog.js";
 
 test("lists the documented FMGO and CanSeeDream image models", () => {
@@ -113,5 +119,49 @@ test("exposes labelled CanSeeDream sizes and Nano image routes", () => {
     quality: "auto",
     background: "opaque",
     n: 1,
+  });
+});
+
+test("adds QIQI with the documented GPT Image 2 generation and editing options", () => {
+  assert.deepEqual(QIQI_IMAGE_MODELS, ["gpt-image-2"]);
+  assert.equal(QIQI_IMAGE_BASE_URL, "https://pidoi.com");
+  assert.deepEqual(imageModelsFor("qiqi"), ["gpt-image-2"]);
+  assert.ok(IMAGE_PROVIDER_PROFILES.some((profile) => (
+    profile.adapter === "qiqi" && profile.baseUrl === QIQI_IMAGE_BASE_URL
+  )));
+  assert.deepEqual(imageModelCapability("qiqi", "gpt-image-2"), {
+    references: 16,
+    sizes: [
+      "auto",
+      "1024x1024",
+      "1536x1024",
+      "1024x1536",
+      "2048x2048",
+      "2048x1152",
+      "1152x2048",
+      "3840x2160",
+      "2160x3840",
+    ],
+    qualities: ["auto", "low", "medium", "high"],
+  });
+  assert.equal(QIQI_IMAGE_SIZE_LABELS["3840x2160"], "3840x2160 (4K · 16:9)");
+  assert.equal(qiqiImagePayload({
+    prompt: "横屏4K",
+    size: "3840x2160",
+    quality: "high",
+  }).size, "3840x2160");
+  assert.deepEqual(qiqiImagePayload({
+    prompt: "保持人物一致，改成雨夜背景",
+    size: "1536x1024",
+    quality: "high",
+  }, true), {
+    model: "gpt-image-2",
+    prompt: "保持人物一致，改成雨夜背景",
+    size: "1536x1024",
+    quality: "high",
+    background: "opaque",
+    output_format: "png",
+    n: 1,
+    input_fidelity: "high",
   });
 });

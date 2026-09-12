@@ -21,7 +21,7 @@ import { pollDelayForAdapter } from "./providerCatalog.js";
 import { normalizedTaskProgress } from "./taskProgress.js";
 import { diagnosticHeaders, recordDiagnostic } from "./diagnostics.js";
 import { configuredUploadBatchSize } from "./uploadPolicy.js";
-import { batchItemDownloadCandidates, preferredBatchDownloadTasks } from "./taskDownload.js";
+import { batchItemDownloadCandidates, batchItemTasks, preferredBatchDownloadTasks } from "./taskDownload.js";
 
 const STORAGE_KEY = "video-workbench-batch-v1";
 const CONCURRENCY_OPTIONS = [1, 2, 3, 5, 10, 20];
@@ -64,9 +64,20 @@ function countsFor(references) {
 function withDownloadedFlags(items, storedTasks) {
   return (items || []).map((item) => {
     const candidates = batchItemDownloadCandidates(item, storedTasks);
+    const relatedTasks = batchItemTasks(item, storedTasks);
     const downloadedCount = candidates.some((task) => task.downloadedAtMs) ? 1 : 0;
+    const failed = relatedTasks.find((task) => task.status === "failed");
+    const allFailed = relatedTasks.length > 0 && relatedTasks.every((task) => task.status === "failed");
+    const staleGenerated = Boolean(item.taskIds?.length) && !relatedTasks.length && item.status === "generated";
     return {
       ...item,
+      ...(candidates.length
+        ? { status: "generated", progress: 100, error: "" }
+        : allFailed
+          ? { status: "generation_failed", progress: 100, error: failed?.error || failed?.message || "中转站返回生成失败" }
+          : staleGenerated
+            ? { status: "generation_failed", progress: 100, error: "本节保存的任务与当前章节内容或参考素材不一致，请重新生成" }
+          : {}),
       downloadedCount,
       downloaded: downloadedCount > 0,
     };
@@ -131,6 +142,7 @@ export default function BatchPanel({
   const [allowMissingImages, setAllowMissingImages] = useState(false);
   const [uploaded, setUploaded] = useState(restored?.uploaded || {});
   const [uploadedProfileId, setUploadedProfileId] = useState(restored?.uploadedProfileId || "");
+
   const [busy, setBusy] = useState("");
   const [recoverOpen, setRecoverOpen] = useState(false);
   const [recoverText, setRecoverText] = useState("");
@@ -163,6 +175,7 @@ export default function BatchPanel({
       taskId,
       section: item.section,
       order: Number(item.section) * 10 + index,
+      sourceName: item.sourceName,
     })));
     if (!tracked.length) return undefined;
     const recoveryKey = tracked.map((item) => item.taskId).sort().join("|");
@@ -180,12 +193,15 @@ export default function BatchPanel({
           finished = true;
           return;
         }
-        const batchId = `batch-recovered-${ungrouped[0].taskId}`;
-        const batchTitle = sourceName ? sourceName.replace(/\.txt$/i, "") : "已归组批量任务";
+        const recoveredBatchIds = new Map();
         await putTasks(ungrouped.map((entry) => ({
           ...byId.get(entry.taskId),
-          batchId,
-          batchTitle,
+          batchId: (() => {
+            const key = String(entry.sourceName || sourceName || "已归组批量任务");
+            if (!recoveredBatchIds.has(key)) recoveredBatchIds.set(key, `batch-recovered-${entry.taskId}`);
+            return recoveredBatchIds.get(key);
+          })(),
+          batchTitle: String(entry.sourceName || sourceName || "已归组批量任务").replace(/\.txt$/i, ""),
           batchSection: entry.section,
           batchOrder: entry.order,
         })));
@@ -213,19 +229,18 @@ export default function BatchPanel({
       try {
         const stored = await allTasks();
         if (cancelled) return;
-        const byId = new Map(stored.map((task) => [task.id, task]));
         setItems((values) => values.map((item) => {
           if (!item.taskIds?.length || !["submitted", "generating", "submitting", "generation_failed"].includes(item.status)) return item;
-          const tracked = item.taskIds.map((id) => byId.get(id)).filter(Boolean);
+          const tracked = batchItemTasks(item, stored);
           if (!tracked.length) return item;
           const progress = Math.round(tracked.reduce(
             (total, task) => total + normalizedTaskProgress(task.status, task.progress),
             0,
           ) / tracked.length);
-          if (tracked.every((task) => task.status === "completed")) {
+          if (tracked.some((task) => task.status === "completed")) {
             return { ...item, status: "generated", progress: 100, error: "" };
           }
-          if (tracked.every((task) => ["completed", "failed"].includes(task.status)) && tracked.some((task) => task.status === "failed")) {
+          if (tracked.every((task) => task.status === "failed")) {
             const failed = tracked.find((task) => task.status === "failed");
             return { ...item, status: "generation_failed", progress, error: failed?.error || failed?.message || "中转站返回生成失败" };
           }
@@ -482,7 +497,11 @@ export default function BatchPanel({
         throw new Error(`${body.message || "素材预上传失败"}${progress}`);
       }
       for (const material of body.materials || []) {
-        nextUploaded[material.key] = { url: material.url, expiresAt: body.expiresAt };
+        nextUploaded[material.key] = {
+          url: material.url || "",
+          assetId: material.assetId || "",
+          expiresAt: body.expiresAt,
+        };
       }
       completedThisRun += body.materials?.length || 0;
       // 紫域逐个上传确认；每成功一个就立即写入状态与本地缓存，中途限流也不丢进度。
@@ -545,7 +564,7 @@ export default function BatchPanel({
     let fileIndex = 0;
     const referenceMeta = references.map((reference) => {
       const cached = uploadCache[uploadKey(item, reference)];
-      const file = cached?.url ? null : resolveFile(reference);
+      const file = cached?.url || cached?.assetId ? null : resolveFile(reference);
       const meta = {
         tag: reference.tag,
         kind: reference.kind,
@@ -554,6 +573,7 @@ export default function BatchPanel({
         durationSeconds: reference.durationSeconds || null,
         sizeBytes: file?.size || null,
         url: cached?.url || "",
+        assetId: cached?.assetId || "",
         fileIndex: file ? fileIndex++ : null,
       };
       if (file) form.append("references", file, file.name);

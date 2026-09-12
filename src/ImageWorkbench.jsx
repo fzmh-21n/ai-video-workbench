@@ -4,6 +4,7 @@ import { readCredentials, saveCredentials } from "./credentialStore.js";
 import {
   CANSEEDREAM_IMAGE_SIZE_LABELS,
   IMAGE_PROVIDER_PROFILES,
+  QIQI_IMAGE_SIZE_LABELS,
   imageModelCapability,
   imageModelLabel,
   imageModelsFor,
@@ -415,7 +416,7 @@ export default function ImageWorkbench({ onVideoMode, onLogout }) {
                 ? <label><span>画面比例</span><select value={aspectRatio} onChange={(event) => setAspectRatio(event.target.value)}>{capability.ratios.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
                 : capability.kind === "nano"
                   ? <><label><span>分辨率</span><select value={size} onChange={(event) => setSize(event.target.value)}>{capability.resolutions.map((value) => <option key={value} value={value}>{capability.resolutionLabels[value]}</option>)}</select></label><label><span>画面比例</span><select value={aspectRatio} onChange={(event) => setAspectRatio(event.target.value)}>{capability.ratios.map((value) => <option key={value} value={value}>{value}</option>)}</select></label></>
-                  : <><label><span>图片尺寸</span><select value={size} onChange={(event) => setSize(event.target.value)}>{capability.sizes.map((value) => <option key={value} value={value}>{CANSEEDREAM_IMAGE_SIZE_LABELS[value] || value}</option>)}</select></label><label><span>图片质量</span><select value={quality} onChange={(event) => setQuality(event.target.value)}><option value="auto">正常</option><option value="medium">优秀</option></select></label></>}
+                  : <><label><span>图片尺寸</span><select value={size} onChange={(event) => setSize(event.target.value)}>{capability.sizes.map((value) => <option key={value} value={value}>{(activeProfile.adapter === "qiqi" ? QIQI_IMAGE_SIZE_LABELS : CANSEEDREAM_IMAGE_SIZE_LABELS)[value] || value}</option>)}</select></label><label><span>图片质量</span><select value={quality} onChange={(event) => setQuality(event.target.value)}>{capability.qualities.map((value) => <option key={value} value={value}>{{ auto: "自动", low: "低", medium: "中", high: "高" }[value] || value}</option>)}</select></label></>}
               <label><span>输出规格</span><input readOnly value={activeProfile.adapter === "fmgo" ? capability.imageSize : size} /></label>
             </div>
             {notice && <div className="notice">ⓘ {notice}</div>}

@@ -9,6 +9,14 @@ import {
 import { MAXFORAI_BASE_URL, MAXFORAI_VIDEO_MODELS, maxforaiCapability } from "./maxforaiCatalog.js";
 import { CLMM_BASE_URL, clmmCapability } from "./clmmCatalog.js";
 import { PIDOI_BASE_URL, PIDOI_MODELS, pidoiCapability } from "./pidoiCatalog.js";
+import { FMGO_V25_MODEL, fmgoV25Capability, isFmgoV25Model } from "./fmgoCatalog.js";
+import {
+  AIYRX_BASE_URL,
+  AIYRX_MODEL_LABELS,
+  AIYRX_VIDEO_MODELS,
+  aiyrxCapability,
+} from "./aiyrxCatalog.js";
+import { SEEDANCE_VIDEO_BASE_URL } from "./seedanceVideoCatalog.js";
 
 export const DEFAULT_PROFILES = [
   {
@@ -99,6 +107,22 @@ export const DEFAULT_PROFILES = [
     model: "tejiasd",
     mediaUploadUrl: "",
   },
+  {
+    id: "aiyrx",
+    name: "AIYRX",
+    baseUrl: AIYRX_BASE_URL,
+    adapter: "aiyrx",
+    model: AIYRX_VIDEO_MODELS[0],
+    mediaUploadUrl: `${AIYRX_BASE_URL}/v1/assets`,
+  },
+  {
+    id: "seedancevideo",
+    name: "Seedance 视频 / 772808",
+    baseUrl: SEEDANCE_VIDEO_BASE_URL,
+    adapter: "seedancevideo",
+    model: "",
+    mediaUploadUrl: `${SEEDANCE_VIDEO_BASE_URL}/v1/uploads/images`,
+  },
 ];
 
 export const FALLBACK_MODELS = {
@@ -116,6 +140,7 @@ export const FALLBACK_MODELS = {
     "ss-v2-fast",
     "feimiao-v2-431",
     "feimiao-v2-431-fast",
+    FMGO_V25_MODEL,
   ],
   paipu: [
     "lec-grok-video-1-5",
@@ -165,15 +190,28 @@ export const FALLBACK_MODELS = {
   maxforai: MAXFORAI_VIDEO_MODELS,
   clmm: [],
   pidoi: PIDOI_MODELS,
+  aiyrx: AIYRX_VIDEO_MODELS,
+  seedancevideo: [],
 };
 
 export const FALLBACK_MODEL_LABELS = {
+  fmgo: {
+    [FMGO_V25_MODEL]: "feimiao-v2.5 · 飞猫 SD2.5 · 固定480P · 固定5秒",
+  },
   maxforai: {
     "wan3.0th": "WAN 3.0 TH · 720P · 4–30秒 · 10图/5视频/5音频",
   },
   lwaigc: {
     "dq-sd933-pro": "DQ Seedance 2.0 · 卡脸 · 720P · 4–15秒",
     "dq-sd933-pro-face": "DQ Seedance 2.0 · 不卡脸 · 720P · 4–15秒",
+    "wf-sd2.0-fast-cf": "WF Seedance 2.0 Fast CF · 903 · 按秒 · 原生不卡脸 · 720P · 4–15秒",
+    "wf-sd2.0-pro-cf": "WF Seedance 2.0 Pro CF · 903 · 按秒 · 原生不卡脸 · 720P · 4–15秒",
+    "wf-sd2.0-v1": "WF Seedance 2.0 V1 · 903 · 按次 · 原生不卡脸 · 720P · 5–15秒",
+    "wf-sd2.0-v2": "WF Seedance 2.0 V2 · 933 · 按次 · 卡脸 · 720P · 4–15秒 · 提示词≤2500字",
+    "wf-sd2.5-v2": "WF Seedance 2.5 V2 · 真人脸支持 · 720P · 固定30秒 · 30图/3视频/无音频",
+    "hn-sd2.5-v1": "HN Seedance 2.5 V1 · 不支持真人脸 · 按秒 · 720P · 4–30秒 · 30图/10视频/10音频",
+    "hn-sd2.5-v2": "HN Seedance 2.5 V2 · 内置过脸 · 720P · 固定30秒 · 30图/无视频音频",
+    "wf-sd2.5-v4": "WF Seedance 2.5 V4 · 原生不卡脸 · 按秒 · 720P · 4–30秒 · 30图/10视频/10音频",
   },
   canseedream: {
     kele_pool: "可乐线路 · 480P · 15秒 · 450积分",
@@ -190,9 +228,14 @@ export const FALLBACK_MODEL_LABELS = {
     "sd-2.5-720p": "SD2.5 · 720P · 4–29秒",
     "wan30-720p": "WAN 3.0 · 720P · 4–30秒 · 10图/5视频/5音频",
   },
+  aiyrx: AIYRX_MODEL_LABELS,
 };
 
 const SD_VERSION_MODELS = {
+  fmgo: {
+    sd20: "feimiao-v2",
+    sd25: FMGO_V25_MODEL,
+  },
   lwaigc: {
     sd20: "firefly-seedance2-720p",
     sd25: "wf-sd2.5-720p",
@@ -219,6 +262,10 @@ const SD_VERSION_MODELS = {
     sd20: "sora-v3-933-pro",
     sd25: "sd-2.5-720p",
   },
+  aiyrx: {
+    sd20: "A渠道SD2.0-Fast720P-933不卡脸",
+    sd25: "官逆SD2.5-720P-不卡脸30图10视频10音频",
+  },
 };
 
 export function preferredModelForSdVersion(adapter, version) {
@@ -235,7 +282,7 @@ export function submissionTimeoutForAdapter(adapter) {
 
 export function sdVersionForModel(modelName) {
   const model = String(modelName || "").toLowerCase();
-  return /(?:seedance|sd)[-.]?2[.-]?5|sd25/.test(model) ? "sd25" : "sd20";
+  return /(?:seedance|sd)[-.]?2[.-]?5|sd25|feimiao-v2\.5/.test(model) ? "sd25" : "sd20";
 }
 
 function rawCapabilityFor(profile) {
@@ -254,6 +301,7 @@ function rawCapabilityFor(profile) {
   };
 
   if (adapter === "fmgo") {
+    if (isFmgoV25Model(model)) return fmgoV25Capability(model);
     const encodedVariant = model.match(/-(480p|720p|1080p)-(\d+)s$/i);
     const isSs = model === "ss-v2";
     const isSsFast = model === "ss-v2-fast";
@@ -488,6 +536,24 @@ function rawCapabilityFor(profile) {
   if (adapter === "maxforai") return maxforaiCapability(profile?.model);
   if (adapter === "clmm") return clmmCapability(profile?.model);
   if (adapter === "pidoi") return pidoiCapability(profile?.model);
+  if (adapter === "aiyrx") {
+    const live = profile?.routeCapabilities?.[profile?.model];
+    return live || aiyrxCapability(profile?.model);
+  }
+  if (adapter === "seedancevideo") {
+    return profile?.routeCapabilities?.[profile?.model] || {
+      ...base,
+      images: 50,
+      videos: 50,
+      audios: 50,
+      durations: [],
+      resolutions: [],
+      ratios: ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"],
+      syncAudio: false,
+      syncAudioFixed: true,
+      _preserveLimits: true,
+    };
+  }
 
   return base;
 }
@@ -548,7 +614,7 @@ export function sdVersionForProfile(profile) {
       (numericDurations.length > 0 && Math.max(...numericDurations) > 15);
     return exceedsSd20Limits ? "sd25" : "sd20";
   }
-  if (profile?.adapter === "ziyuai") {
+  if (profile?.adapter === "ziyuai" || profile?.adapter === "seedancevideo") {
     return rawCapabilityFor(profile)._sdVersion || "sd20";
   }
   if (profile?.adapter === "lwaigc") {
@@ -562,7 +628,7 @@ export function modelForSdVersion(profile, version, availableModels) {
   if (currentModel && sdVersionForProfile(profile) === version) return currentModel;
 
   const preferred = preferredModelForSdVersion(profile?.adapter, version);
-  const dynamicAdapters = new Set(["canseedream", "ziyuai", "maxforai", "clmm"]);
+  const dynamicAdapters = new Set(["canseedream", "ziyuai", "maxforai", "clmm", "aiyrx", "seedancevideo"]);
   if (!dynamicAdapters.has(profile?.adapter)) return preferred;
   const candidates = Array.isArray(availableModels) && availableModels.length
     ? availableModels
@@ -587,6 +653,8 @@ export function inferAdapter(baseUrl) {
     if (host === "maxforai.top" || host === "www.maxforai.top") return "maxforai";
     if (host === "clmm-mall.top" || host === "www.clmm-mall.top") return "clmm";
     if (host === "pidoi.com" || host === "www.pidoi.com") return "pidoi";
+    if (host === "api.aiyrx.xyz") return "aiyrx";
+    if (host === "772808.xyz") return "seedancevideo";
   } catch {}
   return "newapi";
 }
@@ -594,6 +662,14 @@ export function inferAdapter(baseUrl) {
 export function migrateSavedProfile(profile) {
   if (!profile || typeof profile !== "object") return profile;
   const inferredAdapter = inferAdapter(profile.baseUrl);
+  if (profile.id === "seedancevideo" || inferredAdapter === "seedancevideo" || profile.adapter === "seedancevideo") {
+    return {
+      ...profile,
+      baseUrl: SEEDANCE_VIDEO_BASE_URL,
+      adapter: "seedancevideo",
+      mediaUploadUrl: `${SEEDANCE_VIDEO_BASE_URL}/v1/uploads/images`,
+    };
+  }
   if (profile.id === "clmm" || inferredAdapter === "clmm" || profile.adapter === "clmm") {
     return { ...profile, baseUrl: CLMM_BASE_URL, adapter: "clmm", mediaUploadUrl: "" };
   }
@@ -608,6 +684,16 @@ export function migrateSavedProfile(profile) {
       mediaUploadUrl: profile.mediaUploadUrl === `${PIDOI_BASE_URL}/v1/media/uploads`
         ? ""
         : profile.mediaUploadUrl || "",
+    };
+  }
+  const officialAiyrx = profile.id === "aiyrx" || inferredAdapter === "aiyrx";
+  if (officialAiyrx || profile.adapter === "aiyrx") {
+    return {
+      ...profile,
+      baseUrl: officialAiyrx ? AIYRX_BASE_URL : profile.baseUrl,
+      adapter: "aiyrx",
+      model: AIYRX_VIDEO_MODELS.includes(profile.model) ? profile.model : AIYRX_VIDEO_MODELS[0],
+      mediaUploadUrl: `${officialAiyrx ? AIYRX_BASE_URL : profile.baseUrl}/v1/assets`,
     };
   }
   const officialMaxForAI = profile.id === "maxforai" || inferredAdapter === "maxforai";
@@ -676,4 +762,15 @@ export function migrateSavedProfile(profile) {
     return { ...profile, adapter: inferredAdapter };
   }
   return profile;
+}
+
+export function profilesWithBuiltIns(savedProfiles, dismissedBuiltInIds = []) {
+  const dismissed = new Set(Array.isArray(dismissedBuiltInIds) ? dismissedBuiltInIds : []);
+  const saved = Array.isArray(savedProfiles) ? savedProfiles.map(migrateSavedProfile) : [];
+  const availableBuiltIns = DEFAULT_PROFILES.filter((profile) => !dismissed.has(profile.id));
+  if (!saved.length) return availableBuiltIns.length ? availableBuiltIns : DEFAULT_PROFILES.slice(0, 1);
+  const missingBuiltIns = availableBuiltIns.filter(
+    (builtIn) => !saved.some((profile) => profile.id === builtIn.id || profile.baseUrl === builtIn.baseUrl),
+  );
+  return [...missingBuiltIns, ...saved];
 }

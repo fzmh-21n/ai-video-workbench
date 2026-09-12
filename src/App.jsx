@@ -5,9 +5,9 @@ import {
   FALLBACK_MODELS,
   capabilityFor,
   inferAdapter,
-  migrateSavedProfile,
   modelForSdVersion,
   pollDelayForAdapter,
+  profilesWithBuiltIns,
   preferredDurationForVersion,
   sdVersionForProfile,
 } from "./providerCatalog.js";
@@ -68,6 +68,7 @@ import {
 } from "./diagnostics.js";
 
 const PROFILE_KEY = "video-workbench-profiles-v2";
+const DISMISSED_BUILTIN_PROFILES_KEY = "video-workbench-dismissed-builtins-v1";
 const ACTIVE_KEY = "video-workbench-active-profile-v2";
 const TASK_KEY = "video-workbench-tasks-v2";
 const FIXED_CONTENT_KEY = "video-workbench-fixed-content-v1";
@@ -169,6 +170,9 @@ function normalizeModels(payload, adapter) {
   if (adapter === "lwaigc" && Array.isArray(payload?.models)) {
     return [...new Set([...FALLBACK_MODELS.lwaigc.slice(0, 2), ...values])];
   }
+  if (adapter === "fmgo") {
+    return [...new Set([...values, ...FALLBACK_MODELS.fmgo])];
+  }
   return values.length ? values : FALLBACK_MODELS[adapter] || [];
 }
 
@@ -266,12 +270,7 @@ function Workbench({ onImageMode, onLogout }) {
   const [workMode, setWorkMode] = useState(() => localStorage.getItem("video-workbench-mode-v1") || "single");
   const [profiles, setProfiles] = useState(() => {
     const saved = loadJson(PROFILE_KEY, null);
-    if (!Array.isArray(saved) || !saved.length) return DEFAULT_PROFILES;
-    const migratedSaved = saved.map(migrateSavedProfile);
-    const missingBuiltIns = DEFAULT_PROFILES.filter(
-      (builtIn) => !migratedSaved.some((profile) => profile.id === builtIn.id || profile.baseUrl === builtIn.baseUrl),
-    );
-    return [...missingBuiltIns, ...migratedSaved];
+    return profilesWithBuiltIns(saved, loadJson(DISMISSED_BUILTIN_PROFILES_KEY, []));
   });
   const [activeId, setActiveId] = useState(
     () => localStorage.getItem(ACTIVE_KEY) || profiles[0].id,
@@ -344,7 +343,11 @@ function Workbench({ onImageMode, onLogout }) {
 
   const activeProfile =
     profiles.find((profile) => profile.id === activeId) || profiles[0];
-  const capability = useMemo(() => capabilityFor(activeProfile), [activeProfile]);
+  const rawCapability = useMemo(() => capabilityFor(activeProfile), [activeProfile]);
+  const capability = useMemo(() => ({
+    ...rawCapability,
+    durations: rawCapability.durationsByResolution?.[resolution] || rawCapability.durations,
+  }), [rawCapability, resolution]);
   const syncAudio = syncAudioForProfile(syncAudioPreferences, activeProfile.id);
 
   function setSyncAudio(nextValue) {
@@ -507,7 +510,7 @@ function Workbench({ onImageMode, onLogout }) {
     if (!capability.resolutions.includes(resolution))
       setResolution(capability.resolutions[0]);
     if (!capability.ratios.includes(ratio)) setRatio(capability.ratios[0]);
-  }, [activeProfile.id, activeProfile.model]);
+  }, [activeProfile.id, activeProfile.model, resolution]);
 
   function keyFor(profile) {
     return readCredentials(profile.id).apiKey;
@@ -763,6 +766,11 @@ function Workbench({ onImageMode, onLogout }) {
       return;
     }
     const remaining = profiles.filter((item) => item.id !== draft.id);
+    if (DEFAULT_PROFILES.some((profile) => profile.id === draft.id)) {
+      const dismissed = new Set(loadJson(DISMISSED_BUILTIN_PROFILES_KEY, []));
+      dismissed.add(draft.id);
+      localStorage.setItem(DISMISSED_BUILTIN_PROFILES_KEY, JSON.stringify([...dismissed]));
+    }
     clearCredentials(draft.id);
     setProfiles(remaining);
     const next = remaining[0];
@@ -2255,7 +2263,7 @@ function Workbench({ onImageMode, onLogout }) {
                                 <div className="task-details" onClick={(event) => event.stopPropagation()}>
                                   {task.status === "completed" ? (
                                     videoBlob?.taskId === task.id
-                                      ? <><video src={videoBlob.url} controls /><a className="download-button" href={videoBlob.url} download={`${task.title || "video"}.mp4`}>下载视频</a></>
+                                      ? <><video src={videoBlob.url} controls /><a className="download-button" href={videoBlob.url} download={orderedDownloadFilename(task, 0, 1)}>下载视频</a></>
                                       : <button className="secondary-button" onClick={() => loadVideo(task)}>加载视频</button>
                                   ) : <p>{task.status === "failed" ? "该任务生成失败" : "视频生成完成后可在这里播放"}</p>}
                                   <details><summary>查看提示词</summary><pre>{task.prompt}</pre></details>
@@ -2310,7 +2318,7 @@ function Workbench({ onImageMode, onLogout }) {
                     <div className="task-details" onClick={(event) => event.stopPropagation()}>
                       {task.status === "completed" ? (
                         videoBlob?.taskId === task.id ? (
-                          <><video src={videoBlob.url} controls /><a className="download-button" href={videoBlob.url} download={`${task.title || "video"}.mp4`}>下载视频</a></>
+                          <><video src={videoBlob.url} controls /><a className="download-button" href={videoBlob.url} download={orderedDownloadFilename(task, 0, 1)}>下载视频</a></>
                         ) : <button className="secondary-button" onClick={() => loadVideo(task)}>加载视频</button>
                       ) : <p>{task.status === "failed" ? "该任务生成失败" : "视频生成完成后可在这里播放"}</p>}
                       <details><summary>查看提示词</summary><pre>{task.prompt}</pre></details>
@@ -2339,7 +2347,7 @@ function Workbench({ onImageMode, onLogout }) {
               <div className="config-form">
                 <label><span>配置名称</span><input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="例如：主力 API" /></label>
                 <label><span>Base URL</span><input value={draft.baseUrl} onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value, adapter: inferAdapter(event.target.value) })} placeholder="https://api.example.com" /></label>
-                <label><span>接口类型</span><select value={draft.adapter} onChange={(event) => setDraft({ ...draft, adapter: event.target.value })}><option value="fmgo">FMGO / 飞猫</option><option value="paipu">Paipu / Lec</option><option value="viralee">ViralE</option><option value="canseedream">CanSeeDream / 看见梦想</option><option value="lwaigc">LWAIGC 官方统一接口</option><option value="meaicc">MEAICC / 林木森AI</option><option value="ziyuai">Ziyu AI / 紫域AI</option><option value="globalaiopc">GlobalAiOpc / 全球AI</option><option value="maxforai">MaxForAI</option><option value="clmm">CLMM Mall</option><option value="pidoi">Pidoi</option><option value="newapi">New API 通用</option></select></label>
+                <label><span>接口类型</span><select value={draft.adapter} onChange={(event) => setDraft({ ...draft, adapter: event.target.value })}><option value="fmgo">FMGO / 飞猫</option><option value="paipu">Paipu / Lec</option><option value="viralee">ViralE</option><option value="canseedream">CanSeeDream / 看见梦想</option><option value="lwaigc">LWAIGC 官方统一接口</option><option value="meaicc">MEAICC / 林木森AI</option><option value="ziyuai">Ziyu AI / 紫域AI</option><option value="globalaiopc">GlobalAiOpc / 全球AI</option><option value="maxforai">MaxForAI</option><option value="clmm">CLMM Mall</option><option value="pidoi">Pidoi</option><option value="aiyrx">AIYRX</option><option value="seedancevideo">Seedance 视频 / 772808</option><option value="newapi">New API 通用</option></select></label>
                 <label><span>API Key</span><input type="password" value={draftKey} onChange={(event) => setDraftKey(event.target.value)} placeholder="sk-••••••••" /><small>{rememberKey ? "将保存在此浏览器；公共电脑请勿启用。" : "仅保存在当前浏览器会话，不写入源码。"}</small></label>
                 <label className="remember-key-row"><input type="checkbox" checked={rememberKey} onChange={(event) => setRememberKey(event.target.checked)} /><span>在这台浏览器记住当前中转站的 Key</span></label>
                 <label>

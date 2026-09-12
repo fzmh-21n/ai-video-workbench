@@ -82,7 +82,7 @@ test("can explicitly include already downloaded videos for a complete ordered re
 });
 
 test("final chapter download prefers the newest successful retry and keeps older successes as fallbacks", () => {
-  const item = { section: 3, sourceName: "02_第二章_15秒视频提示词_紧凑版.txt", taskIds: ["old"] };
+  const item = { section: 3, sourceName: "02_第二章_15秒视频提示词_紧凑版.txt", taskIds: ["old", "new"] };
   const stored = [
     { id: "old", status: "completed", batchTitle: "02_第二章_15秒视频提示词_紧凑版", batchSection: 3, projectName: "项目甲", createdAtMs: 10 },
     { id: "new", status: "completed", batchTitle: "02_第二章_15秒视频提示词_紧凑版", batchSection: 3, projectName: "项目甲", sourceVideoUrl: "https://example.com/new.mp4", createdAtMs: 20 },
@@ -95,10 +95,186 @@ test("final chapter download prefers the newest successful retry and keeps older
 });
 
 test("one downloaded retry marks the chapter downloaded instead of requiring every old attempt", () => {
-  const item = { section: 1, sourceName: "第八章.txt", taskIds: ["old"] };
+  const item = { section: 1, sourceName: "第八章.txt", taskIds: ["old", "downloaded"] };
   const stored = [
     { id: "old", status: "completed", batchTitle: "第八章", batchSection: 1, projectName: "项目甲", createdAtMs: 10 },
     { id: "downloaded", status: "completed", batchTitle: "第八章", batchSection: 1, projectName: "项目甲", downloadedAtMs: 99, createdAtMs: 20 },
   ];
   assert.equal(preferredBatchDownloadTasks([item], stored)[0].id, "downloaded");
+});
+
+test("never uses a completed task from another chapter with the same section number", () => {
+  const item = { section: 4, sourceName: "12_第十二章_15秒视频提示词_紧凑版.txt", taskIds: ["wrong-chapter"] };
+  const stored = [
+    { id: "wrong-chapter", status: "completed", batchTitle: "13_第十三章_15秒视频提示词_紧凑版", batchSection: 4, projectName: "项目甲" },
+    { id: "correct-failed", status: "failed", batchTitle: "12_第十二章_15秒视频提示词_紧凑版", batchSection: 4, projectName: "项目甲" },
+  ];
+
+  assert.deepEqual(batchItemDownloadCandidates(item, stored), []);
+  assert.deepEqual(preferredBatchDownloadTasks([item], stored), []);
+});
+
+test("prefers a real failed submission over an old recovered success for the same chapter", () => {
+  const item = { section: 4, sourceName: "12_第十二章.txt", taskIds: ["recovered-wrong"] };
+  const stored = [
+    { id: "recovered-wrong", status: "completed", batchId: "batch-recovered-recovered-wrong", batchTitle: "12_第十二章", batchSection: 4, projectName: "项目甲" },
+    { id: "submitted-failed", status: "failed", batchId: "batch-original", batchTitle: "12_第十二章", batchSection: 4, projectName: "项目甲" },
+  ];
+
+  assert.deepEqual(batchItemDownloadCandidates(item, stored), []);
+  assert.deepEqual(preferredBatchDownloadTasks([item], stored), []);
+});
+
+test("does not reuse a mislabeled success whose source prompt belongs to another chapter", () => {
+  const item = {
+    section: 4,
+    sourceName: "12_第十二章.txt",
+    prompt: "东港会议室内质询",
+    taskIds: ["actual-failed"],
+  };
+  const stored = [
+    {
+      id: "actual-failed",
+      status: "failed",
+      batchId: "batch-chapter-12",
+      batchTitle: "12_第十二章",
+      batchSection: 4,
+      projectName: "项目甲",
+      reuseSnapshot: { prompt: "东港会议室内质询" },
+    },
+    {
+      id: "mislabeled-success",
+      status: "completed",
+      batchId: "batch-chapter-13",
+      batchTitle: "12_第十二章",
+      batchSection: 4,
+      projectName: "项目甲",
+      reuseSnapshot: { prompt: "货场卡车旁争执" },
+    },
+  ];
+
+  assert.deepEqual(batchItemDownloadCandidates(item, stored), []);
+  assert.deepEqual(preferredBatchDownloadTasks([item], stored), []);
+});
+
+test("matches legacy tasks by the source prompt at the end of the submitted prompt", () => {
+  const item = { section: 4, sourceName: "12_第十二章.txt", prompt: "本节正文", taskIds: ["legacy"] };
+  const stored = [{
+    id: "legacy",
+    status: "completed",
+    batchTitle: "12_第十二章",
+    batchSection: 4,
+    prompt: "固定内容\n\n本节正文",
+  }];
+
+  assert.deepEqual(batchItemDownloadCandidates(item, stored).map((task) => task.id), ["legacy"]);
+});
+
+test("recovers the real task by prompt when old task IDs and batch titles were corrupted", () => {
+  const item = { section: 4, sourceName: "12_第十二章.txt", prompt: "东港会议室内质询", taskIds: ["wrong"] };
+  const stored = [
+    { id: "wrong", status: "completed", batchTitle: "12_第十二章", batchSection: 4, prompt: "货场卡车旁争执", projectName: "项目甲" },
+    { id: "real", status: "failed", batchTitle: "旧错误标题", batchSection: 4, prompt: "固定内容\n东港会议室内质询", projectName: "项目甲" },
+  ];
+
+  assert.deepEqual(batchItemDownloadCandidates(item, stored), []);
+  assert.deepEqual(preferredBatchDownloadTasks([item], stored), []);
+});
+
+test("rejects a corrupted completed task when its reference materials belong to another section", () => {
+  const item = {
+    section: 4,
+    sourceName: "12_第十二章.txt",
+    prompt: "相同的历史提示词",
+    references: [
+      { kind: "image", name: "会议室.png" },
+      { kind: "audio", name: "质询.wav" },
+    ],
+    taskIds: ["wrong"],
+  };
+  const stored = [
+    {
+      id: "wrong",
+      status: "completed",
+      batchTitle: "12_第十二章",
+      batchSection: 4,
+      prompt: "固定内容\n相同的历史提示词",
+      reuseSnapshot: { references: [{ kind: "image", name: "货场.png" }] },
+    },
+    {
+      id: "real",
+      status: "failed",
+      batchTitle: "旧错误标题",
+      batchSection: 4,
+      prompt: "固定内容\n相同的历史提示词",
+      reuseSnapshot: { references: [
+        { kind: "image", name: "会议室.png" },
+        { kind: "audio", name: "质询.wav" },
+      ] },
+    },
+  ];
+
+  assert.deepEqual(batchItemDownloadCandidates(item, stored), []);
+  assert.deepEqual(preferredBatchDownloadTasks([item], stored), []);
+});
+
+test("rejects one chapter label corrupted inside a batch whose other tasks belong elsewhere", () => {
+  const item = { section: 4, sourceName: "12_第十二章.txt", taskIds: ["wrong"] };
+  const stored = [
+    { id: "wrong", status: "completed", batchId: "batch-13", batchTitle: "12_第十二章", batchSection: 4 },
+    { id: "13-1", status: "completed", batchId: "batch-13", batchTitle: "13_第十三章", batchSection: 1 },
+    { id: "13-2", status: "completed", batchId: "batch-13", batchTitle: "13_第十三章", batchSection: 2 },
+    { id: "real", status: "failed", batchId: "batch-12", batchTitle: "12_第十二章", batchSection: 4 },
+    { id: "12-1", status: "completed", batchId: "batch-12", batchTitle: "12_第十二章", batchSection: 1 },
+  ];
+
+  assert.deepEqual(batchItemDownloadCandidates(item, stored), []);
+  assert.deepEqual(preferredBatchDownloadTasks([item], stored), []);
+});
+
+test("keeps an exact prompt match when one submission batch contains multiple chapters", () => {
+  const item = {
+    section: 1,
+    sourceName: "03_第三章.txt",
+    prompt: "盐锅账目当众摊开",
+    taskIds: ["chapter-3-section-1"],
+  };
+  const stored = [
+    {
+      id: "chapter-3-section-1",
+      status: "completed",
+      batchId: "multi-chapter-batch",
+      batchTitle: "03_第三章",
+      batchSection: 1,
+      reuseSnapshot: { prompt: "盐锅账目当众摊开" },
+    },
+    {
+      id: "chapter-4-section-1",
+      status: "completed",
+      batchId: "multi-chapter-batch",
+      batchTitle: "04_第四章",
+      batchSection: 1,
+      reuseSnapshot: { prompt: "冻土路上的伏击" },
+    },
+    {
+      id: "chapter-4-section-2",
+      status: "completed",
+      batchId: "multi-chapter-batch",
+      batchTitle: "04_第四章",
+      batchSection: 2,
+      reuseSnapshot: { prompt: "雪地追踪" },
+    },
+  ];
+
+  assert.deepEqual(batchItemDownloadCandidates(item, stored).map((task) => task.id), ["chapter-3-section-1"]);
+});
+
+test("does not guess another success when explicit task IDs are missing locally", () => {
+  const item = { section: 4, sourceName: "12_第十二章.txt", taskIds: ["missing-real-task"] };
+  const stored = [
+    { id: "wrong-success", status: "completed", batchTitle: "12_第十二章", batchSection: 4 },
+  ];
+
+  assert.deepEqual(batchItemDownloadCandidates(item, stored), []);
+  assert.deepEqual(preferredBatchDownloadTasks([item], stored), []);
 });

@@ -29,3 +29,7 @@ export function taskContentRequestUrl(task) {
   const source = String(task?.sourceVideoUrl || "").trim();
   return source ? `${base}?source=${encodeURIComponent(source)}` : base;
 }
+
+export function shouldRejectUnfinishedVideo(status, savedSourceUrl) {
+  return status !== "completed" && !savedSourceUrl;
+}

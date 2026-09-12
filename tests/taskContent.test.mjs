@@ -1,6 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { directTaskContentPaths, requiresOriginalTaskKey, taskContentRequestUrl } from "../src/taskContent.js";
+import {
+  directTaskContentPaths,
+  requiresOriginalTaskKey,
+  shouldRejectUnfinishedVideo,
+  taskContentRequestUrl,
+} from "../src/taskContent.js";
 
 test("uses FMGO task file route before the generic video content route", () => {
   assert.deepEqual(directTaskContentPaths("fmgo", "task_abc/123"), [
@@ -30,4 +35,9 @@ test("persists a provider result URL through the local content proxy", () => {
     "/api/tasks/task_abc%2F123/content?source=https%3A%2F%2Fpic7.fmgo.top%2Fgenerated%2Fa%20b.mp4",
   );
   assert.equal(taskContentRequestUrl({ id: "task_plain" }), "/api/tasks/task_plain/content");
+});
+
+test("does not reject a saved completed video when the provider status later regresses", () => {
+  assert.equal(shouldRejectUnfinishedVideo("processing", "https://example.com/completed.mp4"), false);
+  assert.equal(shouldRejectUnfinishedVideo("processing", ""), true);
 });

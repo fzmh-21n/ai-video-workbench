@@ -57,21 +57,102 @@ function normalizedBatchTitle(value) {
   return String(value || "").trim().replace(/\.txt$/i, "");
 }
 
-export function batchItemDownloadCandidates(item, storedTasks) {
+function normalizedSourcePrompt(value) {
+  return String(value || "").trim().replace(/\r\n/g, "\n");
+}
+
+function referenceSignature(references) {
+  return (references || [])
+    .map((reference) => `${String(reference?.kind || "")}:${String(reference?.name || reference?.file?.name || "").trim()}`)
+    .filter((value) => value !== ":")
+    .sort()
+    .join("|");
+}
+
+export function batchItemTasks(item, storedTasks) {
   const byId = new Map((storedTasks || []).map((task) => [task.id, task]));
-  const tracked = (item?.taskIds || []).map((id) => byId.get(id)).filter(Boolean);
-  const reference = [...tracked].sort((left, right) => numeric(right?.createdAtMs, 0) - numeric(left?.createdAtMs, 0))[0];
+  const requestedTaskIds = (item?.taskIds || []).filter(Boolean);
+  const batchTitleCounts = new Map();
+  for (const task of storedTasks || []) {
+    const batchId = String(task?.batchId || "");
+    const batchTitle = normalizedBatchTitle(task?.batchTitle);
+    if (!batchId || !batchTitle || batchId.startsWith("batch-recovered-")) continue;
+    if (!batchTitleCounts.has(batchId)) batchTitleCounts.set(batchId, new Map());
+    const counts = batchTitleCounts.get(batchId);
+    counts.set(batchTitle, (counts.get(batchTitle) || 0) + 1);
+  }
+  const batchIdentityMatches = (task) => {
+    const counts = batchTitleCounts.get(String(task?.batchId || ""));
+    if (!counts || counts.size < 2) return true;
+    const dominant = [...counts.entries()].sort((left, right) => right[1] - left[1])[0];
+    return dominant[1] < 2 || normalizedBatchTitle(task?.batchTitle) === dominant[0];
+  };
+  const rawTracked = requestedTaskIds.map((id) => byId.get(id)).filter(Boolean);
+  if (requestedTaskIds.length && !rawTracked.length) return [];
+  const reference = [...rawTracked].sort((left, right) => numeric(right?.createdAtMs, 0) - numeric(left?.createdAtMs, 0))[0];
   const title = normalizedBatchTitle(item?.sourceName || reference?.batchTitle);
   const section = numeric(item?.section);
   const projectName = String(reference?.projectName || "");
-  const matching = (storedTasks || []).filter((task) => (
-    task?.status === "completed"
-    && numeric(task?.batchSection) === section
-    && normalizedBatchTitle(task?.batchTitle) === title
-    && (!projectName || String(task?.projectName || "") === projectName)
+  const itemPrompt = normalizedSourcePrompt(item?.prompt);
+  const itemReferences = referenceSignature(item?.references);
+  const taskReferencesMatch = (task) => {
+    const taskReferences = referenceSignature(task?.reuseSnapshot?.references);
+    return !itemReferences || !taskReferences || taskReferences === itemReferences;
+  };
+  const taskPromptMatches = (task) => {
+    if (!itemPrompt) return false;
+    const snapshotPrompt = normalizedSourcePrompt(task?.reuseSnapshot?.prompt);
+    const submittedPrompt = normalizedSourcePrompt(task?.prompt);
+    return snapshotPrompt ? snapshotPrompt === itemPrompt : Boolean(submittedPrompt && submittedPrompt.endsWith(itemPrompt));
+  };
+  const formalTracked = rawTracked.filter((task) => (
+    !String(task?.batchId || "").startsWith("batch-recovered-")
+    && taskPromptMatches(task)
+    && taskReferencesMatch(task)
   ));
-  return [...new Map([...tracked.filter((task) => task.status === "completed"), ...matching]
-    .map((task) => [task.id, task])).values()]
+  if (formalTracked.length) {
+    return formalTracked.sort((left, right) => numeric(right?.createdAtMs, 0) - numeric(left?.createdAtMs, 0));
+  }
+  const promptMatches = (storedTasks || []).filter((task) => (
+    numeric(task?.batchSection) === section
+    && (!projectName || String(task?.projectName || "") === projectName)
+    && taskPromptMatches(task)
+    && taskReferencesMatch(task)
+  ));
+  if (promptMatches.length) {
+    const submittedPromptMatches = promptMatches.filter((task) => !String(task?.batchId || "").startsWith("batch-recovered-"));
+    return (submittedPromptMatches.length ? submittedPromptMatches : promptMatches)
+      .sort((left, right) => numeric(right?.createdAtMs, 0) - numeric(left?.createdAtMs, 0));
+  }
+  const matchesItem = (task) => {
+    const snapshotPrompt = normalizedSourcePrompt(task?.reuseSnapshot?.prompt);
+    const submittedPrompt = normalizedSourcePrompt(task?.prompt);
+    const sourcePromptMatches = !itemPrompt
+      || (snapshotPrompt ? snapshotPrompt === itemPrompt : !submittedPrompt || submittedPrompt.endsWith(itemPrompt));
+    return numeric(task?.batchSection) === section
+      && normalizedBatchTitle(task?.batchTitle) === title
+      && (!projectName || String(task?.projectName || "") === projectName)
+      && sourcePromptMatches
+      && taskReferencesMatch(task)
+      && batchIdentityMatches(task);
+  };
+  const tracked = rawTracked.filter(matchesItem);
+  if (rawTracked.some((task) => !String(task?.batchId || "").startsWith("batch-recovered-"))) {
+    return tracked.sort((left, right) => numeric(right?.createdAtMs, 0) - numeric(left?.createdAtMs, 0));
+  }
+  const matching = (storedTasks || []).filter((task) => (
+    matchesItem(task)
+  ));
+  const unique = [...new Map(matching
+    .map((task) => [task.id, task])).values()];
+  const submitted = unique.filter((task) => !String(task?.batchId || "").startsWith("batch-recovered-"));
+  return (submitted.length ? submitted : unique)
+    .sort((left, right) => numeric(right?.createdAtMs, 0) - numeric(left?.createdAtMs, 0));
+}
+
+export function batchItemDownloadCandidates(item, storedTasks) {
+  return batchItemTasks(item, storedTasks)
+    .filter((task) => task.status === "completed")
     .sort((left, right) => (
       Number(Boolean(right?.downloadedAtMs)) - Number(Boolean(left?.downloadedAtMs))
       || Number(Boolean(right?.sourceVideoUrl)) - Number(Boolean(left?.sourceVideoUrl))

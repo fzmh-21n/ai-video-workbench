@@ -8,10 +8,13 @@ export const FMGO_IMAGE_MODELS = [
 ];
 
 export const CANSEEDREAM_IMAGE_MODELS = ["GPT Image 2", "Nano2", "Nano2 Pro"];
+export const QIQI_IMAGE_MODELS = ["gpt-image-2"];
+export const QIQI_IMAGE_BASE_URL = "https://pidoi.com";
 
 export const IMAGE_PROVIDER_PROFILES = [
   { id: "image-fmgo", name: "FMGO / 飞猫", adapter: "fmgo", baseUrl: "https://api.fmgo.top", model: FMGO_IMAGE_MODELS[0] },
   { id: "image-cansee", name: "CanSeeDream / 看见梦想", adapter: "canseedream", baseUrl: "https://see.ximeiedu.org", model: CANSEEDREAM_IMAGE_MODELS[0] },
+  { id: "image-qiqi", name: "QIQI / Pidoi", adapter: "qiqi", baseUrl: QIQI_IMAGE_BASE_URL, model: QIQI_IMAGE_MODELS[0] },
 ];
 
 const FMGO_RATIOS = ["16:9", "1:1", "9:16", "2:3", "3:2", "4:3", "3:4"];
@@ -26,8 +29,21 @@ export const CANSEEDREAM_IMAGE_SIZE_LABELS = {
   "1024x1536": "1024x1536 (1.5K · 2:3)",
   "2048x2048": "2048x2048 (2K · 1:1)",
   "2048x1152": "2048x1152 (2K · 16:9)",
+  "1152x2048": "1152x2048 (2K · 9:16)",
   "3840x2160": "3840x2160 (4K · 16:9) +6积分",
   "2160x3840": "2160x3840 (4K · 9:16) +6积分",
+};
+
+export const QIQI_IMAGE_SIZE_LABELS = {
+  auto: "自动（由模型决定）",
+  "1024x1024": "1024x1024 (1K · 1:1)",
+  "1536x1024": "1536x1024 (1.5K · 3:2)",
+  "1024x1536": "1024x1536 (1.5K · 2:3)",
+  "2048x2048": "2048x2048 (2K · 1:1)",
+  "2048x1152": "2048x1152 (2K · 16:9)",
+  "1152x2048": "1152x2048 (2K · 9:16)",
+  "3840x2160": "3840x2160 (4K · 16:9)",
+  "2160x3840": "2160x3840 (4K · 9:16)",
 };
 
 const CANSEEDREAM_NANO_PROFILES = {
@@ -55,10 +71,33 @@ export function imageModelLabel(adapter, model) {
 }
 
 export function imageModelsFor(adapter) {
-  return adapter === "fmgo" ? FMGO_IMAGE_MODELS : adapter === "canseedream" ? CANSEEDREAM_IMAGE_MODELS : [];
+  return adapter === "fmgo"
+    ? FMGO_IMAGE_MODELS
+    : adapter === "canseedream"
+      ? CANSEEDREAM_IMAGE_MODELS
+      : adapter === "qiqi"
+        ? QIQI_IMAGE_MODELS
+        : [];
 }
 
 export function imageModelCapability(adapter, model) {
+  if (adapter === "qiqi") {
+    return {
+      references: 16,
+      sizes: [
+        "auto",
+        "1024x1024",
+        "1536x1024",
+        "1024x1536",
+        "2048x2048",
+        "2048x1152",
+        "1152x2048",
+        "3840x2160",
+        "2160x3840",
+      ],
+      qualities: ["auto", "low", "medium", "high"],
+    };
+  }
   if (adapter === "canseedream") {
     const nano = CANSEEDREAM_NANO_PROFILES[model];
     if (nano) return { ...nano, kind: "nano" };
@@ -119,6 +158,20 @@ export function fmgoGeminiImagePayload(model, input) {
       },
     },
     stream: false,
+  };
+}
+
+export function qiqiImagePayload(input, editing = false) {
+  const capability = imageModelCapability("qiqi", "gpt-image-2");
+  return {
+    model: "gpt-image-2",
+    prompt: input.prompt,
+    size: capability.sizes.includes(input.size) ? input.size : "auto",
+    quality: capability.qualities.includes(input.quality) ? input.quality : "auto",
+    background: "opaque",
+    output_format: "png",
+    n: 1,
+    ...(editing ? { input_fidelity: "high" } : {}),
   };
 }
 

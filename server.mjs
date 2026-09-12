@@ -26,6 +26,7 @@ import {
   LWAIGC_VIDEO_MODELS,
   isLwaigcDqModel,
   lwaigcLimitIssue,
+  lwaigcPromptIssue,
   lwaigcVideoPayload,
 } from "./src/lwaigcCatalog.js";
 import {
@@ -53,14 +54,34 @@ import { MAXFORAI_VIDEO_MODELS, maxforaiVideoPayload } from "./src/maxforaiCatal
 import {
   CANSEEDREAM_IMAGE_MODELS,
   FMGO_IMAGE_MODELS,
+  QIQI_IMAGE_BASE_URL,
+  QIQI_IMAGE_MODELS,
   canSeeDreamImagePayload,
   fmgoGeminiImagePayload,
   fmgoGptImagePayload,
   isFmgoGeminiImageModel,
   isFmgoGptImageModel,
+  qiqiImagePayload,
 } from "./src/imageCatalog.js";
 import { CLMM_BASE_URL, CLMM_PRICING_URL, clmmLimitIssue, clmmModels, clmmVideoPayload } from "./src/clmmCatalog.js";
 import { PIDOI_BASE_URL, PIDOI_MODELS, pidoiLimitIssue, pidoiVideoPayload } from "./src/pidoiCatalog.js";
+import {
+  FMGO_V25_MODEL,
+  fmgoV25ModelName,
+  fmgoV25Payload,
+  isFmgoV25Model,
+} from "./src/fmgoCatalog.js";
+import {
+  AIYRX_BASE_URL,
+  AIYRX_VIDEO_MODELS,
+  aiyrxModels,
+  aiyrxVideoPayload,
+} from "./src/aiyrxCatalog.js";
+import {
+  SEEDANCE_VIDEO_BASE_URL,
+  seedanceVideoModels,
+  seedanceVideoPayload,
+} from "./src/seedanceVideoCatalog.js";
 import { normalizedTaskProgress } from "./src/taskProgress.js";
 import { taskFailureDetails } from "./src/upstreamTaskFailure.js";
 import { friendlyUpstreamError } from "./src/upstreamError.js";
@@ -71,7 +92,11 @@ import {
 } from "./serverDiagnostics.mjs";
 import { capabilityLimitIssue, submissionTimeoutForAdapter } from "./src/providerCatalog.js";
 import { cosFingerprintKey, cosPublicUrl, normalizeCosConfig } from "./src/cosStorage.js";
-import { directTaskContentPaths, requiresOriginalTaskKey } from "./src/taskContent.js";
+import {
+  directTaskContentPaths,
+  requiresOriginalTaskKey,
+  shouldRejectUnfinishedVideo,
+} from "./src/taskContent.js";
 
 // 与飞猫最新插件保持一致：本地中转服务不继承梯子/环境代理。
 // 只影响本工作台进程，不会改动 Windows 或浏览器的代理设置。
@@ -90,10 +115,12 @@ const uploadDir = path.join(dataDir, "uploads");
 const diagnosticLogPath = path.join(dataDir, "diagnostics.jsonl");
 const cosConfigPath = path.join(dataDir, "cos-config.json");
 const fmgoResultCachePath = path.join(dataDir, "fmgo-result-cache.json");
+const imageResultDir = path.join(dataDir, "image-results");
 const automaticUploadServices = AUTOMATIC_UPLOAD_SERVICES;
 const automaticUploadCircuit = createUploadCircuitBreaker({ failureThreshold: 2 });
 mkdirSync(dataDir, { recursive: true });
 mkdirSync(uploadDir, { recursive: true });
+mkdirSync(imageResultDir, { recursive: true });
 
 function cosConfig() {
   try { return normalizeCosConfig(JSON.parse(readFileSync(cosConfigPath, "utf8"))); } catch { return null; }
@@ -184,6 +211,7 @@ const FMGO_MODELS = [
   "ss-v2-fast",
   "feimiao-v2-431",
   "feimiao-v2-431-fast",
+  FMGO_V25_MODEL,
 ];
 
 const FMGO_CHAT_MODELS = new Set([
@@ -201,6 +229,7 @@ const FMGO_SORA_VIDEO_MODELS = new Set([
   "omni",
   "feimiao-v2-431",
   "feimiao-v2-431-fast",
+  FMGO_V25_MODEL,
 ]);
 
 const PAIPU_MODELS = [
@@ -310,6 +339,8 @@ function inferAdapter(url) {
   if (host === "maxforai.top" || host === "www.maxforai.top") return "maxforai";
   if (host === "clmm-mall.top" || host === "www.clmm-mall.top") return "clmm";
   if (host === "pidoi.com" || host === "www.pidoi.com") return "pidoi";
+  if (host === "api.aiyrx.xyz") return "aiyrx";
+  if (host === "772808.xyz") return "seedancevideo";
   return "newapi";
 }
 
@@ -320,7 +351,7 @@ function providerConfig(req, requireModel = true) {
   let model = encodedModel;
   try { model = decodeURIComponent(encodedModel); } catch {}
   const requestedAdapter = String(req.get("x-api-adapter") || "").trim();
-  const adapter = ["fmgo", "paipu", "viralee", "canseedream", "lwaigc", "meaicc", "ziyuai", "globalaiopc", "maxforai", "clmm", "pidoi", "newapi"].includes(requestedAdapter)
+  const adapter = ["fmgo", "paipu", "viralee", "canseedream", "lwaigc", "meaicc", "ziyuai", "globalaiopc", "maxforai", "clmm", "pidoi", "aiyrx", "seedancevideo", "qiqi", "newapi"].includes(requestedAdapter)
     ? requestedAdapter
     : inferAdapter(resolvedBaseUrl);
   // canseedream.com 目前会 301 跳转至 see.ximeiedu.org。跨域跳转会按
@@ -331,6 +362,9 @@ function providerConfig(req, requireModel = true) {
   if (adapter === "globalaiopc") resolvedBaseUrl = GLOBAL_AIOPC_BASE_URL;
   if (adapter === "clmm") resolvedBaseUrl = CLMM_BASE_URL;
   if (adapter === "pidoi") resolvedBaseUrl = PIDOI_BASE_URL;
+  if (adapter === "aiyrx") resolvedBaseUrl = AIYRX_BASE_URL;
+  if (adapter === "seedancevideo") resolvedBaseUrl = SEEDANCE_VIDEO_BASE_URL;
+  if (adapter === "qiqi") resolvedBaseUrl = QIQI_IMAGE_BASE_URL;
   const rawUploadUrl = String(req.get("x-media-upload-url") || "").trim();
   const mediaUploadUrl = rawUploadUrl
     ? publicUrl(rawUploadUrl, "素材上传地址").toString()
@@ -340,6 +374,10 @@ function providerConfig(req, requireModel = true) {
         ? `${resolvedBaseUrl}/api/v1/uploads`
       : adapter === "maxforai"
           ? `${resolvedBaseUrl}/v1/assets`
+      : adapter === "aiyrx"
+        ? `${resolvedBaseUrl}/v1/assets`
+      : adapter === "seedancevideo"
+        ? `${resolvedBaseUrl}/v1/uploads/images`
       : "";
   const mediaUploadKey = normalizeApiKey(req.get("x-media-upload-key")) || apiKey;
   if (!apiKey) throw httpError(400, "请填写 API Key");
@@ -420,6 +458,10 @@ function fallbackModels(adapter) {
                   ? MAXFORAI_VIDEO_MODELS
                 : adapter === "pidoi"
                   ? PIDOI_MODELS
+                : adapter === "aiyrx"
+                  ? AIYRX_VIDEO_MODELS
+                : adapter === "seedancevideo"
+                  ? []
         : [];
 }
 
@@ -500,6 +542,8 @@ function videoUrlsFrom(body, base) {
     body?.data?.[0]?.video_url,
     body?.previewUrl,
     body?.data?.previewUrl,
+    body?.media?.download_url,
+    body?.media?.preview_url,
   ];
   return [...new Set(candidates.flatMap((candidate) => {
     if (typeof candidate !== "string" || !candidate.trim()) return [];
@@ -563,9 +607,9 @@ function validateMeaiccLimits(config, meta, duration) {
 }
 
 function validateProviderLimits(config, meta, duration) {
-  // CanSeeDream 与 Ziyu 的能力由带当前 Key 的实时模型接口返回，服务端在
-  // 创建阶段拿不到这份动态表；这两家保留前端实时校验并交给上游复核。
-  if (["lwaigc", "meaicc", "newapi", "canseedream", "ziyuai"].includes(config.adapter)) return;
+  // 这些中转的能力由带当前 Key 的实时模型接口返回，服务端在创建阶段
+  // 拿不到浏览器保存的动态表；保留前端实时校验并交给上游复核。
+  if (["lwaigc", "meaicc", "newapi", "canseedream", "ziyuai", "aiyrx"].includes(config.adapter)) return;
   const issue = capabilityLimitIssue({ adapter: config.adapter, model: config.model }, meta, duration);
   if (issue) throw httpError(400, issue);
 }
@@ -741,7 +785,90 @@ async function uploadCosMedia(storage, file, material = {}, req) {
   }
 }
 
+async function uploadAiyrxAsset(config, file, material = {}, req) {
+  const bytes = fileBytes(file);
+  const displayName = String(material.name || file.originalname || "本地素材");
+  const kind = ["image", "audio", "video"].includes(material.kind) ? material.kind : "image";
+  const idempotencyKey = `asset_${crypto.createHash("sha256")
+    .update(kind)
+    .update("\0")
+    .update(displayName)
+    .update("\0")
+    .update(bytes)
+    .digest("hex")}`;
+  const request = () => {
+    const form = new FormData();
+    form.set("kind", kind);
+    form.set("file", new Blob([bytes], { type: file.mimetype || "application/octet-stream" }), displayName);
+    return upstream(config.mediaUploadUrl, {
+      method: "POST",
+      headers: authHeaders(config, { "Idempotency-Key": idempotencyKey }),
+      body: form,
+    }, 180_000);
+  };
+  const startedAt = Date.now();
+  writeDiagnostic(req, "configured_upload_started", {
+    service: "aiyrx",
+    fileName: displayName,
+    bytes: bytes.length,
+    kind,
+  });
+  try {
+    let response;
+    try {
+      response = await request();
+    } catch {
+      response = await request();
+    }
+    const body = await readJson(response);
+    const assetId = String(body?.id || body?.asset_id || body?.data?.id || body?.data?.asset_id || "").trim();
+    if (!assetId) throw httpError(502, `AIYRX 素材上传成功但没有返回 asset_id：${displayName}`);
+    writeDiagnostic(req, "configured_upload_completed", {
+      service: "aiyrx",
+      fileName: displayName,
+      durationMs: Date.now() - startedAt,
+      status: response.status,
+    });
+    return { assetId };
+  } catch (error) {
+    writeDiagnostic(req, "configured_upload_failed", {
+      service: "aiyrx",
+      fileName: displayName,
+      durationMs: Date.now() - startedAt,
+      status: error?.status || 500,
+      error: error?.message || "素材上传失败",
+    });
+    throw error;
+  }
+}
+
+async function importAiyrxAsset(config, value, material = {}, req) {
+  const source = publicUrl(value, "素材 URL");
+  const kind = ["image", "audio", "video"].includes(material.kind) ? material.kind : "image";
+  const maximumBytes = { image: 64, audio: 128, video: 512 }[kind] * 1024 * 1024;
+  const response = await upstream(source, { headers: { Accept: "*/*" } }, 180_000);
+  if (!response.ok) {
+    const status = response.status;
+    await response.body?.cancel().catch(() => {});
+    throw httpError(status, `AIYRX 无法读取公网素材（HTTP ${status}）：${material.name || source.pathname}`);
+  }
+  const declaredBytes = Number(response.headers.get("content-length") || 0);
+  if (declaredBytes > maximumBytes) {
+    await response.body?.cancel().catch(() => {});
+    throw httpError(413, `AIYRX ${kind === "image" ? "图片" : kind === "audio" ? "音频" : "视频"}素材超过上传大小上限`);
+  }
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (bytes.length > maximumBytes) throw httpError(413, "AIYRX 公网素材超过上传大小上限");
+  const fileName = String(material.name || path.basename(source.pathname) || `${kind}-reference`);
+  return uploadAiyrxAsset(config, {
+    buffer: bytes,
+    originalname: fileName,
+    mimetype: response.headers.get("content-type")?.split(";")[0] || "application/octet-stream",
+  }, { ...material, kind, name: fileName }, req);
+}
+
 async function uploadMedia(config, file, material = {}, req) {
+  if (config.adapter === "aiyrx") return uploadAiyrxAsset(config, file, material, req);
   const storage = cosConfig();
   if (storage) return uploadCosMedia(storage, file, material, req);
   if (mediaUploadMode(config, file.mimetype) === "temporary") {
@@ -810,6 +937,7 @@ async function uploadMedia(config, file, material = {}, req) {
     }
     const form = new FormData();
     form.set("file", new Blob([bytes], { type: file.mimetype || "application/octet-stream" }), displayName);
+    if (config.adapter === "seedancevideo") form.set("originalName", displayName);
     const headers = { Authorization: `Bearer ${config.mediaUploadKey}` };
     if (config.adapter === "lwaigc") {
       const fingerprint = crypto.createHash("sha256").update(bytes).digest("hex").slice(0, 40);
@@ -875,7 +1003,16 @@ async function prepareMaterials(config, files, meta, req) {
       cursor += 1;
       const item = meta[index];
       const kind = ["image", "audio", "video"].includes(item.kind) ? item.kind : "image";
+      if (config.adapter === "aiyrx" && item.assetId) {
+        materials[index] = { ...item, kind, assetId: String(item.assetId) };
+        continue;
+      }
       if (item.url) {
+        if (config.adapter === "aiyrx") {
+          const prepared = await importAiyrxAsset(config, item.url, { ...item, kind }, req);
+          materials[index] = { ...item, kind, ...prepared, url: "" };
+          continue;
+        }
         const url = config.adapter === "lwaigc"
           ? await importLwaigcMedia(config, item.url)
           : publicUrl(item.url, "素材 URL").toString();
@@ -884,13 +1021,15 @@ async function prepareMaterials(config, files, meta, req) {
       }
       const file = files[Number(item.fileIndex)];
       if (!file) throw httpError(400, `找不到素材文件：${item.name || item.tag}`);
-      let url;
+      let prepared;
       if (kind === "image" && config.adapter === "newapi" && !config.mediaUploadUrl && !cosConfig()) {
-        url = imageDataUrl(file);
+        prepared = imageDataUrl(file);
       } else {
-        url = await uploadMedia(config, file, item, req);
+        prepared = await uploadMedia(config, file, item, req);
       }
-      materials[index] = { ...item, kind, url };
+      materials[index] = typeof prepared === "string"
+        ? { ...item, kind, url: prepared }
+        : { ...item, kind, ...prepared };
     }
   });
   await Promise.all(workers);
@@ -1056,6 +1195,7 @@ function fmgoModelName(model, duration, resolution) {
   if (model === "omni") return "gemini-omni-flash";
   if (model === "feimiao-v2" || model === "feimiao-v2-fast")
     return `${model}-${resolution}-${duration}s`;
+  if (isFmgoV25Model(model)) return fmgoV25ModelName(model, duration, resolution);
   return model;
 }
 
@@ -1081,6 +1221,56 @@ function openAiMessage(prompt, materials, useImageUrlForAllMaterials = false) {
   };
 }
 
+async function createSeedanceVideo(config, input) {
+  const idempotencyKey = crypto.randomUUID();
+  const bodyText = JSON.stringify(seedanceVideoPayload(config.model, input));
+  const deadline = Date.now() + 180_000;
+  let lastError;
+  while (Date.now() < deadline) {
+    let response;
+    try {
+      response = await upstream(`${config.baseUrl}/v1/videos`, {
+        method: "POST",
+        headers: authHeaders(config, {
+          "Content-Type": "application/json",
+          "Idempotency-Key": idempotencyKey,
+        }),
+        body: bodyText,
+      }, 120_000);
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      continue;
+    }
+
+    if (response.status === 409) {
+      const body = await response.json().catch(() => ({}));
+      const code = String(body?.error?.code || body?.code || "");
+      const retryable = body?.retryable;
+      const traceId = String(body?.local_task_id || "").trim();
+      if (code === "request_in_progress" && retryable !== false) {
+        const retryAfter = Number(response.headers.get("retry-after"));
+        await new Promise((resolve) => setTimeout(resolve, Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 3000));
+        continue;
+      }
+      const message = body?.error?.message || body?.error || body?.message || "创建任务状态不确定";
+      throw httpError(409, `${message}${traceId ? `（追踪编号：${traceId}）` : ""}`);
+    }
+
+    const body = await readJson(response);
+    const taskId = taskIdFrom(body);
+    if (!taskId) throw httpError(502, "Seedance 视频创建成功但没有返回任务 ID");
+    return {
+      adapter: "seedancevideo",
+      baseUrl: config.baseUrl,
+      taskId,
+      statusPath: `/v1/videos/${encodeURIComponent(taskId)}`,
+      model: config.model,
+    };
+  }
+  throw lastError || httpError(504, "Seedance 视频创建结果仍待确认；请保留当前任务记录，不要重复提交");
+}
+
 function isFmgoFeimiaoChatModel(model) {
   return (
     /^(?:feimiao-v2(?:-fast)?|ss-v2(?:-fast)?)(?:-(?:480p|720p|1080p)-\d+s)?$/i.test(model)
@@ -1097,7 +1287,8 @@ function isFmgoChatModel(model) {
 function isFmgoSoraVideoModel(model) {
   return (
     FMGO_SORA_VIDEO_MODELS.has(model) ||
-    /^feimiao-v2-431(?:-fast)?-(?:480p|720p|1080p)-\d+s$/i.test(model)
+    /^feimiao-v2-431(?:-fast)?-(?:480p|720p|1080p)-\d+s$/i.test(model) ||
+    isFmgoV25Model(model)
   );
 }
 
@@ -1119,9 +1310,11 @@ async function createFmgo(config, input) {
       ? 3
       : config.model === "omni"
         ? 7
-        : isFmgoFeimiaoChatModel(config.model)
-          ? 9
-          : 7;
+        : isFmgoV25Model(config.model)
+          ? 30
+          : isFmgoFeimiaoChatModel(config.model)
+            ? 9
+            : 7;
   const images = input.materials
     .filter((item) => item.kind === "image")
     .slice(0, maxImages)
@@ -1177,7 +1370,9 @@ async function createFmgo(config, input) {
   }
 
   const soraStyle = isFmgoSoraVideoModel(model);
-  const payload = soraStyle
+  const payload = isFmgoV25Model(model)
+    ? fmgoV25Payload(upstreamModel, input)
+    : soraStyle
     ? {
         model: upstreamModel,
         prompt: input.prompt,
@@ -1193,7 +1388,7 @@ async function createFmgo(config, input) {
         duration: input.duration,
         response_format: "url",
       };
-  if (images.length) {
+  if (images.length && !isFmgoV25Model(model)) {
     if (soraStyle) {
       payload.image_url = images[0];
       if (images.length > 1) payload.images = images.slice(1);
@@ -1201,7 +1396,7 @@ async function createFmgo(config, input) {
       payload.reference_images = images;
     }
   }
-  payload.generate_audio = input.syncAudio;
+  if (!isFmgoV25Model(model)) payload.generate_audio = input.syncAudio;
   const response = await upstream(
     `${config.baseUrl}/v1/videos`,
     {
@@ -1261,6 +1456,35 @@ async function createLwaigc(config, input) {
 async function createVideo(config, input) {
   if (config.adapter === "fmgo") return createFmgo(config, input);
   if (config.adapter === "lwaigc") return createLwaigc(config, input);
+  if (config.adapter === "seedancevideo") return createSeedanceVideo(config, input);
+  if (config.adapter === "aiyrx") {
+    const idempotencyKey = `video_${crypto.randomUUID()}`;
+    const bodyText = JSON.stringify(aiyrxVideoPayload(config.model, input));
+    const request = () => upstream(`${config.baseUrl}/v1/videos`, {
+      method: "POST",
+      headers: authHeaders(config, {
+        "Content-Type": "application/json",
+        "Idempotency-Key": idempotencyKey,
+      }),
+      body: bodyText,
+    }, 180_000);
+    let response;
+    try {
+      response = await request();
+    } catch {
+      response = await request();
+    }
+    const body = await readJson(response);
+    const taskId = taskIdFrom(body);
+    if (!taskId) throw httpError(502, "AIYRX 创建成功但没有返回任务 ID");
+    return {
+      adapter: "aiyrx",
+      baseUrl: config.baseUrl,
+      taskId,
+      statusPath: `/v1/videos/${encodeURIComponent(taskId)}`,
+      model: config.model,
+    };
+  }
   if (config.adapter === "clmm") {
     const response = await upstream(`${CLMM_BASE_URL}/v1/videos`, {
       method: "POST",
@@ -1448,7 +1672,65 @@ async function createImage(config, input, files) {
       mediaType: "image",
     };
   }
-  throw httpError(400, "图片生成目前仅支持 FMGO 和 CanSeeDream");
+
+  if (config.adapter === "qiqi") {
+    if (!QIQI_IMAGE_MODELS.includes(config.model)) throw httpError(400, "请选择 QIQI 图片模型");
+    const payload = qiqiImagePayload(input, files.length > 0);
+    let response;
+    if (files.length) {
+      const form = new FormData();
+      for (const [key, value] of Object.entries(payload)) form.set(key, String(value));
+      for (const file of files) {
+        form.append("image[]", new Blob([fileBytes(file)], { type: file.mimetype || "image/png" }), file.originalname || "reference.png");
+      }
+      response = await upstream(`${config.baseUrl}/v1/images/edits`, {
+        method: "POST",
+        headers: authHeaders(config, { Accept: "application/json" }),
+        body: form,
+      }, 600_000);
+    } else {
+      response = await upstream(`${config.baseUrl}/v1/images/generations`, {
+        method: "POST",
+        headers: authHeaders(config, { Accept: "application/json", "Content-Type": "application/json" }),
+        body: JSON.stringify(payload),
+      }, 600_000);
+    }
+    const body = await readJson(response);
+    const imageValue = imageUrlsFrom(body, config.baseUrl)[0];
+    if (!imageValue) throw httpError(502, "QIQI 图片生成成功但没有返回图片数据");
+    let bytes;
+    let mimeType = "image/png";
+    if (/^data:image\//i.test(imageValue)) {
+      const match = imageValue.match(/^data:(image\/[a-z0-9.+-]+);base64,(.+)$/i);
+      if (!match) throw httpError(502, "QIQI 返回的图片 Base64 无效");
+      mimeType = match[1];
+      bytes = Buffer.from(match[2], "base64");
+    } else {
+      const resultUrl = publicUrl(imageValue, "QIQI 图片地址");
+      const resultResponse = await upstream(resultUrl, { headers: { Accept: "image/*,*/*" } }, 360_000);
+      if (!resultResponse.ok) {
+        const status = resultResponse.status;
+        await resultResponse.body?.cancel().catch(() => {});
+        throw httpError(status, `读取 QIQI 生成图片失败（HTTP ${status}）`);
+      }
+      mimeType = resultResponse.headers.get("content-type")?.split(";")[0] || mimeType;
+      bytes = Buffer.from(await resultResponse.arrayBuffer());
+    }
+    if (!bytes.length) throw httpError(502, "QIQI 返回了空图片数据");
+    const taskId = crypto.randomUUID();
+    writeFileSync(path.join(imageResultDir, `${taskId}.bin`), bytes);
+    return {
+      adapter: "qiqi",
+      baseUrl: config.baseUrl,
+      taskId,
+      statusPath: `/local-image-results/${taskId}`,
+      model: config.model,
+      mediaType: "image",
+      resultMime: mimeType,
+      status: "completed",
+    };
+  }
+  throw httpError(400, "图片生成目前仅支持 FMGO、CanSeeDream 和 QIQI");
 }
 
 function verifyJobConfig(config, job) {
@@ -1685,6 +1967,18 @@ app.get("/api/config/models", async (req, res, next) => {
     if (config.adapter === "pidoi") {
       return res.json({ models: PIDOI_MODELS });
     }
+    if (config.adapter === "aiyrx") {
+      const response = await upstream(`${config.baseUrl}/v1/models`, { headers: authHeaders(config) });
+      const catalog = aiyrxModels(await readJson(response));
+      if (!catalog.models.length) throw httpError(502, "AIYRX 当前没有返回可用视频模型");
+      return res.json(catalog);
+    }
+    if (config.adapter === "seedancevideo") {
+      const response = await upstream(`${config.baseUrl}/v1/models`, { headers: authHeaders(config) });
+      const catalog = seedanceVideoModels(await readJson(response));
+      if (!catalog.models.length) throw httpError(502, "Seedance 视频当前没有返回可用模型；请让中转站先为该 KEY 启用模型");
+      return res.json(catalog);
+    }
     const response = await upstream(`${config.baseUrl}/v1/models`, { headers: authHeaders(config) });
     if (!response.ok && [404, 405, 501].includes(response.status)) {
       const fallback = fallbackModels(config.adapter);
@@ -1751,6 +2045,7 @@ app.post("/api/materials", upload.array("references", 50), async (req, res, next
         kind: item.kind,
         name: item.name,
         url: item.url,
+        assetId: item.assetId,
         durationSeconds: item.durationSeconds || null,
       })),
       expiresAt: Date.now() + 50 * 60 * 1000,
@@ -1772,7 +2067,7 @@ app.post("/api/image-tasks", upload.array("references", 16), async (req, res, ne
       if (!String(file.mimetype || "").startsWith("image/")) throw httpError(400, "图片生成只支持上传图片参考素材");
     }
     const config = providerConfig(req);
-    if (!['fmgo', 'canseedream'].includes(config.adapter)) throw httpError(400, "图片生成目前仅支持 FMGO 和 CanSeeDream");
+    if (!["fmgo", "canseedream", "qiqi"].includes(config.adapter)) throw httpError(400, "图片生成目前仅支持 FMGO、CanSeeDream 和 QIQI");
     const prompt = String(req.body.prompt || "").trim();
     if (!prompt) throw httpError(400, "提示词不能为空");
     const input = {
@@ -1780,18 +2075,22 @@ app.post("/api/image-tasks", upload.array("references", 16), async (req, res, ne
       aspectRatio: ["Default", "auto", "8:1", "4:1", "21:9", "16:9", "5:4", "4:3", "3:2", "1:1", "2:3", "3:4", "4:5", "9:16", "1:4", "1:8"].includes(req.body.aspectRatio)
         ? req.body.aspectRatio
         : "1:1",
-      size: ["auto", "1024x1024", "1536x1024", "1024x1536", "2048x2048", "2048x1152", "3840x2160", "2160x3840", "1K", "2K", "4K"].includes(req.body.size)
+      size: ["auto", "1024x1024", "1536x1024", "1024x1536", "2048x2048", "2048x1152", "1152x2048", "3840x2160", "2160x3840", "1K", "2K", "4K"].includes(req.body.size)
         ? req.body.size
         : "auto",
-      quality: ["auto", "medium"].includes(req.body.quality) ? req.body.quality : "auto",
+      quality: ["auto", "low", "medium", "high"].includes(req.body.quality) ? req.body.quality : "auto",
     };
     const job = await createImage(config, input, files);
+    const id = encodeJob({ ...job, apiKeyFingerprint: apiKeyFingerprint(config.apiKey) });
+    const completed = job.status === "completed";
     res.status(202).json({
       tasks: [{
-        id: encodeJob({ ...job, apiKeyFingerprint: apiKeyFingerprint(config.apiKey) }),
-        status: "queued",
-        progress: 0,
+        id,
+        status: completed ? "completed" : "queued",
+        progress: completed ? 100 : 0,
+        imageUrl: completed ? `/api/image-tasks/${encodeURIComponent(id)}/content` : undefined,
         createdAt: new Date().toLocaleString("zh-CN", { hour12: false }),
+        completedAt: completed ? new Date().toLocaleString("zh-CN", { hour12: false }) : undefined,
       }],
     });
   } catch (error) {
@@ -1807,6 +2106,17 @@ app.get("/api/image-tasks/:id", async (req, res, next) => {
     const job = decodeJob(req.params.id);
     verifyJobConfig(config, job);
     if (job.mediaType !== "image") throw httpError(400, "这不是图片生成任务");
+    if (job.adapter === "qiqi") {
+      const exists = existsSync(path.join(imageResultDir, `${job.taskId}.bin`));
+      res.json({
+        id: req.params.id,
+        status: exists ? "completed" : "failed",
+        progress: exists ? 100 : 0,
+        imageUrl: exists ? `/api/image-tasks/${encodeURIComponent(req.params.id)}/content` : undefined,
+        error: exists ? undefined : "本地图片结果文件已不存在",
+      });
+      return;
+    }
     const response = await upstream(`${config.baseUrl}${job.statusPath}`, { headers: authHeaders(config) });
     const body = await readJson(response);
     const status = normalizeStatus(body?.status || body?.state || body?.task?.status || body?.data?.status);
@@ -1831,6 +2141,12 @@ app.get("/api/image-tasks/:id/content", async (req, res, next) => {
     const job = decodeJob(req.params.id);
     verifyJobConfig(config, job);
     if (job.mediaType !== "image") throw httpError(400, "这不是图片生成任务");
+    if (job.adapter === "qiqi") {
+      const resultPath = path.join(imageResultDir, `${job.taskId}.bin`);
+      if (!existsSync(resultPath)) throw httpError(404, "本地图片结果文件已不存在");
+      res.type(job.resultMime || "image/png").send(readFileSync(resultPath));
+      return;
+    }
     const statusResponse = await upstream(`${config.baseUrl}${job.statusPath}`, { headers: authHeaders(config) });
     const body = await readJson(statusResponse);
     const status = normalizeStatus(body?.status || body?.state || body?.task?.status || body?.data?.status);
@@ -1911,15 +2227,23 @@ app.post("/api/tasks", upload.array("references", 50), async (req, res, next) =>
       materials,
       String(req.body.autoReference || "true") !== "false",
     );
+    if (config.adapter === "seedancevideo" && prompt.length > 10000)
+      throw httpError(400, `Seedance 视频提示词最多 10000 字，当前为 ${prompt.length} 字`);
     if (config.adapter === "pidoi" && config.model === "tejiasd" && prompt.length > 2500)
       throw httpError(400, `Pidoi tejiasd 提示词最多 2500 字，当前为 ${prompt.length} 字`);
+    if (config.adapter === "lwaigc") {
+      const promptIssue = lwaigcPromptIssue(config.model, prompt);
+      if (promptIssue) throw httpError(400, promptIssue);
+    }
     const input = {
       prompt,
       materials,
       duration: requestedDuration,
-      resolution: ["480p", "720p", "1080p", "2K", "4K"].includes(req.body.resolution)
-        ? req.body.resolution
-        : "720p",
+      resolution: config.adapter === "seedancevideo"
+        ? String(req.body.resolution || "").trim().slice(0, 64)
+        : ["480p", "720p", "1080p", "2K", "4K"].includes(req.body.resolution)
+          ? req.body.resolution
+          : "720p",
       aspectRatio: ["21:9", "16:9", "4:3", "1:1", "3:4", "9:16", "auto", "adaptive"].includes(req.body.aspectRatio)
         ? req.body.aspectRatio
         : "16:9",
@@ -2029,7 +2353,7 @@ app.get("/api/tasks/:id", async (req, res, next) => {
       videoUrl: result.status === "completed" ? `/api/tasks/${encodeURIComponent(req.params.id)}/content` : undefined,
       sourceVideoUrl: result.status === "completed" ? result.videoUrl : undefined,
       error: failure?.reason,
-      cost: result.body?.cost ?? result.body?.usage?.cost ?? result.body?.metadata?.cost,
+      cost: result.body?.cost ?? result.body?.amount ?? result.body?.usage?.cost ?? result.body?.metadata?.cost,
       completedAt: dateText(result.body?.completed_at || result.body?.completedAt),
     });
   } catch (error) {
@@ -2058,6 +2382,9 @@ app.get("/api/tasks/:id/content", async (req, res, next) => {
 
     const config = providerConfig(req);
     verifyJobConfig(config, job);
+    const suppliedSourceUrl = req.query.source
+      ? publicUrl(String(req.query.source), "已保存的视频地址").toString()
+      : null;
     for (const contentPath of directTaskContentPaths(config.adapter, job.taskId)) {
       const fixedResponse = await upstream(
         `${config.baseUrl}${contentPath}`,
@@ -2074,10 +2401,7 @@ app.get("/api/tasks/:id/content", async (req, res, next) => {
       : recoveredVideoUrl
         ? { status: "completed", videoUrl: recoveredVideoUrl }
       : await pollJob(config, job);
-    if (result.status !== "completed") throw httpError(409, "视频尚未生成完成");
-    const suppliedSourceUrl = req.query.source
-      ? publicUrl(String(req.query.source), "已保存的视频地址").toString()
-      : null;
+    if (shouldRejectUnfinishedVideo(result.status, suppliedSourceUrl)) throw httpError(409, "视频尚未生成完成");
     const candidateUrls = cachedVideoUrl
       ? [cachedVideoUrl]
       : recoveredVideoUrl

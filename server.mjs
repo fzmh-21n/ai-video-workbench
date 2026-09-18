@@ -18,6 +18,7 @@ import {
   clearedSessionCookie,
   cookieValue,
   createSessionToken,
+  renewSessionToken,
   sessionCookie,
   verifyLoginCredentials,
   verifySessionToken,
@@ -27,6 +28,7 @@ import {
   isLwaigcDqModel,
   lwaigcLimitIssue,
   lwaigcPromptIssue,
+  lwaigcReferencePrompt,
   lwaigcVideoPayload,
 } from "./src/lwaigcCatalog.js";
 import {
@@ -39,6 +41,7 @@ import {
   configuredUploadRetryDelay,
   createUploadCircuitBreaker,
   mediaUploadMode,
+  requiresProviderAssetUpload,
   tmpfilesDirectUrl,
 } from "./src/uploadPolicy.js";
 import { normalizeApiKey } from "./src/apiKey.js";
@@ -50,7 +53,13 @@ import {
   globalAiOpcPayload,
   globalAiOpcStatusPath,
 } from "./src/globalAiOpcCatalog.js";
-import { MAXFORAI_VIDEO_MODELS, maxforaiVideoPayload } from "./src/maxforaiCatalog.js";
+import {
+  MAXFORAI_FT_933_MODEL,
+  MAXFORAI_VIDEO_MODELS,
+  maxforaiModels,
+  maxforaiReferencePrompt,
+  maxforaiVideoPayload,
+} from "./src/maxforaiCatalog.js";
 import {
   CANSEEDREAM_IMAGE_MODELS,
   FMGO_IMAGE_MODELS,
@@ -82,6 +91,8 @@ import {
   seedanceVideoModels,
   seedanceVideoPayload,
 } from "./src/seedanceVideoCatalog.js";
+import { UNMAU_BASE_URL, unmauCatalog, unmauVideoPayload } from "./src/unmauCatalog.js";
+import { prepareUnmauImage } from "./src/unmauImage.js";
 import { normalizedTaskProgress } from "./src/taskProgress.js";
 import { taskFailureDetails } from "./src/upstreamTaskFailure.js";
 import { friendlyUpstreamError } from "./src/upstreamError.js";
@@ -115,7 +126,9 @@ const uploadDir = path.join(dataDir, "uploads");
 const diagnosticLogPath = path.join(dataDir, "diagnostics.jsonl");
 const cosConfigPath = path.join(dataDir, "cos-config.json");
 const fmgoResultCachePath = path.join(dataDir, "fmgo-result-cache.json");
+const imageTaskJournalPath = path.join(dataDir, "image-task-journal.jsonl");
 const imageResultDir = path.join(dataDir, "image-results");
+const unmauImageCacheDir = path.join(dataDir, "unmau-image-cache");
 const automaticUploadServices = AUTOMATIC_UPLOAD_SERVICES;
 const automaticUploadCircuit = createUploadCircuitBreaker({ failureThreshold: 2 });
 mkdirSync(dataDir, { recursive: true });
@@ -134,6 +147,40 @@ function recoveredFmgoVideoUrl(taskId) {
   } catch {
     return null;
   }
+}
+
+function imageTaskJournalEntries() {
+  try {
+    return readFileSync(imageTaskJournalPath, "utf8")
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((line) => {
+        try { return JSON.parse(line); } catch { return null; }
+      })
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function saveImageTaskRecord(record) {
+  appendFileSync(imageTaskJournalPath, `${JSON.stringify(record)}\n`);
+}
+
+function recentImageTaskRecords(config) {
+  const fingerprint = apiKeyFingerprint(config.apiKey);
+  const seen = new Set();
+  const records = [];
+  for (const record of imageTaskJournalEntries().reverse()) {
+    if (record.adapter !== config.adapter || record.baseUrl !== config.baseUrl) continue;
+    if (record.apiKeyFingerprint && record.apiKeyFingerprint !== fingerprint) continue;
+    if (!record.id || seen.has(record.id)) continue;
+    seen.add(record.id);
+    const { apiKeyFingerprint: _fingerprint, baseUrl: _baseUrl, adapter: _adapter, ...publicRecord } = record;
+    records.push(publicRecord);
+    if (records.length >= 300) break;
+  }
+  return records;
 }
 
 function diagnosticEntries() {
@@ -341,6 +388,7 @@ function inferAdapter(url) {
   if (host === "pidoi.com" || host === "www.pidoi.com") return "pidoi";
   if (host === "api.aiyrx.xyz") return "aiyrx";
   if (host === "772808.xyz") return "seedancevideo";
+  if (host === "newapis.unmau.com") return "unmau";
   return "newapi";
 }
 
@@ -351,7 +399,7 @@ function providerConfig(req, requireModel = true) {
   let model = encodedModel;
   try { model = decodeURIComponent(encodedModel); } catch {}
   const requestedAdapter = String(req.get("x-api-adapter") || "").trim();
-  const adapter = ["fmgo", "paipu", "viralee", "canseedream", "lwaigc", "meaicc", "ziyuai", "globalaiopc", "maxforai", "clmm", "pidoi", "aiyrx", "seedancevideo", "qiqi", "newapi"].includes(requestedAdapter)
+  const adapter = ["fmgo", "paipu", "viralee", "canseedream", "lwaigc", "meaicc", "ziyuai", "globalaiopc", "maxforai", "clmm", "pidoi", "aiyrx", "seedancevideo", "unmau", "qiqi", "newapi"].includes(requestedAdapter)
     ? requestedAdapter
     : inferAdapter(resolvedBaseUrl);
   // canseedream.com 目前会 301 跳转至 see.ximeiedu.org。跨域跳转会按
@@ -364,22 +412,28 @@ function providerConfig(req, requireModel = true) {
   if (adapter === "pidoi") resolvedBaseUrl = PIDOI_BASE_URL;
   if (adapter === "aiyrx") resolvedBaseUrl = AIYRX_BASE_URL;
   if (adapter === "seedancevideo") resolvedBaseUrl = SEEDANCE_VIDEO_BASE_URL;
+  if (adapter === "unmau") resolvedBaseUrl = UNMAU_BASE_URL;
   if (adapter === "qiqi") resolvedBaseUrl = QIQI_IMAGE_BASE_URL;
   const rawUploadUrl = String(req.get("x-media-upload-url") || "").trim();
-  const mediaUploadUrl = rawUploadUrl
-    ? publicUrl(rawUploadUrl, "素材上传地址").toString()
-    : adapter === "lwaigc"
+  const mediaUploadUrl = adapter === "maxforai"
+    ? `${resolvedBaseUrl}/v1/assets`
+    : rawUploadUrl
+      ? publicUrl(rawUploadUrl, "素材上传地址").toString()
+      : adapter === "lwaigc"
       ? `${resolvedBaseUrl}/v1/assets`
       : adapter === "ziyuai"
         ? `${resolvedBaseUrl}/api/v1/uploads`
-      : adapter === "maxforai"
-          ? `${resolvedBaseUrl}/v1/assets`
       : adapter === "aiyrx"
         ? `${resolvedBaseUrl}/v1/assets`
       : adapter === "seedancevideo"
         ? `${resolvedBaseUrl}/v1/uploads/images`
+      : adapter === "unmau"
+        ? `${resolvedBaseUrl}/v1/materials`
       : "";
-  const mediaUploadKey = normalizeApiKey(req.get("x-media-upload-key")) || apiKey;
+  const requestedMediaUploadKey = normalizeApiKey(req.get("x-media-upload-key"));
+  const mediaUploadKey = ["lwaigc", "maxforai"].includes(adapter)
+    ? apiKey
+    : requestedMediaUploadKey || apiKey;
   if (!apiKey) throw httpError(400, "请填写 API Key");
   if (requireModel && !model) throw httpError(400, "请选择模型");
   return { baseUrl: resolvedBaseUrl, apiKey, model, adapter, mediaUploadUrl, mediaUploadKey };
@@ -609,9 +663,15 @@ function validateMeaiccLimits(config, meta, duration) {
 function validateProviderLimits(config, meta, duration) {
   // 这些中转的能力由带当前 Key 的实时模型接口返回，服务端在创建阶段
   // 拿不到浏览器保存的动态表；保留前端实时校验并交给上游复核。
-  if (["lwaigc", "meaicc", "newapi", "canseedream", "ziyuai", "aiyrx"].includes(config.adapter)) return;
+  if (["lwaigc", "meaicc", "newapi", "canseedream", "ziyuai", "aiyrx", "unmau"].includes(config.adapter)) return;
   const issue = capabilityLimitIssue({ adapter: config.adapter, model: config.model }, meta, duration);
   if (issue) throw httpError(400, issue);
+  if (config.adapter === "maxforai" && config.model === MAXFORAI_FT_933_MODEL) {
+    const imageCount = meta.filter((item) => item.kind === "image").length;
+    const audioCount = meta.filter((item) => item.kind === "audio").length;
+    if (audioCount && !imageCount)
+      throw httpError(400, `${MAXFORAI_FT_933_MODEL} 使用音频参考时必须同时提供至少 1 张图片`);
+  }
 }
 
 function cleanupFiles(files) {
@@ -870,24 +930,54 @@ async function importAiyrxAsset(config, value, material = {}, req) {
 async function uploadMedia(config, file, material = {}, req) {
   if (config.adapter === "aiyrx") return uploadAiyrxAsset(config, file, material, req);
   const storage = cosConfig();
-  if (storage) return uploadCosMedia(storage, file, material, req);
+  if (storage && !requiresProviderAssetUpload(config.adapter)) return uploadCosMedia(storage, file, material, req);
   if (mediaUploadMode(config, file.mimetype) === "temporary") {
     return uploadTemporaryMedia(file, material, req);
   }
   const displayName = String(material.name || file.originalname || "本地素材");
-  const bytes = fileBytes(file);
+  const originalBytes = fileBytes(file);
+  let uploadBytes = originalBytes;
+  let uploadName = displayName;
+  let uploadMimeType = file.mimetype || "application/octet-stream";
+  if (config.adapter === "unmau" && (material.kind === "image" || uploadMimeType.startsWith("image/"))) {
+    let prepared;
+    try {
+      prepared = await prepareUnmauImage({
+        bytes: originalBytes,
+        fileName: displayName,
+        mimeType: uploadMimeType,
+        cacheDir: unmauImageCacheDir,
+      });
+    } catch (error) {
+      throw httpError(400, `Unmau 图片自动压缩失败：${displayName}。${error?.message || "无法读取图片"}`);
+    }
+    uploadBytes = prepared.bytes;
+    uploadName = prepared.fileName;
+    uploadMimeType = prepared.mimeType;
+    if (prepared.compressed) {
+      writeDiagnostic(req, "unmau_image_compressed", {
+        service: config.adapter,
+        fileName: displayName,
+        originalBytes: originalBytes.length,
+        compressedBytes: uploadBytes.length,
+        cached: prepared.cached,
+      });
+    }
+  } else if (config.adapter === "unmau" && originalBytes.length > 20 * 1024 * 1024) {
+    throw httpError(413, `Unmau 单个素材不能超过 20 MB：${displayName}`);
+  }
   const uploadStartedAt = Date.now();
   let uploadAttemptCount = 0;
   writeDiagnostic(req, "configured_upload_started", {
     service: config.adapter,
     fileName: displayName,
-    bytes: bytes.length,
+    bytes: uploadBytes.length,
     kind: material.kind || "",
   });
   try {
     if (config.adapter === "ziyuai") {
       const kind = ["image", "audio", "video"].includes(material.kind) ? material.kind : "image";
-      const data = `data:${file.mimetype || "application/octet-stream"};base64,${bytes.toString("base64")}`;
+      const data = `data:${uploadMimeType};base64,${uploadBytes.toString("base64")}`;
       const payload = JSON.stringify({ files: [{ type: kind, name: displayName, data }] });
       const maxAttempts = 4;
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -936,13 +1026,9 @@ async function uploadMedia(config, file, material = {}, req) {
       }
     }
     const form = new FormData();
-    form.set("file", new Blob([bytes], { type: file.mimetype || "application/octet-stream" }), displayName);
+    form.set("file", new Blob([uploadBytes], { type: uploadMimeType }), uploadName);
     if (config.adapter === "seedancevideo") form.set("originalName", displayName);
     const headers = { Authorization: `Bearer ${config.mediaUploadKey}` };
-    if (config.adapter === "lwaigc") {
-      const fingerprint = crypto.createHash("sha256").update(bytes).digest("hex").slice(0, 40);
-      headers["Idempotency-Key"] = `asset_${fingerprint}`;
-    }
     uploadAttemptCount = 1;
     const response = await upstream(
       config.mediaUploadUrl,
@@ -952,8 +1038,32 @@ async function uploadMedia(config, file, material = {}, req) {
     const body = await readJson(response);
     const value = body?.url || body?.data?.url || body?.data?.[0]?.url;
     if (!value) throw httpError(502, `素材上传成功但没有返回 URL：${displayName}`);
-    writeDiagnostic(req, "configured_upload_completed", { service: config.adapter, fileName: displayName, durationMs: Date.now() - uploadStartedAt, status: response.status });
-    return publicUrl(value, "素材 URL").toString();
+    const uploadedUrl = publicUrl(config.adapter === "unmau" ? new URL(value, config.baseUrl) : value, "素材 URL");
+    if (config.adapter === "lwaigc") {
+      const probe = await upstream(uploadedUrl, {
+        headers: { Accept: "*/*", Range: "bytes=0-0" },
+      }, 30_000);
+      const probeStatus = probe.status;
+      await probe.body?.cancel().catch(() => {});
+      if (!probe.ok) throw httpError(502, `LWAIGC 返回的素材地址不可访问（HTTP ${probeStatus}）：${displayName}`);
+    }
+    writeDiagnostic(req, "configured_upload_completed", {
+      service: config.adapter,
+      fileName: displayName,
+      durationMs: Date.now() - uploadStartedAt,
+      status: response.status,
+      sameCredential: config.mediaUploadKey === config.apiKey,
+      assetUrlShape: {
+        host: uploadedUrl.host,
+        pathPrefix: uploadedUrl.pathname.split("/").filter(Boolean).slice(0, 3).join("/"),
+        extension: path.extname(uploadedUrl.pathname).toLowerCase(),
+        hasQuery: Boolean(uploadedUrl.search),
+        expiresAt: signedUrlExpiresAt(uploadedUrl),
+      },
+      mediaType: String(body?.media_type || body?.data?.media_type || ""),
+      temporary: Boolean(body?.temporary || body?.data?.temporary),
+    });
+    return uploadedUrl.toString();
   } catch (error) {
     writeDiagnostic(req, "configured_upload_failed", {
       service: config.adapter,
@@ -967,25 +1077,92 @@ async function uploadMedia(config, file, material = {}, req) {
   }
 }
 
-async function importLwaigcMedia(config, value) {
+async function importUnmauImage(config, value, material = {}, req) {
+  const source = publicUrl(value, "素材 URL");
+  if (source.origin === config.baseUrl && /^\/v1\/materials\//.test(source.pathname)) return source.toString();
+  const response = await upstream(source, { headers: { Accept: "image/*" } }, 180_000);
+  if (!response.ok) {
+    const status = response.status;
+    await response.body?.cancel().catch(() => {});
+    throw httpError(status, `Unmau 无法读取公网图片（HTTP ${status}）：${material.name || source.pathname}`);
+  }
+  const declaredBytes = Number(response.headers.get("content-length") || 0);
+  if (declaredBytes > 100 * 1024 * 1024) {
+    await response.body?.cancel().catch(() => {});
+    throw httpError(413, `Unmau 公网图片超过本地处理上限：${material.name || source.pathname}`);
+  }
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (bytes.length > 100 * 1024 * 1024) throw httpError(413, "Unmau 公网图片超过本地处理上限");
+  const fileName = String(material.name || path.basename(source.pathname) || "reference-image");
+  return uploadMedia(config, {
+    buffer: bytes,
+    originalname: fileName,
+    mimetype: response.headers.get("content-type")?.split(";")[0] || "image/png",
+  }, { ...material, kind: "image", name: fileName }, req);
+}
+
+async function importMaxforaiMedia(config, value, material = {}, req) {
+  const source = publicUrl(value, "素材 URL");
+  if (source.origin === config.baseUrl && /^\/v1\/assets\//.test(source.pathname)) return source.toString();
+  const kind = ["image", "audio", "video"].includes(material.kind) ? material.kind : "image";
+  const maximumBytes = { image: 64, audio: 128, video: 512 }[kind] * 1024 * 1024;
+  const response = await upstream(source, { headers: { Accept: "*/*" } }, 180_000);
+  if (!response.ok) {
+    const status = response.status;
+    await response.body?.cancel().catch(() => {});
+    throw httpError(status, `MaxForAI 无法读取公网素材（HTTP ${status}）：${material.name || source.pathname}`);
+  }
+  const declaredBytes = Number(response.headers.get("content-length") || 0);
+  if (declaredBytes > maximumBytes) {
+    await response.body?.cancel().catch(() => {});
+    throw httpError(413, "MaxForAI 公网素材超过本地转存上限");
+  }
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (bytes.length > maximumBytes) throw httpError(413, "MaxForAI 公网素材超过本地转存上限");
+  const fileName = String(material.name || path.basename(source.pathname) || `${kind}-reference`);
+  return uploadMedia(config, {
+    buffer: bytes,
+    originalname: fileName,
+    mimetype: response.headers.get("content-type")?.split(";")[0] || "application/octet-stream",
+  }, { ...material, kind, name: fileName }, req);
+}
+
+async function importLwaigcMedia(config, value, material = {}, req) {
   const source = publicUrl(value, "素材 URL");
   if (
     source.origin === config.baseUrl &&
     /^\/v1\/(?:assets|media-references)\//.test(source.pathname)
-  ) return source.toString();
+  ) {
+    const probe = await upstream(source, {
+      headers: { Accept: "*/*", Range: "bytes=0-0" },
+    }, 30_000);
+    const status = probe.status;
+    await probe.body?.cancel().catch(() => {});
+    if (!probe.ok) throw httpError(410, `LWAIGC 素材地址已失效或不可访问（HTTP ${status}）：${material.name || source.pathname}`);
+    return source.toString();
+  }
 
-  const fingerprint = crypto.createHash("sha256").update(source.toString()).digest("hex").slice(0, 40);
-  const response = await upstream(`${config.baseUrl}/v1/assets/url`, {
-    method: "POST",
-    headers: authHeaders(config, {
-      "Content-Type": "application/json",
-      "Idempotency-Key": `asset_url_${fingerprint}`,
-    }),
-    body: JSON.stringify({ url: source.toString() }),
-  }, 180_000);
-  const body = await readJson(response);
-  if (!body?.url) throw httpError(502, "LWAIGC 转存公网素材成功但没有返回 URL");
-  return publicUrl(body.url, "LWAIGC 素材 URL").toString();
+  const kind = ["image", "audio", "video"].includes(material.kind) ? material.kind : "image";
+  const maximumBytes = { image: 64, audio: 128, video: 512 }[kind] * 1024 * 1024;
+  const response = await upstream(source, { headers: { Accept: "*/*" } }, 180_000);
+  if (!response.ok) {
+    const status = response.status;
+    await response.body?.cancel().catch(() => {});
+    throw httpError(status, `LWAIGC 无法读取公网素材（HTTP ${status}）：${material.name || source.pathname}`);
+  }
+  const declaredBytes = Number(response.headers.get("content-length") || 0);
+  if (declaredBytes > maximumBytes) {
+    await response.body?.cancel().catch(() => {});
+    throw httpError(413, "LWAIGC 公网素材超过本地转存上限");
+  }
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (bytes.length > maximumBytes) throw httpError(413, "LWAIGC 公网素材超过本地转存上限");
+  const fileName = String(material.name || path.basename(source.pathname) || `${kind}-reference`);
+  return uploadMedia(config, {
+    buffer: bytes,
+    originalname: fileName,
+    mimetype: response.headers.get("content-type")?.split(";")[0] || "application/octet-stream",
+  }, { ...material, kind, name: fileName }, req);
 }
 
 function imageDataUrl(file) {
@@ -1014,8 +1191,12 @@ async function prepareMaterials(config, files, meta, req) {
           continue;
         }
         const url = config.adapter === "lwaigc"
-          ? await importLwaigcMedia(config, item.url)
-          : publicUrl(item.url, "素材 URL").toString();
+          ? await importLwaigcMedia(config, item.url, { ...item, kind }, req)
+          : config.adapter === "maxforai"
+            ? await importMaxforaiMedia(config, item.url, { ...item, kind }, req)
+            : config.adapter === "unmau" && kind === "image"
+              ? await importUnmauImage(config, item.url, { ...item, kind }, req)
+            : publicUrl(item.url, "素材 URL").toString();
         materials[index] = { ...item, kind, url };
         continue;
       }
@@ -1219,6 +1400,26 @@ function openAiMessage(prompt, materials, useImageUrlForAllMaterials = false) {
       }),
     ],
   };
+}
+
+function signedUrlExpiresAt(value) {
+  const url = value instanceof URL ? value : new URL(value);
+  const raw = url.searchParams.get("expires") || url.searchParams.get("Expires");
+  if (!raw) return null;
+  if (/^\d+$/.test(raw)) {
+    const numeric = Number(raw);
+    return numeric < 1e12 ? numeric * 1000 : numeric;
+  }
+  const parsed = Date.parse(raw);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function materialCacheExpiresAt(materials) {
+  const signedExpiries = materials
+    .map((item) => item.url && signedUrlExpiresAt(item.url))
+    .filter((value) => Number.isFinite(value));
+  const defaultExpiry = Date.now() + 50 * 60 * 1000;
+  return signedExpiries.length ? Math.min(defaultExpiry, ...signedExpiries) : defaultExpiry;
 }
 
 async function createSeedanceVideo(config, input) {
@@ -1567,6 +1768,8 @@ async function createVideo(config, input) {
           ? maxforaiVideoPayload(config.model, input)
         : config.adapter === "pidoi"
           ? pidoiVideoPayload(config.model, input)
+        : config.adapter === "unmau"
+          ? unmauVideoPayload(config.model, input)
         : genericPayload(config, input);
   const response = await upstream(`${config.baseUrl}/v1/videos`, {
     method: "POST",
@@ -1807,14 +2010,17 @@ function secureCookie(req) {
   );
 }
 
-function currentSession(req) {
+function renewSession(req, res) {
   if (!loginConfigured) return null;
   const token = cookieValue(req.get("cookie"), "workbench_session");
-  return verifySessionToken(token, jobSecret);
+  const renewed = renewSessionToken(token, jobSecret);
+  if (!renewed) return null;
+  res.setHeader("Set-Cookie", sessionCookie(renewed, secureCookie(req)));
+  return verifySessionToken(renewed, jobSecret);
 }
 
 app.get("/api/auth/session", (req, res) => {
-  const session = currentSession(req);
+  const session = renewSession(req, res);
   if (!session) return res.status(401).json({ authenticated: false });
   return res.json({ authenticated: true, username: session.username });
 });
@@ -1854,7 +2060,7 @@ app.post("/api/auth/logout", (req, res) => {
 });
 
 app.use("/api", (req, res, next) => {
-  if (!currentSession(req)) return res.status(401).json({ message: "请先登录工作台" });
+  if (!renewSession(req, res)) return res.status(401).json({ message: "请先登录工作台" });
   return next();
 });
 
@@ -1979,6 +2185,15 @@ app.get("/api/config/models", async (req, res, next) => {
       if (!catalog.models.length) throw httpError(502, "Seedance 视频当前没有返回可用模型；请让中转站先为该 KEY 启用模型");
       return res.json(catalog);
     }
+    if (config.adapter === "unmau") {
+      const [modelsResponse, pricingResponse] = await Promise.all([
+        upstream(`${UNMAU_BASE_URL}/v1/models`, { headers: authHeaders(config) }),
+        upstream(`${UNMAU_BASE_URL}/api/pricing`),
+      ]);
+      const catalog = unmauCatalog(await readJson(pricingResponse), await readJson(modelsResponse));
+      if (!catalog.models.length) throw httpError(502, "Unmau 当前 KEY 没有返回可用视频模型");
+      return res.json(catalog);
+    }
     const response = await upstream(`${config.baseUrl}/v1/models`, { headers: authHeaders(config) });
     if (!response.ok && [404, 405, 501].includes(response.status)) {
       const fallback = fallbackModels(config.adapter);
@@ -1998,8 +2213,7 @@ app.get("/api/config/models", async (req, res, next) => {
       models = [...new Set([...models, ...GLOBAL_AIOPC_MODELS])];
     }
     if (config.adapter === "maxforai") {
-      const allowed = new Set(MAXFORAI_VIDEO_MODELS);
-      models = [...new Set([...models.filter((model) => allowed.has(model)), ...MAXFORAI_VIDEO_MODELS])];
+      models = maxforaiModels(models);
     }
     res.json({
       models: config.adapter === "lwaigc" ? models : models.length ? models : fallbackModels(config.adapter),
@@ -2048,7 +2262,7 @@ app.post("/api/materials", upload.array("references", 50), async (req, res, next
         assetId: item.assetId,
         durationSeconds: item.durationSeconds || null,
       })),
-      expiresAt: Date.now() + 50 * 60 * 1000,
+      expiresAt: materialCacheExpiresAt(materials),
     });
     writeDiagnostic(req, "materials_response_sent", { materialCount: materials.length });
   } catch (error) {
@@ -2056,6 +2270,16 @@ app.post("/api/materials", upload.array("references", 50), async (req, res, next
     next(error);
   } finally {
     cleanupFiles(files);
+  }
+});
+
+app.get("/api/image-tasks/recent", (req, res, next) => {
+  try {
+    const config = providerConfig(req);
+    if (!["fmgo", "canseedream", "qiqi"].includes(config.adapter)) throw httpError(400, "图片生成目前仅支持 FMGO、CanSeeDream 和 QIQI");
+    res.json({ tasks: recentImageTaskRecords(config) });
+  } catch (error) {
+    next(error);
   }
 });
 
@@ -2083,15 +2307,27 @@ app.post("/api/image-tasks", upload.array("references", 16), async (req, res, ne
     const job = await createImage(config, input, files);
     const id = encodeJob({ ...job, apiKeyFingerprint: apiKeyFingerprint(config.apiKey) });
     const completed = job.status === "completed";
+    const createdAt = new Date().toLocaleString("zh-CN", { hour12: false });
+    const task = {
+      id,
+      status: completed ? "completed" : "queued",
+      progress: completed ? 100 : 0,
+      imageUrl: completed ? `/api/image-tasks/${encodeURIComponent(id)}/content` : undefined,
+      createdAt,
+      completedAt: completed ? createdAt : undefined,
+      title: files[0]?.originalname || prompt.slice(0, 24) || config.model,
+      prompt,
+      model: config.model,
+      providerId: config.adapter,
+    };
+    saveImageTaskRecord({
+      ...task,
+      adapter: job.adapter,
+      baseUrl: job.baseUrl,
+      apiKeyFingerprint: apiKeyFingerprint(config.apiKey),
+    });
     res.status(202).json({
-      tasks: [{
-        id,
-        status: completed ? "completed" : "queued",
-        progress: completed ? 100 : 0,
-        imageUrl: completed ? `/api/image-tasks/${encodeURIComponent(id)}/content` : undefined,
-        createdAt: new Date().toLocaleString("zh-CN", { hour12: false }),
-        completedAt: completed ? new Date().toLocaleString("zh-CN", { hour12: false }) : undefined,
-      }],
+      tasks: [task],
     });
   } catch (error) {
     next(error);
@@ -2222,11 +2458,12 @@ app.post("/api/tasks", upload.array("references", 50), async (req, res, next) =>
       materialCount: materials.length,
       cachedUrlCount: meta.filter((item) => item.url).length,
     });
-    const prompt = withReferenceMapping(
-      rawPrompt,
-      materials,
-      String(req.body.autoReference || "true") !== "false",
-    );
+    const autoReference = String(req.body.autoReference || "true") !== "false";
+    const prompt = config.adapter === "maxforai" && autoReference
+      ? maxforaiReferencePrompt(rawPrompt, materials)
+      : config.adapter === "lwaigc" && autoReference
+        ? lwaigcReferencePrompt(rawPrompt, materials)
+        : withReferenceMapping(rawPrompt, materials, autoReference);
     if (config.adapter === "seedancevideo" && prompt.length > 10000)
       throw httpError(400, `Seedance 视频提示词最多 10000 字，当前为 ${prompt.length} 字`);
     if (config.adapter === "pidoi" && config.model === "tejiasd" && prompt.length > 2500)
@@ -2261,6 +2498,22 @@ app.post("/api/tasks", upload.array("references", 50), async (req, res, next) =>
       duration: requestedDuration,
       materialCounts: materials.reduce((result, item) => ({ ...result, [item.kind]: (result[item.kind] || 0) + 1 }), {}),
     });
+    if (config.adapter === "maxforai") {
+      const payload = maxforaiVideoPayload(config.model, input);
+      writeDiagnostic(req, "maxforai_payload_prepared", {
+        payloadKeys: Object.keys(payload).sort(),
+        referenceCounts: {
+          images: Array.isArray(payload.images) ? payload.images.length : 0,
+          videos: Array.isArray(payload.videos) ? payload.videos.length : 0,
+          audios: Array.isArray(payload.audios) ? payload.audios.length : 0,
+          imageUrls: Array.isArray(payload.image_urls) ? payload.image_urls.length : 0,
+          videoUrls: Array.isArray(payload.video_urls) ? payload.video_urls.length : 0,
+          audioUrls: Array.isArray(payload.audio_urls) ? payload.audio_urls.length : 0,
+        },
+        promptReferences: [...new Set(Array.from(prompt.matchAll(/@(image|video|audio)\d+/gi), (match) => match[0].toLowerCase()))],
+        sameCredential: config.mediaUploadKey === config.apiKey,
+      });
+    }
     let jobs;
     if (config.adapter === "fmgo" && /^ss-v2(?:-fast)?$/i.test(config.model)) {
       jobs = [];

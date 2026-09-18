@@ -3,20 +3,192 @@ import test from "node:test";
 
 import {
   batchSubmissionPlan,
+  batchItemChapterLabel,
   batchSourceNames,
   batchItemsForSource,
   batchStatusGroup,
+  beginBatchSubmission,
   canBatchMatch,
   canBatchResubmit,
   canBatchSubmit,
+  clearBatchReferences,
   deterministicBatchStopReason,
+  failBatchSubmission,
   filterBatchItems,
+  clearManualBatchCompletion,
+  clearManualBatchDownload,
+  manuallyCompleteBatchItem,
+  overnightBatchReport,
   parseRecoveredTaskIds,
   providerBatchSubmissionPlan,
+  reconciledBatchTerminalState,
+  removeBatchReferenceKind,
+  recoverInterruptedBatchItems,
   runOrderedStaggered,
   runWithConcurrency,
   splitBatchPrompts,
 } from "../src/batchPrompts.js";
+
+test("manually marks one batch section generated and downloaded without inventing a task", () => {
+  const original = { id: "section-1", status: "generation_failed", progress: 100, error: "上游失败", taskIds: ["task-1"] };
+  const generated = manuallyCompleteBatchItem(original);
+  assert.equal(generated.status, "generated");
+  assert.equal(generated.manuallyMarkedGenerated, true);
+  assert.equal(generated.downloaded, false);
+  assert.deepEqual(generated.taskIds, ["task-1"]);
+  assert.equal(reconciledBatchTerminalState(generated, [{ id: "task-1", status: "failed" }]).status, "generated");
+
+  const downloaded = manuallyCompleteBatchItem(generated, true);
+  assert.equal(downloaded.downloaded, true);
+  assert.equal(downloaded.downloadedCount, 1);
+  assert.equal(clearManualBatchDownload(downloaded).downloaded, false);
+
+  const restored = clearManualBatchCompletion(downloaded);
+  assert.equal(restored.status, "generation_failed");
+  assert.equal(restored.error, "上游失败");
+  assert.equal(restored.manuallyMarkedGenerated, false);
+});
+
+test("removes every audio reference marker while preserving voice instructions and other media", () => {
+  const item = {
+    prompt: "【角色声线】【配音指令】\n（@声音2=声音2）王丽华尖刻说话，节奏参考 @Audio2。\n【出场人物】@王丽华=王丽华",
+    references: [
+      { kind: "image", tag: "@Image1", alias: "王丽华", name: "王丽华.png" },
+      { kind: "audio", tag: "@Audio1", alias: "声音1", name: "声音1.wav" },
+      { kind: "audio", tag: "@Audio2", alias: "声音2", name: "声音2.wav" },
+    ],
+  };
+
+  const result = removeBatchReferenceKind(item, "audio");
+
+  assert.deepEqual(result.references, [item.references[0]]);
+  assert.match(result.prompt, /（声音2）王丽华尖刻说话，节奏参考 声音2/);
+  assert.match(result.prompt, /@王丽华=王丽华/);
+  assert.doesNotMatch(result.prompt, /@Audio|@声音\d+=/i);
+});
+
+test("clears every reference from one batch item without clearing its prompt", () => {
+  const item = {
+    prompt: "【出场人物】@苏晏=苏晏\n【出场场景】@帐篷=帐篷\n动作参考 @Video1，声音参考 @Audio1。",
+    references: [
+      { kind: "image", tag: "@Image1", alias: "苏晏", name: "苏晏.png" },
+      { kind: "image", tag: "@Image2", alias: "帐篷", name: "帐篷.png" },
+      { kind: "video", tag: "@Video1", name: "动作.mp4" },
+      { kind: "audio", tag: "@Audio1", name: "声音1.wav" },
+    ],
+  };
+
+  const result = clearBatchReferences(item);
+
+  assert.deepEqual(result.references, []);
+  assert.match(result.prompt, /【出场人物】苏晏/);
+  assert.match(result.prompt, /【出场场景】帐篷/);
+  assert.match(result.prompt, /动作参考 动作，声音参考 声音1/);
+});
+
+test("requires a newly received task ID before declaring an overnight batch safe", () => {
+  const plan = {
+    itemIds: ["new", "retry"],
+    baselineTaskIds: { new: [], retry: ["old-task"] },
+  };
+  const waiting = overnightBatchReport([
+    { id: "new", status: "generating", taskIds: ["new-task"] },
+    { id: "retry", status: "failed", taskIds: ["old-task"] },
+  ], plan);
+  assert.equal(waiting.acceptedTaskCount, 1);
+  assert.equal(waiting.awaitingReceipt, 1);
+  assert.equal(waiting.safeToShutdown, false);
+
+  const ready = overnightBatchReport([
+    { id: "new", status: "generating", taskIds: ["new-task"] },
+    { id: "retry", status: "generated", taskIds: ["retry-task"] },
+  ], plan);
+  assert.equal(ready.acceptedTaskCount, 2);
+  assert.equal(ready.awaitingReceipt, 0);
+  assert.equal(ready.safeToShutdown, true);
+});
+
+test("shows the source chapter beside repeated section numbers", () => {
+  assert.equal(batchItemChapterLabel("第02章《标题》_15秒视频提示词.txt"), "第2章");
+  assert.equal(batchItemChapterLabel("07_第七章_提示词.txt"), "第7章");
+  assert.equal(batchItemChapterLabel("第十二章《标题》.txt"), "第十二章");
+});
+
+test("recovers batch rows interrupted while submitting", () => {
+  const items = recoverInterruptedBatchItems([
+    { id: "no-id", status: "submitting", progress: 20, taskIds: [] },
+    { id: "has-id", status: "submitting", taskIds: ["task-1"] },
+    { id: "failed", status: "generation_failed", taskIds: ["task-2"] },
+  ]);
+  assert.equal(items[0].status, "not_submitted");
+  assert.equal(items[0].progress, 0);
+  assert.match(items[0].error, /尚未创建任务/);
+  assert.equal(canBatchSubmit(items[0]), true);
+  assert.equal(items[1].status, "generating");
+  assert.equal(items[2].status, "generation_failed");
+});
+
+test("a new relay attempt cannot be overwritten by the previous failed task", () => {
+  const previous = {
+    id: "section-1",
+    status: "generation_failed",
+    error: "上一轮人像审核失败",
+    taskIds: ["old-task"],
+  };
+  const profile = { id: "pidoi", name: "QIQI", model: "jiuyue111" };
+  const submitting = beginBatchSubmission(previous, profile, 1000);
+  assert.equal(submitting.status, "submitting");
+  assert.equal(submitting.error, "");
+  assert.deepEqual(submitting.taskIds, []);
+  const storedTasks = [{ id: "old-task", status: "failed", error: "上一轮人像审核失败" }];
+  const relatedTasks = submitting.taskIds.map((taskId) => storedTasks.find((task) => task.id === taskId)).filter(Boolean);
+  assert.equal(reconciledBatchTerminalState(submitting, relatedTasks), null);
+
+  const upstreamError = Object.assign(new Error("Upstream service temporarily unavailable"), { status: 502 });
+  const failed = failBatchSubmission(submitting, upstreamError, profile, 2000);
+  assert.equal(failed.status, "failed");
+  assert.equal(failed.error, "Upstream service temporarily unavailable");
+  assert.deepEqual(failed.taskIds, []);
+  assert.equal(failed.lastSubmission.providerName, "QIQI");
+  assert.equal(failed.lastSubmission.model, "jiuyue111");
+  assert.equal(failed.lastSubmission.statusCode, 502);
+  assert.equal(failed.lastSubmission.taskCreated, false);
+});
+
+test("does not leave a batch row generating forever after its task record disappears", () => {
+  const result = reconciledBatchTerminalState({
+    status: "generating",
+    taskIds: ["task-missing"],
+  }, []);
+  assert.equal(result.status, "generation_failed");
+  assert.equal(result.progress, 100);
+  assert.match(result.error, /任务记录已不存在/);
+});
+
+test("uses the stored terminal task state when a batch task finishes", () => {
+  const completed = reconciledBatchTerminalState(
+    { status: "generating", taskIds: ["task-1"] },
+    [{ id: "task-1", status: "completed" }],
+    true,
+  );
+  const failed = reconciledBatchTerminalState(
+    { status: "generating", taskIds: ["task-2"] },
+    [{ id: "task-2", status: "failed", error: "上游生成失败" }],
+  );
+  assert.equal(completed.status, "generated");
+  assert.equal(failed.status, "generation_failed");
+  assert.equal(failed.error, "上游生成失败");
+});
+
+test("treats a completed but rejected batch video as waiting to be regenerated", () => {
+  const result = reconciledBatchTerminalState(
+    { status: "generated", taskIds: ["task-1"] },
+    [{ id: "task-1", status: "completed", reviewStatus: "dissatisfied" }],
+    false,
+  );
+  assert.equal(result.status, "generation_failed");
+  assert.match(result.error, /标记为不可用/);
+});
 
 test("selects only the chapters imported from one TXT source", () => {
   const items = [

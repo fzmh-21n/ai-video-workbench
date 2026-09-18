@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { addTaskProject, assignTasksToProject, loadActiveTaskProject, loadTaskProjects, saveTaskProjects, tasksOnOrAfter } from "../src/taskProjects.js";
+import { addTaskProject, assignTasksToProject, loadActiveTaskProject, loadTaskProjectRatios, loadTaskProjects, removeTaskProject, saveTaskProjectRatios, saveTaskProjects, taskProjectNamesByCreation, taskProjectRatio, tasksAfterProjectDeletion, tasksOnOrAfter, withTaskProjectRatio } from "../src/taskProjects.js";
 
 function memoryStorage() {
   const values = new Map();
@@ -21,6 +21,43 @@ test("persists task projects and the active project", () => {
   saveTaskProjects(["剧本A", "剧本A", "剧本B"], "剧本B", storage);
   assert.deepEqual(loadTaskProjects(storage), ["剧本A", "剧本B"]);
   assert.equal(loadActiveTaskProject(storage), "剧本B");
+});
+
+test("persists a separate video ratio for every task project", () => {
+  const storage = memoryStorage();
+  let ratios = withTaskProjectRatio({}, "横屏项目", "16:9");
+  ratios = withTaskProjectRatio(ratios, "竖屏项目", "9:16");
+  saveTaskProjectRatios(ratios, storage);
+  const restored = loadTaskProjectRatios(storage);
+  assert.equal(taskProjectRatio(restored, "横屏项目"), "16:9");
+  assert.equal(taskProjectRatio(restored, "竖屏项目"), "9:16");
+  assert.equal(taskProjectRatio(restored, "新项目"), "");
+});
+
+test("lists projects by newest creation and removes only the project definition", () => {
+  const projects = ["最早项目", "中间项目", "最新项目"];
+  const historicalTasks = [
+    { projectName: "旧历史项目", createdAtMs: 100 },
+    { projectName: "新历史项目", createdAtMs: 200 },
+  ];
+  assert.deepEqual(taskProjectNamesByCreation(projects, historicalTasks), [
+    "最新项目", "中间项目", "最早项目", "新历史项目", "旧历史项目", "未归类",
+  ]);
+  assert.deepEqual(removeTaskProject(projects, "中间项目"), ["最早项目", "最新项目"]);
+  assert.equal(historicalTasks[0].projectName, "旧历史项目");
+});
+
+test("deleting a project moves its tasks without removing billing data", () => {
+  const tasks = [
+    { id: "completed", projectName: "待删除", status: "completed", model: "m1", cost: 3, downloadedAtMs: 123 },
+    { id: "other", projectName: "保留项目", status: "failed", cost: 0 },
+  ];
+  const result = tasksAfterProjectDeletion(tasks, "待删除");
+  assert.deepEqual(result[0], { ...tasks[0], projectName: "未归类" });
+  assert.deepEqual(result[1], tasks[1]);
+  assert.equal(result[0].cost, 3);
+  assert.equal(result[0].status, "completed");
+  assert.equal(result[0].downloadedAtMs, 123);
 });
 
 test("moves only selected tasks into a task project", () => {

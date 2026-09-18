@@ -18,6 +18,10 @@ export function friendlyUpstreamError(value) {
       pattern: /generateAudio\s+is\s+not\s+supported|audio\s+generation\s+is\s+not\s+supported/i,
       message: "当前模型不支持生成同步音频，请关闭“生成同步音频”后重试",
     },
+    {
+      pattern: /素材超过大小上限|图片.*(?:10\s*MB|大小上限)|image.*(?:too large|size limit)/i,
+      message: "参考图片超过中转大小上限；工作台会自动压缩超过 9MB 的本地图片，请重新预上传后再提交",
+    },
   ];
   const matched = rules.find((rule) => rule.pattern.test(original));
   return matched ? `${matched.message}（原始错误：${original}）` : original;

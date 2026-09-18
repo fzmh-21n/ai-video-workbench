@@ -1,6 +1,8 @@
 export const MAXFORAI_BASE_URL = "https://maxforai.top";
+export const MAXFORAI_FT_933_MODEL = "FT-Seedance 2.0 720p (933全参）";
 
 export const MAXFORAI_VIDEO_MODELS = [
+  MAXFORAI_FT_933_MODEL,
   "wan3.0th",
   "cc-2.0-933",
   "mg-sd431-fast", "mg-sd431-mini", "mg-sd431-Pro", "mg-seedance-2.5",
@@ -14,6 +16,36 @@ export const MAXFORAI_VIDEO_MODELS = [
   "X-miniMAX-H3",
 ];
 
+export function maxforaiModels(liveModels = []) {
+  return [...new Set([
+    ...liveModels.map((model) => String(model || "").trim()).filter(Boolean),
+    ...MAXFORAI_VIDEO_MODELS,
+  ])];
+}
+
+function escapedReference(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+export function maxforaiReferencePrompt(prompt, materials = []) {
+  const counts = { image: 0, video: 0, audio: 0 };
+  let normalized = String(prompt || "");
+  const mappings = [];
+  for (const item of materials) {
+    if (!(item.kind in counts)) continue;
+    counts[item.kind] += 1;
+    const reference = `@${item.kind}${counts[item.kind]}`;
+    const name = String(item.name || `${item.kind}${counts[item.kind]}`).replace(/\.[^.]+$/, "");
+    const aliases = [item.tag, `@${name}`]
+      .map((value) => String(value || "").trim())
+      .filter(Boolean)
+      .sort((left, right) => right.length - left.length);
+    for (const alias of aliases) normalized = normalized.replace(new RegExp(escapedReference(alias), "gi"), reference);
+    mappings.push(`${reference} 是 ${name}`);
+  }
+  return mappings.length ? `${normalized}\n\n参考素材对应关系：\n${mappings.join("；\n")}。` : normalized;
+}
+
 function resolutionFor(model) {
   const value = String(model || "").toLowerCase();
   if (value.includes("minimax_h3") || value.includes("minimax-h3")) return ["2K"];
@@ -25,6 +57,20 @@ function resolutionFor(model) {
 
 export function maxforaiCapability(model) {
   const value = String(model || "").toLowerCase();
+  if (model === MAXFORAI_FT_933_MODEL) {
+    return {
+      images: 9,
+      videos: 3,
+      audios: 3,
+      durations: Array.from({ length: 12 }, (_, index) => index + 4),
+      resolutions: ["720p"],
+      ratios: ["9:16", "16:9", "1:1", "4:3", "3:4"],
+      seed: false,
+      syncAudio: true,
+      syncAudioFixed: false,
+      _sdVersion: "sd20",
+    };
+  }
   if (value === "wan3.0th") {
     return {
       images: 10,
@@ -79,7 +125,7 @@ export function maxforaiVideoPayload(model, input) {
         model,
         prompt: input.prompt,
         duration: input.duration,
-        aspect_ratio: input.aspectRatio,
+        ratio: input.aspectRatio,
         resolution: input.resolution,
       };
   if (/^(?:firefly-seedance2|sd2-431)/i.test(model)) payload.generateAudio = Boolean(input.syncAudio);

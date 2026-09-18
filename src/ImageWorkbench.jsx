@@ -11,6 +11,12 @@ import {
 } from "./imageCatalog.js";
 import { completedImageReferenceIds, imageDownloadFilename, imagePromptWithFixedContent, imageTaskEntries } from "./imageBatch.js";
 import { normalizedTaskProgress } from "./taskProgress.js";
+import {
+  IMAGE_DELETED_TASK_IDS_KEY,
+  loadDeletedIds,
+  rememberDeletedIds,
+  withoutDeletedIds,
+} from "./deletionStore.js";
 
 const ACTIVE_PROVIDER_KEY = "image-workbench-active-provider-v1";
 const MODELS_KEY = "image-workbench-models-v1";
@@ -66,7 +72,8 @@ export default function ImageWorkbench({ onVideoMode, onLogout }) {
   const [quality, setQuality] = useState("auto");
   const [references, setReferences] = useState([]);
   const [dragActive, setDragActive] = useState(false);
-  const [tasks, setTasks] = useState(() => loadJson(TASKS_KEY, []));
+  const deletedTaskIdsRef = useRef(new Set(loadDeletedIds(IMAGE_DELETED_TASK_IDS_KEY)));
+  const [tasks, setTasks] = useState(() => withoutDeletedIds(loadJson(TASKS_KEY, []), [...deletedTaskIdsRef.current]));
   const tasksRef = useRef(tasks);
   const [submitting, setSubmitting] = useState(false);
   const [downloadingBatchId, setDownloadingBatchId] = useState(null);
@@ -108,6 +115,36 @@ export default function ImageWorkbench({ onVideoMode, onLogout }) {
     tasksRef.current = tasks;
     localStorage.setItem(TASKS_KEY, JSON.stringify(tasks));
   }, [tasks]);
+
+  useEffect(() => {
+    if (!apiKey.trim()) return undefined;
+    let cancelled = false;
+    fetch("/api/image-tasks/recent", {
+      headers: profileHeaders(activeProfile, apiKey.trim(), model),
+    })
+      .then(async (response) => {
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(body.message || "图片任务同步失败");
+        return Array.isArray(body.tasks) ? body.tasks : [];
+      })
+      .then((recovered) => {
+        if (cancelled || !recovered.length) return;
+        setTasks((current) => {
+          const known = new Set(current.map((task) => task.id));
+          const missing = recovered
+            .filter((task) => !deletedTaskIdsRef.current.has(String(task?.id || "")))
+            .filter((task) => task?.id && !known.has(task.id))
+            .map((task) => ({
+              ...task,
+              providerId: activeProfile.id,
+              providerName: activeProfile.name,
+            }));
+          return missing.length ? [...missing, ...current] : current;
+        });
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [activeProfile.id, apiKey, model]);
 
   useEffect(() => { referencesRef.current = references; }, [references]);
   useEffect(() => { imageBlobRef.current = imageBlob; }, [imageBlob]);
@@ -338,6 +375,8 @@ export default function ImageWorkbench({ onVideoMode, onLogout }) {
       URL.revokeObjectURL(imageBlob.url);
       setImageBlob(null);
     }
+    deletedTaskIdsRef.current.add(String(task.id));
+    rememberDeletedIds(IMAGE_DELETED_TASK_IDS_KEY, [task.id]);
     setTasks((current) => current.filter((item) => item.id !== task.id));
   }
 

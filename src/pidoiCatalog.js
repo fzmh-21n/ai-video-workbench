@@ -1,6 +1,8 @@
 export const PIDOI_BASE_URL = "https://pidoi.com";
 export const PIDOI_MODELS = [
   "sora-v3-933-pro",
+  "jiuyue111",
+  "sd2.5-900",
   "tejiasd",
   "sd-2.0-931-720p",
   "sd-2.0-fast-720p",
@@ -23,7 +25,21 @@ export function pidoiCapability(model = "tejiasd") {
       _preserveLimits: true,
     };
   }
-  if (model === "sora-v3-933-pro") {
+  if (model === "sd2.5-900") {
+    return {
+      images: 9,
+      videos: 0,
+      audios: 0,
+      durations: [30],
+      resolutions: ["720p"],
+      ratios: ["16:9", "9:16", "4:3", "3:4", "1:1", "21:9"],
+      seed: false,
+      syncAudio: false,
+      syncAudioFixed: true,
+      _sdVersion: "sd25",
+    };
+  }
+  if (model === "sora-v3-933-pro" || model === "jiuyue111") {
     return {
       images: 9,
       videos: 3,
@@ -83,6 +99,18 @@ export function pidoiVideoPayload(model, input) {
   const images = urls("image");
   const videos = urls("video");
   const audios = urls("audio");
+  if (model === "sd2.5-900") {
+    const payload = {
+      model: "sd2.5-900",
+      prompt: input.prompt,
+      aspect_ratio: input.aspectRatio,
+      resolution: "720p",
+      seconds: "30",
+    };
+    if (images.length) payload.image_url = images[0];
+    if (images.length > 1) payload.reference_image_urls = images.slice(1, 9);
+    return payload;
+  }
   if (model !== "tejiasd") {
     const payload = {
       model,
@@ -115,6 +143,19 @@ export function pidoiVideoPayload(model, input) {
 }
 
 export function pidoiLimitIssue(model, materials = [], duration) {
+  if (model === "sd2.5-900") {
+    const counts = materials.reduce((result, item) => {
+      if (["image", "video", "audio"].includes(item?.kind)) result[item.kind] += 1;
+      return result;
+    }, { image: 0, video: 0, audio: 0 });
+    if (Number(duration) !== 30) return `${model} 当前只支持 30 秒`;
+    if (counts.image > 9) return `${model} 图片参考最多 9 张，当前为 ${counts.image} 张`;
+    if (counts.video) return `${model} 不支持视频参考，请删除已选择的视频素材`;
+    if (counts.audio) return `${model} 不支持音频参考，请删除已选择的音频素材`;
+    if (materials.some((item) => item?.kind === "image" && item?.subType === "last_frame"))
+      return `${model} 不支持尾帧图，请改为普通参考图或删除尾帧素材`;
+    return "";
+  }
   if (model === "wan30-720p") {
     const counts = materials.reduce((result, item) => {
       if (["image", "video", "audio"].includes(item?.kind)) result[item.kind] += 1;
@@ -153,7 +194,7 @@ export function pidoiLimitIssue(model, materials = [], duration) {
     }
     return "";
   }
-  if (model !== "sora-v3-933-pro") return "";
+  if (model !== "sora-v3-933-pro" && model !== "jiuyue111") return "";
   const capability = pidoiCapability(model);
   if (!capability.durations.includes(Number(duration))) return `${model} 当前只支持 15 秒`;
   if (materials.length > 12) return `${model} 单次请求的图片、视频和音频合计最多 12 个，当前为 ${materials.length} 个`;

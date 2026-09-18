@@ -152,7 +152,7 @@ export function batchItemTasks(item, storedTasks) {
 
 export function batchItemDownloadCandidates(item, storedTasks) {
   return batchItemTasks(item, storedTasks)
-    .filter((task) => task.status === "completed")
+    .filter((task) => task.status === "completed" && task.reviewStatus !== "dissatisfied")
     .sort((left, right) => (
       Number(Boolean(right?.downloadedAtMs)) - Number(Boolean(left?.downloadedAtMs))
       || Number(Boolean(right?.sourceVideoUrl)) - Number(Boolean(left?.sourceVideoUrl))

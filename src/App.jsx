@@ -20,6 +20,7 @@ import {
   allTasks,
   getFailedTasks,
   getPendingTasks,
+  isWorkbenchAuthFailure,
   listTasks,
   markTaskDownloaded,
   projectNames as getTaskProjectNames,
@@ -35,9 +36,16 @@ import {
   saveCredentials,
 } from "./credentialStore.js";
 import { normalizeApiKey } from "./apiKey.js";
-import { normalizedTaskProgress } from "./taskProgress.js";
+import { normalizedTaskGroupProgress, normalizedTaskProgress } from "./taskProgress.js";
 import { downloadTaskBuckets, orderedDownloadFilename } from "./taskDownload.js";
 import { taskContentRequestUrl } from "./taskContent.js";
+import { batchTimeline, taskTimeline } from "./taskTimeline.js";
+import {
+  VIDEO_DELETED_TASK_IDS_KEY,
+  loadDeletedIds,
+  rememberDeletedIds,
+  withoutDeletedIds,
+} from "./deletionStore.js";
 import { syncAudioForProfile, withSyncAudioPreference } from "./syncAudioPreference.js";
 import { loadFixedContentByVersion, withFixedContentForVersion } from "./fixedContentStore.js";
 import { reusableAssetFor, taskReuseSnapshot } from "./taskReuse.js";
@@ -57,8 +65,14 @@ import {
   addTaskProject,
   assignTasksToProject,
   loadActiveTaskProject,
+  loadTaskProjectRatios,
   loadTaskProjects,
+  removeTaskProject,
+  saveTaskProjectRatios,
   saveTaskProjects,
+  taskProjectRatio,
+  tasksAfterProjectDeletion,
+  withTaskProjectRatio,
 } from "./taskProjects.js";
 import {
   clearDiagnostics,
@@ -170,8 +184,8 @@ function normalizeModels(payload, adapter) {
   if (adapter === "lwaigc" && Array.isArray(payload?.models)) {
     return [...new Set([...FALLBACK_MODELS.lwaigc.slice(0, 2), ...values])];
   }
-  if (adapter === "fmgo") {
-    return [...new Set([...values, ...FALLBACK_MODELS.fmgo])];
+  if (adapter === "fmgo" || adapter === "pidoi") {
+    return [...new Set([...values, ...FALLBACK_MODELS[adapter]])];
   }
   return values.length ? values : FALLBACK_MODELS[adapter] || [];
 }
@@ -283,6 +297,8 @@ function Workbench({ onImageMode, onLogout }) {
   const [taskProjectOptions, setTaskProjectOptions] = useState([]);
   const [taskProjects, setTaskProjects] = useState(loadTaskProjects);
   const [activeTaskProject, setActiveTaskProject] = useState(loadActiveTaskProject);
+  const [taskProjectRatios, setTaskProjectRatios] = useState(loadTaskProjectRatios);
+  const [ratioProjectPrompt, setRatioProjectPrompt] = useState(null);
   const [selectedTaskIds, setSelectedTaskIds] = useState([]);
   const [selectedTargetProject, setSelectedTargetProject] = useState(loadActiveTaskProject);
   const [taskQuery, setTaskQuery] = useState("");
@@ -302,7 +318,7 @@ function Workbench({ onImageMode, onLogout }) {
   const [references, setReferences] = useState([]);
   const [duration, setDuration] = useState(15);
   const [resolution, setResolution] = useState("720p");
-  const [ratio, setRatio] = useState("16:9");
+  const [ratio, setRatio] = useState(() => taskProjectRatio(taskProjectRatios, activeTaskProject) || "16:9");
   const [seed, setSeed] = useState("");
   const [quantity, setQuantity] = useState(1);
   const [syncAudioPreferences, setSyncAudioPreferences] = useState(
@@ -339,7 +355,7 @@ function Workbench({ onImageMode, onLogout }) {
   const promptInput = useRef(null);
   const profilesRef = useRef(profiles);
   const pollingRef = useRef(false);
-  const deletedTaskIdsRef = useRef(new Set());
+  const deletedTaskIdsRef = useRef(new Set(loadDeletedIds(VIDEO_DELETED_TASK_IDS_KEY)));
 
   const activeProfile =
     profiles.find((profile) => profile.id === activeId) || profiles[0];
@@ -455,11 +471,13 @@ function Workbench({ onImageMode, onLogout }) {
     let cancelled = false;
     (async () => {
       try {
-        const legacyTasks = loadJson(TASK_KEY, []);
+        const deletedIds = [...deletedTaskIdsRef.current];
+        const legacyTasks = withoutDeletedIds(loadJson(TASK_KEY, []), deletedIds);
         if (Array.isArray(legacyTasks) && legacyTasks.length) {
           await putTasks(legacyTasks);
-          localStorage.removeItem(TASK_KEY);
         }
+        localStorage.removeItem(TASK_KEY);
+        await removeStoredTasks(deletedIds);
         if (!cancelled) setTaskDatabaseReady(true);
       } catch (error) {
         if (!cancelled) setNotice(error.message || "浏览器任务数据库初始化失败");
@@ -509,8 +527,22 @@ function Workbench({ onImageMode, onLogout }) {
     setDuration(preferredDurationForVersion(capability, sdVersion));
     if (!capability.resolutions.includes(resolution))
       setResolution(capability.resolutions[0]);
-    if (!capability.ratios.includes(ratio)) setRatio(capability.ratios[0]);
-  }, [activeProfile.id, activeProfile.model, resolution]);
+    const preferredProjectRatio = taskProjectRatio(taskProjectRatios, activeTaskProject);
+    if (preferredProjectRatio && capability.ratios.includes(preferredProjectRatio)) {
+      if (ratio !== preferredProjectRatio) setRatio(preferredProjectRatio);
+    } else if (!capability.ratios.includes(ratio)) {
+      setRatio(capability.ratios[0]);
+    }
+  }, [activeProfile.id, activeProfile.model, resolution, activeTaskProject, taskProjectRatios]);
+
+  function changeProjectRatio(value) {
+    setRatio(value);
+    setTaskProjectRatios((current) => {
+      const next = withTaskProjectRatio(current, activeTaskProject, value);
+      saveTaskProjectRatios(next);
+      return next;
+    });
+  }
 
   function keyFor(profile) {
     return readCredentials(profile.id).apiKey;
@@ -599,17 +631,20 @@ function Workbench({ onImageMode, onLogout }) {
           && genericFailure
           && Number(task.meaiccFailureChecks || 0) < 30;
       });
-      const pending = [...activePending, ...recoverableMeaicc].slice(0, 10);
+      const recoverableAuthFailures = failedCandidates.filter((task) => isWorkbenchAuthFailure(task.error));
+      const pending = [...activePending, ...recoverableMeaicc, ...recoverableAuthFailures]
+        .filter((task, index, tasks) => tasks.findIndex((item) => item.id === task.id) === index)
+        .slice(0, 10);
       if (!pending.length) return;
       pollingRef.current = true;
       try {
-        const updates = await Promise.all(
+        await Promise.all(
           pending.map(async (task) => {
             const profile = profilesRef.current.find((item) => item.id === task.profileId);
             if (!profile || !keyFor(profile)) return null;
             if (Number(task.nextPollAt) > Date.now()) return null;
             const nextPollAt = Date.now() + pollDelayForAdapter(profile.adapter);
-            try {
+            const update = await (async () => { try {
               const response = await fetch(`/api/tasks/${encodeURIComponent(task.id)}`, {
                 headers: {
                   ...headersFor(profile),
@@ -641,7 +676,7 @@ function Workbench({ onImageMode, onLogout }) {
                   }
                   return { ...body, meaiccFailureChecks: checks, networkWarning: "", nextPollAt };
                 }
-                return { ...body, meaiccFailureChecks: 0, networkWarning: "", nextPollAt };
+                return { ...body, error: body.error || "", meaiccFailureChecks: 0, networkWarning: "", nextPollAt };
               }
               if (TRANSIENT_NETWORK_STATUSES.has(response.status)) {
                 return {
@@ -649,6 +684,15 @@ function Workbench({ onImageMode, onLogout }) {
                   transient: true,
                   nextPollAt,
                   networkWarning: `网络暂时不稳定（HTTP ${response.status}），任务仍在保留并会自动重试`,
+                };
+              }
+              if (response.status === 401 || isWorkbenchAuthFailure(body.message)) {
+                setAuthStatus("anonymous");
+                return {
+                  id: task.id,
+                  transient: true,
+                  nextPollAt,
+                  networkWarning: "工作台登录已失效；重新登录后会继续查询原任务，不会重新提交或重复扣费",
                 };
               }
               if (response.status === 409 && /另一把 API Key/.test(String(body.message || ""))) {
@@ -666,24 +710,16 @@ function Workbench({ onImageMode, onLogout }) {
                 nextPollAt,
                 networkWarning: "网络暂时不可用，任务仍在保留并会自动重试",
               };
-            }
+            } })();
+            if (deletedTaskIdsRef.current.has(task.id) || !update) return null;
+            const changed = update.transient
+              ? { ...task, nextPollAt: update.nextPollAt, networkWarning: update.networkWarning }
+              : { ...task, ...update, id: task.id, networkWarning: "", title: task.title, profileId: task.profileId };
+            await putPolledTaskUpdates([changed]);
+            setTaskRefreshVersion((value) => value + 1);
+            return changed;
           }),
         );
-        const changed = pending
-          .map((task) => {
-            if (deletedTaskIdsRef.current.has(task.id)) return null;
-            const update = updates.find((item) => item?.id === task.id);
-            if (!update) return null;
-            if (update.transient) {
-              return { ...task, nextPollAt: update.nextPollAt, networkWarning: update.networkWarning };
-            }
-            return { ...task, ...update, networkWarning: "", title: task.title, profileId: task.profileId };
-          })
-          .filter(Boolean);
-        if (changed.length) {
-          await putPolledTaskUpdates(changed);
-          setTaskRefreshVersion((value) => value + 1);
-        }
       } finally {
         pollingRef.current = false;
       }
@@ -766,16 +802,22 @@ function Workbench({ onImageMode, onLogout }) {
       return;
     }
     const remaining = profiles.filter((item) => item.id !== draft.id);
-    if (DEFAULT_PROFILES.some((profile) => profile.id === draft.id)) {
+    const draftBaseUrl = String(draft.baseUrl || "").replace(/\/$/, "");
+    const deletedBuiltIns = DEFAULT_PROFILES.filter((profile) => (
+      profile.id === draft.id || String(profile.baseUrl || "").replace(/\/$/, "") === draftBaseUrl
+    ));
+    if (deletedBuiltIns.length) {
       const dismissed = new Set(loadJson(DISMISSED_BUILTIN_PROFILES_KEY, []));
-      dismissed.add(draft.id);
+      deletedBuiltIns.forEach((profile) => dismissed.add(profile.id));
       localStorage.setItem(DISMISSED_BUILTIN_PROFILES_KEY, JSON.stringify([...dismissed]));
     }
     clearCredentials(draft.id);
+    localStorage.setItem(PROFILE_KEY, JSON.stringify(remaining));
     setProfiles(remaining);
     const next = remaining[0];
     const credentials = readCredentials(next.id);
     setActiveId(next.id);
+    localStorage.setItem(ACTIVE_KEY, next.id);
     setDraft({ ...next });
     setDraftKey(credentials.apiKey);
     setDraftUploadKey(credentials.mediaKey);
@@ -1309,14 +1351,62 @@ function Workbench({ onImageMode, onLogout }) {
     setTaskProjects(next);
     setActiveTaskProject(createdName);
     setTaskProjectFilter(createdName);
-    setNotice(`已新建并切换到任务项目“${createdName}”，之后提交的单条和批量任务都会归入该项目`);
+    setRatioProjectPrompt({ projectName: createdName, created: true });
+    setNotice(`已新建并切换到任务项目“${createdName}”，请选择这个项目的视频比例`);
   }
 
   function selectTaskProject(name) {
     const normalized = String(name || UNCLASSIFIED_PROJECT);
     setActiveTaskProject(normalized);
     setTaskProjectFilter(normalized);
-    setNotice(`已切换到任务项目“${normalized}”，之后新提交的任务都会归入该项目`);
+    const savedRatio = taskProjectRatio(taskProjectRatios, normalized);
+    if (savedRatio) {
+      setRatio(savedRatio);
+      setNotice(`已切换到任务项目“${normalized}”，公共比例已恢复为 ${savedRatio}`);
+    } else {
+      setRatioProjectPrompt({ projectName: normalized, created: false });
+      setNotice(`已切换到任务项目“${normalized}”，请先选择这个项目的视频比例`);
+    }
+  }
+
+  function chooseTaskProjectRatio(value) {
+    const projectName = ratioProjectPrompt?.projectName || activeTaskProject;
+    const next = withTaskProjectRatio(taskProjectRatios, projectName, value);
+    setTaskProjectRatios(next);
+    saveTaskProjectRatios(next);
+    setRatio(capability.ratios.includes(value) ? value : capability.ratios[0]);
+    setRatioProjectPrompt(null);
+    setNotice(capability.ratios.includes(value)
+      ? `项目“${projectName}”已固定为 ${value}；以后重开工作台或切回该项目都会自动恢复`
+      : `项目“${projectName}”已记住 ${value}；当前模型不支持该比例，暂时使用 ${capability.ratios[0]}`);
+  }
+
+  async function deleteTaskProject(name) {
+    const normalized = String(name || "").trim();
+    if (!normalized || normalized === UNCLASSIFIED_PROJECT) throw new Error("“未归类”不能删除");
+    const stored = await allTasks();
+    const changed = tasksAfterProjectDeletion(stored, normalized)
+      .filter((task, index) => task.projectName !== stored[index].projectName);
+    if (changed.length) await putTasks(changed);
+    const remainingProjects = removeTaskProject(taskProjects, normalized);
+    const nextActiveProject = activeTaskProject === normalized ? UNCLASSIFIED_PROJECT : activeTaskProject;
+    saveTaskProjects(remainingProjects, nextActiveProject);
+    setTaskProjects(remainingProjects);
+    setTaskProjectRatios((current) => {
+      const next = { ...current };
+      delete next[normalized];
+      saveTaskProjectRatios(next);
+      return next;
+    });
+    if (activeTaskProject === normalized) {
+      setActiveTaskProject(UNCLASSIFIED_PROJECT);
+      setRatio(taskProjectRatio(taskProjectRatios, UNCLASSIFIED_PROJECT) || "16:9");
+    }
+    setTaskProjectFilter((current) => current === normalized ? UNCLASSIFIED_PROJECT : current);
+    setSelectedTargetProject((current) => current === normalized ? UNCLASSIFIED_PROJECT : current);
+    setTaskRefreshVersion((value) => value + 1);
+    setNotice(`项目“${normalized}”已删除；${changed.length} 条任务已移到“未归类”，任务记录和计费数据均已保留`);
+    return changed.length;
   }
 
   function toggleTaskSelection(taskId) {
@@ -1784,13 +1874,13 @@ function Workbench({ onImageMode, onLogout }) {
   async function deleteTask(task) {
     if (videoBlob?.taskId === task.id) setVideoBlob(null);
     deletedTaskIdsRef.current.add(task.id);
+    rememberDeletedIds(VIDEO_DELETED_TASK_IDS_KEY, [task.id]);
     try {
       await removeStoredTask(task.id);
       setTasks((current) => current.filter((item) => item.id !== task.id));
       setExpandedTaskId((current) => (current === task.id ? null : current));
       setTaskRefreshVersion((current) => current + 1);
     } catch (error) {
-      deletedTaskIdsRef.current.delete(task.id);
       setNotice(error.message || "删除任务失败");
     }
   }
@@ -1805,6 +1895,7 @@ function Workbench({ onImageMode, onLogout }) {
     if (!window.confirm(`确定删除整个批次“${batch.title}”及其 ${taskIds.length} 条任务记录吗？${activeWarning}\n此操作无法撤销。`)) return;
 
     taskIds.forEach((id) => deletedTaskIdsRef.current.add(id));
+    rememberDeletedIds(VIDEO_DELETED_TASK_IDS_KEY, taskIds);
     try {
       await removeStoredTasks(taskIds);
       if (taskIds.includes(videoBlob?.taskId)) setVideoBlob(null);
@@ -1814,7 +1905,6 @@ function Workbench({ onImageMode, onLogout }) {
       setTaskRefreshVersion((current) => current + 1);
       setNotice(`已删除批次“${batch.title}”及其 ${taskIds.length} 条本机任务记录`);
     } catch (error) {
-      taskIds.forEach((id) => deletedTaskIdsRef.current.delete(id));
       setNotice(error.message || "删除批量任务失败");
     }
   }
@@ -1933,6 +2023,8 @@ function Workbench({ onImageMode, onLogout }) {
                 setTaskProjectFilter(activeTaskProject || UNCLASSIFIED_PROJECT);
                 setTaskRefreshVersion((value) => value + 1);
               }}
+              taskDatabaseReady={taskDatabaseReady}
+              taskRefreshVersion={taskRefreshVersion}
               projectAssets={projectAssets}
               projectNeedsPermission={projectNeedsPermission}
               projectName={projectName}
@@ -1945,7 +2037,7 @@ function Workbench({ onImageMode, onLogout }) {
               setDuration={setDuration}
               setFixedContent={setFixedContent}
               setQuantity={setQuantity}
-              setRatio={setRatio}
+              setRatio={changeProjectRatio}
               setResolution={setResolution}
               setSeed={setSeed}
               setSyncAudio={setSyncAudio}
@@ -2139,7 +2231,7 @@ function Workbench({ onImageMode, onLogout }) {
             <div className="settings-grid">
               <label><span>时长</span><select value={duration} onChange={(event) => setDuration(event.target.value === "auto" ? "auto" : Number(event.target.value))}>{capability.durations.map((value) => <option key={value} value={value}>{value === "auto" ? "自动" : `${value} 秒`}</option>)}</select></label>
               <label><span>清晰度</span><select value={resolution} onChange={(event) => setResolution(event.target.value)}>{capability.resolutions.map((value) => <option key={value}>{value}</option>)}</select></label>
-              <label><span>画面比例</span><select value={ratio} onChange={(event) => setRatio(event.target.value)}>{capability.ratios.map((value) => <option key={value}>{value}</option>)}</select></label>
+              <label><span>画面比例</span><select value={ratio} onChange={(event) => changeProjectRatio(event.target.value)}>{capability.ratios.map((value) => <option key={value}>{value}</option>)}</select></label>
               <label><span>随机种子</span><input value={seed} onChange={(event) => setSeed(event.target.value)} placeholder={capability.seed ? "空 = 随机" : "当前模型不支持"} disabled={!capability.seed} /></label>
               <label><span>生成数量</span><select value={quantity} onChange={(event) => setQuantity(Number(event.target.value))}>{[1, 2, 3, 4].map((value) => <option key={value}>{value}</option>)}</select></label>
             </div>
@@ -2209,9 +2301,8 @@ function Workbench({ onImageMode, onLogout }) {
                 const downloadedCount = entry.tasks.filter((task) => task.downloadedAtMs).length;
                 const failedCount = entry.tasks.filter((task) => task.status === "failed").length;
                 const dissatisfiedCount = entry.tasks.filter((task) => task.reviewStatus === "dissatisfied").length;
-                const progress = entry.tasks.length
-                  ? Math.round(entry.tasks.reduce((total, task) => total + normalizedTaskProgress(task.status, task.progress), 0) / entry.tasks.length)
-                  : 0;
+                const progress = normalizedTaskGroupProgress(entry.tasks);
+                const times = batchTimeline(entry.tasks);
                 return (
                   <article className={`batch-task-group ${batchExpanded ? "expanded" : ""}`} key={entry.id}>
                     <div className="batch-task-group-head" onClick={() => setExpandedBatchId(batchExpanded ? null : entry.id)}>
@@ -2238,6 +2329,7 @@ function Workbench({ onImageMode, onLogout }) {
                         {entry.tasks.map((task) => {
                           const childExpanded = expandedTaskId === task.id;
                           const shownProgress = normalizedTaskProgress(task.status, task.progress);
+                          const times = taskTimeline(task);
                           return (
                             <article className={`task-card batch-child-task ${childExpanded ? "expanded" : ""}`} key={task.id} onClick={() => toggleTask(task)}>
                               <div className="task-topline"><label className="task-select-box" onClick={(event) => event.stopPropagation()}><input type="checkbox" checked={selectedTaskIds.includes(task.id)} onChange={() => toggleTaskSelection(task.id)} /></label><code>#{task.title || task.id}</code><span className={`task-status ${task.status}`}>● {statusLabel(task.status)}</span>{task.downloadedAtMs && <span className="task-download-badge">✓ 已下载</span>}</div>
@@ -2259,7 +2351,7 @@ function Workbench({ onImageMode, onLogout }) {
                                 </div>
                               )}
                               {task.retryOfTaskId && <p className="task-regeneration-link">由上一条不满意视频重新生成</p>}
-                              {childExpanded && (
+                               {childExpanded && (
                                 <div className="task-details" onClick={(event) => event.stopPropagation()}>
                                   {task.status === "completed" ? (
                                     videoBlob?.taskId === task.id
@@ -2268,18 +2360,21 @@ function Workbench({ onImageMode, onLogout }) {
                                   ) : <p>{task.status === "failed" ? "该任务生成失败" : "视频生成完成后可在这里播放"}</p>}
                                   <details><summary>查看提示词</summary><pre>{task.prompt}</pre></details>
                                 </div>
-                              )}
-                            </article>
+                               )}
+                               <div className="task-time-row"><span>提交时间：{times.submitted}</span><span>生成时间：{times.generated}</span></div>
+                             </article>
                           );
                         })}
                       </div>
                     )}
+                    <div className="task-time-row batch-task-time-row"><span>提交时间：{times.submitted}</span><span>生成时间：{times.generated}</span></div>
                   </article>
                 );
               }
               const task = entry.task;
               const expanded = expandedTaskId === task.id;
               const shownProgress = normalizedTaskProgress(task.status, task.progress);
+              const times = taskTimeline(task);
               return (
                 <article className={`task-card ${expanded ? "expanded" : ""}`} key={task.id} onClick={() => toggleTask(task)}>
                   <div className="task-topline">
@@ -2310,7 +2405,6 @@ function Workbench({ onImageMode, onLogout }) {
                   {task.cost != null && <p>本次消耗：{task.cost}</p>}
                   <p>项目：{task.projectName || "未归类"}</p>
                   <p>中转站：{task.providerName} · 模型：{task.model}</p>
-                  <p>创建：{task.createdAt || "—"}{task.completedAt ? ` · 完成：${task.completedAt}` : ""}</p>
                   {task.error && <p className="task-error">错误：{task.error}</p>}
                   {task.networkWarning && <p className="task-network-warning">{task.networkWarning}</p>}
                   {task.retryOfTaskId && <p className="task-regeneration-link">由上一条不满意视频重新生成</p>}
@@ -2324,6 +2418,7 @@ function Workbench({ onImageMode, onLogout }) {
                       <details><summary>查看提示词</summary><pre>{task.prompt}</pre></details>
                     </div>
                   )}
+                  <div className="task-time-row"><span>提交时间：{times.submitted}</span><span>生成时间：{times.generated}</span></div>
                 </article>
               );
             })}
@@ -2347,7 +2442,7 @@ function Workbench({ onImageMode, onLogout }) {
               <div className="config-form">
                 <label><span>配置名称</span><input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="例如：主力 API" /></label>
                 <label><span>Base URL</span><input value={draft.baseUrl} onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value, adapter: inferAdapter(event.target.value) })} placeholder="https://api.example.com" /></label>
-                <label><span>接口类型</span><select value={draft.adapter} onChange={(event) => setDraft({ ...draft, adapter: event.target.value })}><option value="fmgo">FMGO / 飞猫</option><option value="paipu">Paipu / Lec</option><option value="viralee">ViralE</option><option value="canseedream">CanSeeDream / 看见梦想</option><option value="lwaigc">LWAIGC 官方统一接口</option><option value="meaicc">MEAICC / 林木森AI</option><option value="ziyuai">Ziyu AI / 紫域AI</option><option value="globalaiopc">GlobalAiOpc / 全球AI</option><option value="maxforai">MaxForAI</option><option value="clmm">CLMM Mall</option><option value="pidoi">Pidoi</option><option value="aiyrx">AIYRX</option><option value="seedancevideo">Seedance 视频 / 772808</option><option value="newapi">New API 通用</option></select></label>
+                <label><span>接口类型</span><select value={draft.adapter} onChange={(event) => setDraft({ ...draft, adapter: event.target.value })}><option value="fmgo">FMGO / 飞猫</option><option value="paipu">Paipu / Lec</option><option value="viralee">ViralE</option><option value="canseedream">CanSeeDream / 看见梦想</option><option value="lwaigc">LWAIGC 官方统一接口</option><option value="meaicc">MEAICC / 林木森AI</option><option value="ziyuai">Ziyu AI / 紫域AI</option><option value="globalaiopc">GlobalAiOpc / 全球AI</option><option value="maxforai">MaxForAI</option><option value="clmm">CLMM Mall</option><option value="pidoi">Pidoi</option><option value="aiyrx">AIYRX</option><option value="unmau">Unmau New API</option><option value="seedancevideo">Seedance 视频 / 772808</option><option value="newapi">New API 通用</option></select></label>
                 <label><span>API Key</span><input type="password" value={draftKey} onChange={(event) => setDraftKey(event.target.value)} placeholder="sk-••••••••" /><small>{rememberKey ? "将保存在此浏览器；公共电脑请勿启用。" : "仅保存在当前浏览器会话，不写入源码。"}</small></label>
                 <label className="remember-key-row"><input type="checkbox" checked={rememberKey} onChange={(event) => setRememberKey(event.target.checked)} /><span>在这台浏览器记住当前中转站的 Key</span></label>
                 <label>
@@ -2397,6 +2492,7 @@ function Workbench({ onImageMode, onLogout }) {
           activeProject={activeTaskProject}
           onClose={() => setTaskProjectOpen(false)}
           onCreate={createTaskProject}
+          onDelete={deleteTaskProject}
           onSelect={selectTaskProject}
           onTasksChanged={(count, projectName) => {
             setTaskRefreshVersion((value) => value + 1);
@@ -2404,6 +2500,19 @@ function Workbench({ onImageMode, onLogout }) {
           }}
           projects={taskProjects}
         />
+      )}
+      {ratioProjectPrompt && (
+        <div className="modal-backdrop">
+          <section className="project-ratio-dialog" role="dialog" aria-modal="true" aria-label="选择项目视频比例">
+            <span>PROJECT RATIO</span>
+            <h2>选择“{ratioProjectPrompt.projectName}”的视频比例</h2>
+            <p>保存后，单条和批量的公共比例都会跟随这个项目；重开工作台或切回项目时自动恢复。</p>
+            <div className="project-ratio-options">
+              <button className="primary-button" onClick={() => chooseTaskProjectRatio("16:9")}><strong>16:9</strong><small>横屏视频</small></button>
+              <button className="primary-button" onClick={() => chooseTaskProjectRatio("9:16")}><strong>9:16</strong><small>竖屏视频</small></button>
+            </div>
+          </section>
+        </div>
       )}
     </main>
   );

@@ -73,6 +73,7 @@ import {
   lwaigcCapability,
   lwaigcLimitIssue,
   lwaigcPromptIssue,
+  lwaigcReferencePrompt,
   lwaigcVideoPayload,
 } from "../src/lwaigcCatalog.js";
 
@@ -102,15 +103,17 @@ test("includes LWAIGC as a built-in OpenAI-compatible provider", () => {
     mediaUploadUrl: "https://ai.lwaigc.cn/v1/assets",
   });
   assert.equal(inferAdapter(profile.baseUrl), "lwaigc");
-  assert.equal(LWAIGC_VIDEO_MODELS.length, 37);
+  assert.equal(LWAIGC_VIDEO_MODELS.length, 39);
 });
 
-test("defines the four documented LWAIGC WF Seedance 2.0 models", () => {
+test("defines the documented LWAIGC WF and FT Seedance 2.0 models", () => {
   const expected = {
     "wf-sd2.0-fast-cf": [4, 15],
     "wf-sd2.0-pro-cf": [4, 15],
     "wf-sd2.0-v1": [5, 15],
     "wf-sd2.0-v2": [4, 15],
+    "ft-sd2.0-v1": [4, 15],
+    "ft-sd2.0-v2": [4, 15],
   };
 
   for (const [model, durationBounds] of Object.entries(expected)) {
@@ -131,7 +134,7 @@ test("defines the four documented LWAIGC WF Seedance 2.0 models", () => {
   }
 });
 
-test("builds WF Seedance 2.0 requests without resolution and enforces the V2 prompt limit", () => {
+test("builds WF and FT Seedance 2.0 requests without resolution and enforces the V2 prompt limit", () => {
   const input = {
     prompt: "测试提示词",
     duration: 10,
@@ -152,7 +155,35 @@ test("builds WF Seedance 2.0 requests without resolution and enforces the V2 pro
   assert.match(lwaigcLimitIssue("wf-sd2.0-v1", [], 4), /不支持 4 秒/);
   assert.equal(lwaigcPromptIssue("wf-sd2.0-v2", "字".repeat(2500)), "");
   assert.match(lwaigcPromptIssue("wf-sd2.0-v2", "字".repeat(2501)), /最多 2500 字/);
+  const ftPayload = lwaigcVideoPayload("ft-sd2.0-v2", input, "client_ft_sd20");
+  assert.deepEqual(ftPayload, {
+    model: "ft-sd2.0-v2",
+    client_task_id: "client_ft_sd20",
+    prompt: "测试提示词",
+    seconds: 10,
+    aspect_ratio: "16:9",
+    image_urls: ["https://example.com/image-0.jpg"],
+    video_urls: ["https://example.com/video-0.mp4"],
+    audio_urls: ["https://example.com/audio-0.mp3"],
+  });
+  assert.equal(lwaigcPromptIssue("ft-sd2.0-v2", "字".repeat(2501)), "");
   assert.equal(lwaigcPromptIssue("wf-sd2.0-pro-cf", "字".repeat(2501)), "");
+});
+
+test("puts LWAIGC Chinese material declarations at the start of the prompt", () => {
+  const prompt = lwaigcReferencePrompt(
+    "人物参考 @Image1=002_苏晏_基建劳作版，场景参考 @Image2 = 015_部落规模化暖棚区_四视角，声音参考 @Audio1=声音14。",
+    [
+      { kind: "image", tag: "@Image1", name: "002_苏晏_基建劳作版.png" },
+      { kind: "image", tag: "@Image2", name: "015_部落规模化暖棚区_四视角.png" },
+      { kind: "audio", tag: "@Audio1", name: "声音14.wav" },
+    ],
+  );
+
+  assert.ok(prompt.startsWith("@图1是002_苏晏_基建劳作版，@图2是015_部落规模化暖棚区_四视角，@音频1是声音14。"));
+  assert.match(prompt, /人物参考 @图1，场景参考 @图2，声音参考 @音频1。/);
+  assert.doesNotMatch(prompt, /@(?:image|audio)\d+/i);
+  assert.doesNotMatch(prompt, /@(?:图|音频)\d+\s*=/);
 });
 
 test("applies the documented LWAIGC capacity for Seedance 2.5", () => {
@@ -381,8 +412,8 @@ test("rejects every SD2.5 one-over-capacity boundary and a 31 second request", (
   assert.match(lwaigcLimitIssue(model, materials(30, 10, 10), 31), /不支持 31 秒/);
 });
 
-test("defines sane capabilities for all 37 documented LWAIGC video models", () => {
-  assert.equal(new Set(LWAIGC_VIDEO_MODELS).size, 37);
+test("defines sane capabilities for all 39 documented LWAIGC video models", () => {
+  assert.equal(new Set(LWAIGC_VIDEO_MODELS).size, 39);
   for (const model of LWAIGC_VIDEO_MODELS) {
     const capability = lwaigcCapability(model);
     assert.ok(capability.images >= 1 && capability.images <= 30, `${model} 图片上限无效`);
@@ -405,7 +436,7 @@ test("sends resolution only for LWAIGC models that require it", () => {
   for (const model of ["mg-sd431-mini", "mg-sd431-fast", "mg-sd431-Pro"]) {
     assert.equal(lwaigcVideoPayload(model, input, "client_dynamic").resolution, "720p", model);
   }
-  for (const model of ["firefly-seedance2-720p", "sd2-431-720p-pro", "wf-sd2.0-fast-cf", "wf-sd2.0-pro-cf", "wf-sd2.0-v1", "wf-sd2.0-v2", "wf-sd2.5-720p", "wf-sd2.5-3030-720p", "wf-sd2.5-v2", "hn-sd2.5-v1", "hn-sd2.5-v2", "wf-sd2.5-v4", "gt-sd2.5-480p", "gt-sd2.5-720p", "gt-sd2.5-1000", "gt-sd2.5-301010", "MiniMax-H3"]) {
+  for (const model of ["firefly-seedance2-720p", "sd2-431-720p-pro", "wf-sd2.0-fast-cf", "wf-sd2.0-pro-cf", "wf-sd2.0-v1", "wf-sd2.0-v2", "ft-sd2.0-v1", "ft-sd2.0-v2", "wf-sd2.5-720p", "wf-sd2.5-3030-720p", "wf-sd2.5-v2", "hn-sd2.5-v1", "hn-sd2.5-v2", "wf-sd2.5-v4", "gt-sd2.5-480p", "gt-sd2.5-720p", "gt-sd2.5-1000", "gt-sd2.5-301010", "MiniMax-H3"]) {
     assert.equal("resolution" in lwaigcVideoPayload(model, input, "client_fixed"), false, model);
   }
 });

@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   cookieValue,
   createSessionToken,
+  renewSessionToken,
   verifyLoginCredentials,
   verifySessionToken,
 } from "../serverAuth.mjs";
@@ -25,6 +26,14 @@ test("rejects tampered and expired login sessions", () => {
   const token = createSessionToken("fzmh", "test-secret", 1_000);
   assert.equal(verifySessionToken(`${token}changed`, "test-secret", 2_000), null);
   assert.equal(verifySessionToken(token, "test-secret", 43_201_000), null);
+});
+
+test("renews an active session for twelve hours from its latest request", () => {
+  const original = createSessionToken("fzmh", "test-secret", 1_000);
+  const renewed = renewSessionToken(original, "test-secret", 36_001_000);
+  assert.equal(verifySessionToken(original, "test-secret", 46_001_000), null);
+  assert.equal(verifySessionToken(renewed, "test-secret", 46_001_000)?.username, "fzmh");
+  assert.equal(renewSessionToken(original, "test-secret", 43_201_000), "");
 });
 
 test("reads the workbench session from a cookie header", () => {

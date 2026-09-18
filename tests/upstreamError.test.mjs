@@ -19,3 +19,9 @@ test("translates related media and sync-audio errors", () => {
 test("keeps unknown upstream errors unchanged", () => {
   assert.equal(friendlyUpstreamError("insufficient credits"), "insufficient credits");
 });
+
+test("keeps the provider size-limit details while explaining the automatic retry path", () => {
+  const result = friendlyUpstreamError("以下素材超过大小上限：图片 example.png 10MB");
+  assert.match(result, /自动压缩超过 9MB/);
+  assert.match(result, /example\.png/);
+});

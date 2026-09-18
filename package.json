@@ -18,6 +18,7 @@
     "multer": "^2.0.2",
     "react": "latest",
     "react-dom": "latest",
+    "sharp": "0.34.5",
     "vite": "latest"
   }
 }

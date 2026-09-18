@@ -6,7 +6,12 @@ import {
   GLOBAL_AIOPC_MODELS,
   globalAiOpcCapability,
 } from "./globalAiOpcCatalog.js";
-import { MAXFORAI_BASE_URL, MAXFORAI_VIDEO_MODELS, maxforaiCapability } from "./maxforaiCatalog.js";
+import {
+  MAXFORAI_BASE_URL,
+  MAXFORAI_FT_933_MODEL,
+  MAXFORAI_VIDEO_MODELS,
+  maxforaiCapability,
+} from "./maxforaiCatalog.js";
 import { CLMM_BASE_URL, clmmCapability } from "./clmmCatalog.js";
 import { PIDOI_BASE_URL, PIDOI_MODELS, pidoiCapability } from "./pidoiCatalog.js";
 import { FMGO_V25_MODEL, fmgoV25Capability, isFmgoV25Model } from "./fmgoCatalog.js";
@@ -17,6 +22,7 @@ import {
   aiyrxCapability,
 } from "./aiyrxCatalog.js";
 import { SEEDANCE_VIDEO_BASE_URL } from "./seedanceVideoCatalog.js";
+import { UNMAU_BASE_URL, UNMAU_FALLBACK_MODELS, unmauCapability } from "./unmauCatalog.js";
 
 export const DEFAULT_PROFILES = [
   {
@@ -116,6 +122,14 @@ export const DEFAULT_PROFILES = [
     mediaUploadUrl: `${AIYRX_BASE_URL}/v1/assets`,
   },
   {
+    id: "unmau",
+    name: "Unmau New API",
+    baseUrl: UNMAU_BASE_URL,
+    adapter: "unmau",
+    model: UNMAU_FALLBACK_MODELS[0],
+    mediaUploadUrl: `${UNMAU_BASE_URL}/v1/materials`,
+  },
+  {
     id: "seedancevideo",
     name: "Seedance 视频 / 772808",
     baseUrl: SEEDANCE_VIDEO_BASE_URL,
@@ -192,6 +206,7 @@ export const FALLBACK_MODELS = {
   pidoi: PIDOI_MODELS,
   aiyrx: AIYRX_VIDEO_MODELS,
   seedancevideo: [],
+  unmau: UNMAU_FALLBACK_MODELS,
 };
 
 export const FALLBACK_MODEL_LABELS = {
@@ -199,7 +214,9 @@ export const FALLBACK_MODEL_LABELS = {
     [FMGO_V25_MODEL]: "feimiao-v2.5 · 飞猫 SD2.5 · 固定480P · 固定5秒",
   },
   maxforai: {
+    [MAXFORAI_FT_933_MODEL]: "FT-Seedance 2.0 · 720P · 933全参 · 4–15秒 · 9图/3视频/3音频",
     "wan3.0th": "WAN 3.0 TH · 720P · 4–30秒 · 10图/5视频/5音频",
+    "特价ft-sd2.0满血": "FT-Seedance 2.0 · 720P · 933全参",
   },
   lwaigc: {
     "dq-sd933-pro": "DQ Seedance 2.0 · 卡脸 · 720P · 4–15秒",
@@ -208,6 +225,8 @@ export const FALLBACK_MODEL_LABELS = {
     "wf-sd2.0-pro-cf": "WF Seedance 2.0 Pro CF · 903 · 按秒 · 原生不卡脸 · 720P · 4–15秒",
     "wf-sd2.0-v1": "WF Seedance 2.0 V1 · 903 · 按次 · 原生不卡脸 · 720P · 5–15秒",
     "wf-sd2.0-v2": "WF Seedance 2.0 V2 · 933 · 按次 · 卡脸 · 720P · 4–15秒 · 提示词≤2500字",
+    "ft-sd2.0-v1": "FT Seedance 2.0 V1 · 900 · 按次 · 卡脸 · 720P · 4–15秒",
+    "ft-sd2.0-v2": "FT Seedance 2.0 V2 · 933 · 按次 · 卡脸 · 720P · 4–15秒",
     "wf-sd2.5-v2": "WF Seedance 2.5 V2 · 真人脸支持 · 720P · 固定30秒 · 30图/3视频/无音频",
     "hn-sd2.5-v1": "HN Seedance 2.5 V1 · 不支持真人脸 · 按秒 · 720P · 4–30秒 · 30图/10视频/10音频",
     "hn-sd2.5-v2": "HN Seedance 2.5 V2 · 内置过脸 · 720P · 固定30秒 · 30图/无视频音频",
@@ -222,6 +241,8 @@ export const FALLBACK_MODEL_LABELS = {
   },
   pidoi: {
     "sora-v3-933-pro": "Sora V3 933 Pro · 720P · 15秒 · 9图/3音频/3视频",
+    jiuyue111: "Jiuyue 111 · 720P · 15秒 · 9图/3音频/3视频",
+    "sd2.5-900": "SD2.5 900 · 720P · 固定30秒 · 9图/无视频音频",
     tejiasd: "卡脸 933 · 特价 SD2.0",
     "sd-2.0-931-720p": "SD2.0 931 · 720P · 4–15秒",
     "sd-2.0-fast-720p": "SD2.0 Fast · 480P请求档 · 4–15秒",
@@ -229,6 +250,10 @@ export const FALLBACK_MODEL_LABELS = {
     "wan30-720p": "WAN 3.0 · 720P · 4–30秒 · 10图/5视频/5音频",
   },
   aiyrx: AIYRX_MODEL_LABELS,
+  unmau: {
+    "ad-seedance-2.0-720p": "AD Seedance 2.0 · 720P · 4–15秒 · 9图/3视频/3音频",
+    "ad-seedance-2.5-720p": "AD Seedance 2.5 · 720P · 4–30秒 · 30图/10视频/10音频",
+  },
 };
 
 const SD_VERSION_MODELS = {
@@ -265,6 +290,10 @@ const SD_VERSION_MODELS = {
   aiyrx: {
     sd20: "A渠道SD2.0-Fast720P-933不卡脸",
     sd25: "官逆SD2.5-720P-不卡脸30图10视频10音频",
+  },
+  unmau: {
+    sd20: "ad-seedance-2.0-720p",
+    sd25: "ad-seedance-2.5-720p",
   },
 };
 
@@ -554,6 +583,9 @@ function rawCapabilityFor(profile) {
       _preserveLimits: true,
     };
   }
+  if (adapter === "unmau") {
+    return profile?.routeCapabilities?.[profile?.model] || unmauCapability(profile?.model);
+  }
 
   return base;
 }
@@ -628,7 +660,7 @@ export function modelForSdVersion(profile, version, availableModels) {
   if (currentModel && sdVersionForProfile(profile) === version) return currentModel;
 
   const preferred = preferredModelForSdVersion(profile?.adapter, version);
-  const dynamicAdapters = new Set(["canseedream", "ziyuai", "maxforai", "clmm", "aiyrx", "seedancevideo"]);
+  const dynamicAdapters = new Set(["canseedream", "ziyuai", "maxforai", "clmm", "aiyrx", "seedancevideo", "unmau"]);
   if (!dynamicAdapters.has(profile?.adapter)) return preferred;
   const candidates = Array.isArray(availableModels) && availableModels.length
     ? availableModels
@@ -655,6 +687,7 @@ export function inferAdapter(baseUrl) {
     if (host === "pidoi.com" || host === "www.pidoi.com") return "pidoi";
     if (host === "api.aiyrx.xyz") return "aiyrx";
     if (host === "772808.xyz") return "seedancevideo";
+    if (host === "newapis.unmau.com") return "unmau";
   } catch {}
   return "newapi";
 }
@@ -662,6 +695,15 @@ export function inferAdapter(baseUrl) {
 export function migrateSavedProfile(profile) {
   if (!profile || typeof profile !== "object") return profile;
   const inferredAdapter = inferAdapter(profile.baseUrl);
+  if (profile.id === "unmau" || inferredAdapter === "unmau" || profile.adapter === "unmau") {
+    return {
+      ...profile,
+      baseUrl: UNMAU_BASE_URL,
+      adapter: "unmau",
+      model: String(profile.model || "").trim() || UNMAU_FALLBACK_MODELS[0],
+      mediaUploadUrl: `${UNMAU_BASE_URL}/v1/materials`,
+    };
+  }
   if (profile.id === "seedancevideo" || inferredAdapter === "seedancevideo" || profile.adapter === "seedancevideo") {
     return {
       ...profile,
@@ -702,7 +744,7 @@ export function migrateSavedProfile(profile) {
       ...profile,
       baseUrl: officialMaxForAI ? MAXFORAI_BASE_URL : profile.baseUrl,
       adapter: "maxforai",
-      model: MAXFORAI_VIDEO_MODELS.includes(profile.model) ? profile.model : "firefly-seedance2-720p",
+      model: String(profile.model || "").trim() || "firefly-seedance2-720p",
       mediaUploadUrl: officialMaxForAI ? `${MAXFORAI_BASE_URL}/v1/assets` : profile.mediaUploadUrl || "",
     };
   }

@@ -216,6 +216,62 @@ test("builds the documented Pidoi sora-v3-933-pro universal request", () => {
   assert.deepEqual(pidoiCapability("sora-v3-933-pro").durations, [15]);
 });
 
+test("adds Pidoi jiuyue111 with the documented universal video request", () => {
+  const richMaterials = [
+    { kind: "image", url: "https://example.com/main.jpg" },
+    { kind: "image", url: "https://example.com/ref-1.jpg" },
+    { kind: "video", url: "https://example.com/motion.mp4", durationSeconds: 5 },
+    { kind: "audio", url: "https://example.com/voice.wav", durationSeconds: 4 },
+  ];
+  assert.ok(PIDOI_MODELS.includes("jiuyue111"));
+  assert.deepEqual(pidoiVideoPayload("jiuyue111", {
+    prompt: "保持人物一致", duration: 15, aspectRatio: "16:9", materials: richMaterials,
+  }), {
+    model: "jiuyue111",
+    prompt: "保持人物一致",
+    aspect_ratio: "16:9",
+    resolution: "720p",
+    seconds: "15",
+    image_url: "https://example.com/main.jpg",
+    reference_image_urls: ["https://example.com/ref-1.jpg"],
+    reference_videos: ["https://example.com/motion.mp4"],
+    audio_urls: ["https://example.com/voice.wav"],
+  });
+  assert.deepEqual(pidoiCapability("jiuyue111").durations, [15]);
+  assert.match(pidoiLimitIssue("jiuyue111", Array.from({ length: 13 }, () => ({ kind: "image" })), 15), /最多 12 个/);
+  assert.match(pidoiLimitIssue("jiuyue111", [{ kind: "image", subType: "last_frame" }], 15), /不支持尾帧图/);
+});
+
+test("adds Pidoi sd2.5-900 as a fixed 30-second image-only model", () => {
+  const richMaterials = [
+    { kind: "image", url: "https://example.com/main.jpg" },
+    { kind: "image", url: "https://example.com/ref-1.jpg" },
+  ];
+  assert.ok(PIDOI_MODELS.includes("sd2.5-900"));
+  assert.deepEqual(pidoiVideoPayload("sd2.5-900", {
+    prompt: "保持人物一致", duration: 30, aspectRatio: "16:9", materials: richMaterials,
+  }), {
+    model: "sd2.5-900",
+    prompt: "保持人物一致",
+    aspect_ratio: "16:9",
+    resolution: "720p",
+    seconds: "30",
+    image_url: "https://example.com/main.jpg",
+    reference_image_urls: ["https://example.com/ref-1.jpg"],
+  });
+  const capability = pidoiCapability("sd2.5-900");
+  assert.equal(capability.images, 9);
+  assert.equal(capability.videos, 0);
+  assert.equal(capability.audios, 0);
+  assert.deepEqual(capability.durations, [30]);
+  assert.equal(capability._sdVersion, "sd25");
+  assert.match(pidoiLimitIssue("sd2.5-900", Array.from({ length: 10 }, () => ({ kind: "image" })), 30), /最多 9 张/);
+  assert.match(pidoiLimitIssue("sd2.5-900", [{ kind: "video" }], 30), /不支持视频参考/);
+  assert.match(pidoiLimitIssue("sd2.5-900", [{ kind: "audio" }], 30), /不支持音频参考/);
+  assert.match(pidoiLimitIssue("sd2.5-900", [{ kind: "image", subType: "last_frame" }], 30), /不支持尾帧图/);
+  assert.match(pidoiLimitIssue("sd2.5-900", [], 15), /只支持 30 秒/);
+});
+
 test("enforces Pidoi universal-reference duration, total-file, and tail-frame rules", () => {
   assert.match(pidoiLimitIssue("sora-v3-933-pro", Array.from({ length: 13 }, () => ({ kind: "image" })), 15), /最多 12 个/);
   assert.match(pidoiLimitIssue("sora-v3-933-pro", [{ kind: "image", subType: "last_frame" }], 15), /不支持尾帧图/);

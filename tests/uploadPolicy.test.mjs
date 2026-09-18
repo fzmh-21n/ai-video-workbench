@@ -6,13 +6,35 @@ import {
   configuredUploadBatchSize,
   configuredUploadRetryDelay,
   createUploadCircuitBreaker,
+  materialUploadRetryDelay,
   mediaUploadMode,
+  requiresProviderAssetUpload,
+  retryableMaterialUploadStatus,
   tmpfilesDirectUrl,
 } from "../src/uploadPolicy.js";
 
 test("uploads Ziyu materials one at a time so completed URLs can be checkpointed", () => {
   assert.equal(configuredUploadBatchSize("ziyuai"), 1);
+  assert.equal(configuredUploadBatchSize("fmgo"), 8);
   assert.equal(configuredUploadBatchSize("meaicc"), 50);
+});
+
+test("retries only transient material upload failures", () => {
+  assert.equal(retryableMaterialUploadStatus(408), true);
+  assert.equal(retryableMaterialUploadStatus(429), true);
+  assert.equal(retryableMaterialUploadStatus(503), true);
+  assert.equal(retryableMaterialUploadStatus(400), false);
+  assert.equal(retryableMaterialUploadStatus(413), false);
+  assert.equal(materialUploadRetryDelay(0), 1_000);
+  assert.equal(materialUploadRetryDelay(1), 2_000);
+  assert.equal(materialUploadRetryDelay(9), 5_000);
+});
+
+test("MaxForAI and LWAIGC assets must use the provider asset library even when COS is configured", () => {
+  assert.equal(requiresProviderAssetUpload("maxforai"), true);
+  assert.equal(requiresProviderAssetUpload("lwaigc"), true);
+  assert.equal(requiresProviderAssetUpload("unmau"), true);
+  assert.equal(requiresProviderAssetUpload("fmgo"), false);
 });
 
 test("honors numeric and HTTP-date Retry-After values with a safe cap", () => {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { mergePolledTaskUpdate, selectPendingTasks } from "../src/taskStore.js";
+import { isWorkbenchAuthFailure, mergePolledTaskUpdate, selectPendingTasks } from "../src/taskStore.js";
 
 test("polls the oldest due tasks instead of repeatedly selecting the same ten", () => {
   const tasks = Array.from({ length: 20 }, (_, index) => ({
@@ -38,4 +38,10 @@ test("polling status updates preserve a task project moved by the user", () => {
   assert.equal(result.profileId, "profile-1");
   assert.equal(result.status, "completed");
   assert.equal(result.progress, 100);
+  assert.ok(result.completedAt);
+});
+
+test("recognizes a workbench login expiry as recoverable polling failure", () => {
+  assert.equal(isWorkbenchAuthFailure("请先登录工作台"), true);
+  assert.equal(isWorkbenchAuthFailure("上游任务失败"), false);
 });

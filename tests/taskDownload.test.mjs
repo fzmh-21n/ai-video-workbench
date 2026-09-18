@@ -278,3 +278,17 @@ test("does not guess another success when explicit task IDs are missing locally"
   assert.deepEqual(batchItemDownloadCandidates(item, stored), []);
   assert.deepEqual(preferredBatchDownloadTasks([item], stored), []);
 });
+
+test("excludes a completed video marked unusable from batch downloads", () => {
+  const item = { section: 1, sourceName: "第11章.txt", taskIds: ["rejected"] };
+  const stored = [{
+    id: "rejected",
+    status: "completed",
+    reviewStatus: "dissatisfied",
+    batchTitle: "第11章",
+    batchSection: 1,
+  }];
+
+  assert.deepEqual(batchItemDownloadCandidates(item, stored), []);
+  assert.deepEqual(preferredBatchDownloadTasks([item], stored), []);
+});

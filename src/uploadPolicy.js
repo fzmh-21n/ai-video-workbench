@@ -1,7 +1,21 @@
 export const AUTOMATIC_UPLOAD_SERVICES = ["Uguu", "Litterbox", "Tmpfiles"];
 
+export function requiresProviderAssetUpload(adapter) {
+  return ["maxforai", "lwaigc", "unmau"].includes(adapter);
+}
+
 export function configuredUploadBatchSize(adapter) {
-  return adapter === "ziyuai" ? 1 : 50;
+  if (adapter === "ziyuai") return 1;
+  if (adapter === "fmgo") return 8;
+  return 50;
+}
+
+export function retryableMaterialUploadStatus(status) {
+  return [408, 425, 429, 500, 502, 503, 504].includes(Number(status));
+}
+
+export function materialUploadRetryDelay(retryIndex) {
+  return Math.min(5000, 1000 * (2 ** Math.max(0, Number(retryIndex) || 0)));
 }
 
 export function configuredUploadRetryDelay(retryAfter, retryIndex, now = Date.now()) {

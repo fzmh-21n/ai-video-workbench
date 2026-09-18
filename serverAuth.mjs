@@ -35,6 +35,11 @@ export function verifySessionToken(token, secret, now = Date.now()) {
   }
 }
 
+export function renewSessionToken(token, secret, now = Date.now()) {
+  const session = verifySessionToken(token, secret, now);
+  return session ? createSessionToken(session.username, secret, now) : "";
+}
+
 export function cookieValue(header, name) {
   const cookies = String(header || "").split(";");
   for (const cookie of cookies) {

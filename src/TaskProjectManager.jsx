@@ -7,7 +7,7 @@ import {
   saveCostSettings,
   taskEstimatedCost,
 } from "./costAnalytics.js";
-import { UNCLASSIFIED_PROJECT, tasksOnOrAfter } from "./taskProjects.js";
+import { UNCLASSIFIED_PROJECT, taskProjectNamesByCreation, tasksOnOrAfter } from "./taskProjects.js";
 
 function money(value) {
   return `¥${Number(value || 0).toFixed(2)}`;
@@ -24,7 +24,7 @@ function summarize(tasks, name, settings) {
   };
 }
 
-export default function TaskProjectManager({ activeProject, onClose, onCreate, onSelect, onTasksChanged, projects }) {
+export default function TaskProjectManager({ activeProject, onClose, onCreate, onDelete, onSelect, onTasksChanged, projects }) {
   const [tasks, setTasks] = useState([]);
   const [name, setName] = useState("");
   const [error, setError] = useState("");
@@ -32,6 +32,7 @@ export default function TaskProjectManager({ activeProject, onClose, onCreate, o
   const [historyDate, setHistoryDate] = useState("");
   const [historyProject, setHistoryProject] = useState(activeProject);
   const [movingHistory, setMovingHistory] = useState(false);
+  const [deletingProject, setDeletingProject] = useState("");
   const [settings, setSettings] = useState(loadCostSettings);
   const [expandedModels, setExpandedModels] = useState([]);
 
@@ -45,8 +46,7 @@ export default function TaskProjectManager({ activeProject, onClose, onCreate, o
   }, []);
 
   const names = useMemo(() => {
-    const historical = tasks.map((task) => task.projectName || UNCLASSIFIED_PROJECT);
-    return [...new Set([activeProject, ...projects, ...historical, UNCLASSIFIED_PROJECT].filter(Boolean))];
+    return taskProjectNamesByCreation(projects, tasks);
   }, [activeProject, projects, tasks]);
   const historyCutoff = historyDate
     ? (() => { const [year, month, day] = historyDate.split("-").map(Number); return new Date(year, month - 1, day).getTime(); })()
@@ -83,6 +83,23 @@ export default function TaskProjectManager({ activeProject, onClose, onCreate, o
       setError(moveError.message || "历史任务归类失败");
     } finally {
       setMovingHistory(false);
+    }
+  }
+
+  async function deleteProject(projectName) {
+    const count = tasks.filter((task) => (task.projectName || UNCLASSIFIED_PROJECT) === projectName).length;
+    if (!window.confirm(`确定删除项目“${projectName}”吗？\n\n其中 ${count} 条任务会移到“未归类”；任务、视频记录和计费数据都会保留。`)) return;
+    setDeletingProject(projectName);
+    setError("");
+    try {
+      await onDelete(projectName);
+      setTasks((current) => current.map((task) => (task.projectName || UNCLASSIFIED_PROJECT) === projectName
+        ? { ...task, projectName: UNCLASSIFIED_PROJECT }
+        : task));
+    } catch (deleteError) {
+      setError(deleteError.message || "删除项目失败");
+    } finally {
+      setDeletingProject("");
     }
   }
 
@@ -133,6 +150,7 @@ export default function TaskProjectManager({ activeProject, onClose, onCreate, o
                   <div className="task-project-actions">
                     <button className="secondary-button" onClick={() => toggleModels(projectName)}>{expanded ? "收起模型明细" : `成功模型（${models.length}）`}</button>
                     <button className={active ? "secondary-button" : "primary-button"} disabled={active} onClick={() => onSelect(projectName)}>{active ? "正在使用" : "切换到此项目"}</button>
+                    {projectName !== UNCLASSIFIED_PROJECT && <button className="danger-button" disabled={!!deletingProject} onClick={() => deleteProject(projectName)}>{deletingProject === projectName ? "删除中…" : "删除项目"}</button>}
                   </div>
                   {expanded && <div className="task-project-models">
                     {models.length ? models.map((item) => (

@@ -74,9 +74,13 @@ export async function putTask(task) {
 }
 
 export function mergePolledTaskUpdate(stored, update) {
+  const completedAt = update?.status === "completed" && stored?.status !== "completed"
+    ? update.completedAt || new Date().toLocaleString("zh-CN", { hour12: false })
+    : update?.completedAt;
   return normalizedTask({
     ...stored,
     ...update,
+    ...(completedAt ? { completedAt } : {}),
     id: stored.id,
     projectName: stored.projectName,
     title: stored.title,
@@ -166,6 +170,10 @@ export function selectPendingTasks(tasks, limit = 10) {
       Number(left.nextPollAt || 0) - Number(right.nextPollAt || 0) ||
       Number(left.updatedAtMs || left.createdAtMs || 0) - Number(right.updatedAtMs || right.createdAtMs || 0))
     .slice(0, limit);
+}
+
+export function isWorkbenchAuthFailure(error) {
+  return /请先登录工作台/.test(String(error || ""));
 }
 
 export async function getPendingTasks(limit = 10) {

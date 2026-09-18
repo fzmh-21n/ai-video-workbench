@@ -5,6 +5,8 @@ export const LWAIGC_VIDEO_MODELS = [
   "wf-sd2.0-pro-cf",
   "wf-sd2.0-v1",
   "wf-sd2.0-v2",
+  "ft-sd2.0-v1",
+  "ft-sd2.0-v2",
   "firefly-seedance2-1080p",
   "firefly-seedance2-720p",
   "firefly-seedance2-480p",
@@ -40,6 +42,34 @@ export const LWAIGC_VIDEO_MODELS = [
 
 const range = (start, end) => Array.from({ length: end - start + 1 }, (_, index) => start + index);
 
+function escapedReference(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+export function lwaigcReferencePrompt(prompt, materials = []) {
+  const counts = { image: 0, video: 0, audio: 0 };
+  let normalized = String(prompt || "");
+  const declarations = [];
+  for (const item of materials) {
+    if (!(item.kind in counts)) continue;
+    counts[item.kind] += 1;
+    const index = counts[item.kind];
+    const reference = `@${{ image: "图", video: "视频", audio: "音频" }[item.kind]}${index}`;
+    const name = String(item.name || `${item.kind}${counts[item.kind]}`).replace(/\.[^.]+$/, "");
+    const aliases = [item.tag, `@${item.kind}${index}`, reference]
+      .map((value) => String(value || "").trim())
+      .filter(Boolean)
+      .sort((left, right) => right.length - left.length);
+    for (const alias of aliases) {
+      const assignment = new RegExp(`${escapedReference(alias)}\\s*=\\s*${escapedReference(name)}`, "gi");
+      normalized = normalized.replace(assignment, reference);
+      normalized = normalized.replace(new RegExp(escapedReference(alias), "gi"), reference);
+    }
+    declarations.push(`${reference}是${name}`);
+  }
+  return declarations.length ? `${declarations.join("，")}。\n\n${normalized}` : normalized;
+}
+
 export function isLwaigcDqModel(model) {
   return ["dq-sd933-pro", "dq-sd933-pro-face"].includes(String(model || "").trim().toLowerCase());
 }
@@ -70,7 +100,7 @@ export function lwaigcCapability(modelName) {
     };
   }
 
-  if (["wf-sd2.0-fast-cf", "wf-sd2.0-pro-cf", "wf-sd2.0-v2"].includes(model)) {
+  if (["wf-sd2.0-fast-cf", "wf-sd2.0-pro-cf", "wf-sd2.0-v2", "ft-sd2.0-v1", "ft-sd2.0-v2"].includes(model)) {
     return { ...common, durations: range(4, 15), resolutions: ["720p"], _sdVersion: "sd20" };
   }
   if (model === "wf-sd2.0-v1") {

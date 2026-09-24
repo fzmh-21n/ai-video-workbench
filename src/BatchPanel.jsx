@@ -29,15 +29,22 @@ import { internalizeProjectAliases, planProjectReferences } from "./projectRefer
 import { allTasks, putTasks } from "./taskStore.js";
 import { taskReuseSnapshot } from "./taskReuse.js";
 import { reviewedTask } from "./taskRegeneration.js";
+import { isTaskCancellable, manuallyCancelledTask } from "./taskCancellation.js";
 import { pollDelayForAdapter } from "./providerCatalog.js";
 import { normalizedTaskProgress } from "./taskProgress.js";
 import { diagnosticHeaders, recordDiagnostic } from "./diagnostics.js";
+import FixedContentControls from "./FixedContentControls.jsx";
 import {
   configuredUploadBatchSize,
   materialUploadRetryDelay,
   retryableMaterialUploadStatus,
 } from "./uploadPolicy.js";
-import { batchItemDownloadCandidates, batchItemTasks, preferredBatchDownloadTasks } from "./taskDownload.js";
+import {
+  batchItemDownloadCandidates,
+  batchItemTasks,
+  preferredBatchDownloadTasks,
+  recoverBatchItemTaskIds,
+} from "./taskDownload.js";
 
 const STORAGE_KEY = "video-workbench-batch-v1";
 const AWAY_STORAGE_KEY = "video-workbench-away-batch-v1";
@@ -83,12 +90,25 @@ function countsFor(references) {
 function withDownloadedFlags(items, storedTasks) {
   const storedById = new Map((storedTasks || []).map((task) => [task.id, task]));
   return (items || []).map((item) => {
-    const candidates = batchItemDownloadCandidates(item, storedTasks);
-    const relatedTasks = (item.taskIds || []).map((id) => storedById.get(id)).filter(Boolean);
+    const recoveredTaskIds = recoverBatchItemTaskIds(item, storedTasks);
+    const restoredItem = recoveredTaskIds.length ? { ...item, taskIds: recoveredTaskIds } : item;
+    const candidates = batchItemDownloadCandidates(restoredItem, storedTasks);
+    const relatedTasks = (restoredItem.taskIds || []).map((id) => storedById.get(id)).filter(Boolean);
     const downloadedCount = item.manuallyMarkedDownloaded || candidates.some((task) => task.downloadedAtMs) ? 1 : 0;
-    const terminalState = reconciledBatchTerminalState(item, relatedTasks, candidates.length > 0);
+    const terminalState = reconciledBatchTerminalState(restoredItem, relatedTasks, candidates.length > 0);
+    const activeState = recoveredTaskIds.length && relatedTasks.some((task) => ["queued", "processing"].includes(task.status))
+      ? {
+          status: "generating",
+          progress: Math.round(relatedTasks.reduce(
+            (total, task) => total + normalizedTaskProgress(task.status, task.progress),
+            0,
+          ) / relatedTasks.length),
+          error: "",
+        }
+      : null;
     return {
-      ...item,
+      ...restoredItem,
+      ...(activeState || {}),
       ...(terminalState || {}),
       downloadedCount,
       downloaded: downloadedCount > 0,
@@ -130,6 +150,8 @@ export default function BatchPanel({
   capability,
   duration,
   fixedContent,
+  fixedContentTemplateId,
+  fixedContentTemplates,
   fixedContentVersionLabel,
   headers,
   notice,
@@ -137,6 +159,7 @@ export default function BatchPanel({
   onProjectFolder,
   onChooseProjectFolder,
   onDownloadTasks,
+  onManageFixedContent,
   onRestoreProjectFolder,
   onTasksAdded,
   projectAssets,
@@ -150,6 +173,7 @@ export default function BatchPanel({
   seed,
   setDuration,
   setFixedContent,
+  setFixedContentTemplate,
   setQuantity,
   setRatio,
   setResolution,
@@ -825,16 +849,16 @@ export default function BatchPanel({
       return;
     }
     setBusy("submitting");
+    const batchId = uid("batch");
+    const batchStartedAt = Date.now();
     setItems((values) => values.map((item) => ready.some((candidate) => candidate.id === item.id)
-      ? beginBatchSubmission(item, activeProfile)
+      ? beginBatchSubmission(item, activeProfile, batchStartedAt, batchId)
       : item));
     let successes = 0;
     let failures = 0;
     let firstFailureMessage = "";
     let stopReason = "";
     const startedItemIds = new Set();
-    const batchId = uid("batch");
-    const batchStartedAt = Date.now();
     setOvernightPlan((current) => {
       const sameProvider = current?.profileId === activeProfile.id;
       const itemIds = sameProvider ? [...current.itemIds] : [];
@@ -1022,6 +1046,25 @@ export default function BatchPanel({
 
   function updateItem(id, patch) {
     setItems((values) => values.map((item) => item.id === id ? { ...item, ...patch } : item));
+  }
+
+  async function cancelBatchItemGeneration(item) {
+    const stored = await allTasks();
+    const activeTasks = batchItemTasks(item, stored).filter(isTaskCancellable);
+    if (!activeTasks.length) {
+      onNotice("这节没有仍在排队或生成中的任务");
+      return;
+    }
+    if (!window.confirm(`确定取消${batchItemChapterLabel(item.sourceName) || "本章"}第${item.section}节的生成吗？\n\n工作台会停止查询 ${activeTasks.length} 条任务并标记为已取消，但无法保证中转后台停止生成，也不代表自动退款。`)) return;
+    await putTasks(activeTasks.map((task) => manuallyCancelledTask(task)));
+    updateItem(item.id, {
+      status: "generation_failed",
+      progress: 100,
+      error: "已由用户手动取消工作台跟踪；中转后台任务可能仍会继续生成",
+      expanded: true,
+    });
+    onTasksAdded();
+    onNotice(`${batchItemChapterLabel(item.sourceName) || "本章"}第${item.section}节已取消，可稍后重新生成`);
   }
 
   function markBatchItemGenerated(item) {
@@ -1218,8 +1261,15 @@ export default function BatchPanel({
         </div>
       </div>
 
-      <label className="field-label fixed-label">固定内容（{fixedContentVersionLabel}）<span>两个模型版本分别保存；提交每一节时自动放在最前方</span></label>
-      <textarea className="fixed-content" value={fixedContent} onChange={(event) => setFixedContent(event.target.value)} />
+      <FixedContentControls
+        fixedContent={fixedContent}
+        onChange={setFixedContent}
+        onManage={onManageFixedContent}
+        onSelect={setFixedContentTemplate}
+        selectedTemplateId={fixedContentTemplateId}
+        templates={fixedContentTemplates}
+        versionLabel={fixedContentVersionLabel}
+      />
 
       <div className="batch-toolbar">
         <div><div className="batch-source-list">{importedSources.length ? importedSources.map((source) => (
@@ -1335,6 +1385,14 @@ export default function BatchPanel({
                   title={["submitting", "submitted", "generating"].includes(item.status) ? "任务正在提交或生成，暂时不能修改参考素材" : "只清空本节的图片、音频和视频参考"}
                   onClick={() => clearItemReferences(item)}
                 >清空参考素材</button>
+                {["submitted", "generating"].includes(item.status) && !!item.taskIds?.length && (
+                  <button
+                    type="button"
+                    className="batch-item-cancel-generation"
+                    disabled={!!busy}
+                    onClick={() => cancelBatchItemGeneration(item)}
+                  >取消生成</button>
+                )}
               </div>
               {["submitted", "submitting", "generating"].includes(item.status) && (
                 <div className="batch-item-progress">

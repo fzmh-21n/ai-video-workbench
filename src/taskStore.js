@@ -74,6 +74,7 @@ export async function putTask(task) {
 }
 
 export function mergePolledTaskUpdate(stored, update) {
+  if (stored?.cancelledByUser && stored?.status === "failed") return normalizedTask(stored);
   const completedAt = update?.status === "completed" && stored?.status !== "completed"
     ? update.completedAt || new Date().toLocaleString("zh-CN", { hour12: false })
     : update?.completedAt;
@@ -104,6 +105,11 @@ export async function putPolledTaskUpdates(updates) {
 
 export async function markTaskDownloaded(id, downloadedAtMs = Date.now()) {
   return putPolledTaskUpdates([{ id, downloadedAtMs }]);
+}
+
+export async function markTasksDownloaded(ids, downloadedAtMs = Date.now()) {
+  const uniqueIds = [...new Set((ids || []).filter(Boolean))];
+  return putPolledTaskUpdates(uniqueIds.map((id) => ({ id, downloadedAtMs })));
 }
 
 export async function removeTask(id) {

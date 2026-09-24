@@ -1,4 +1,24 @@
 export const FMGO_V25_MODEL = "feimiao-v2.5";
+export const FMGO_K20_FAST_MODEL = "k2.0-fast-720p";
+
+export function isFmgoK20FastModel(modelName) {
+  return String(modelName || "").toLowerCase() === FMGO_K20_FAST_MODEL;
+}
+
+export function fmgoK20FastCapability() {
+  return {
+    images: 9,
+    videos: 3,
+    audios: 3,
+    durations: [10, 15],
+    resolutions: ["720p"],
+    ratios: ["16:9", "9:16", "1:1"],
+    seed: false,
+    syncAudio: true,
+    syncAudioFixed: false,
+    _sdVersion: "sd20",
+  };
+}
 
 export function isFmgoV25Model(modelName) {
   return /^feimiao-v2\.5(?:-(?:480p|720p)-(?:5|10|15|30)s)?$/i.test(String(modelName || ""));
@@ -62,6 +82,46 @@ export function fmgoV25Payload(modelName, input) {
     aspect_ratio: input.aspectRatio,
     resolution,
     seconds: String(duration),
+  };
+  if (ordinaryImages.length) payload.images = ordinaryImages.map((item) => item.url);
+  if (firstFrame) payload.start_frame = firstFrame.url;
+  if (lastFrame) payload.end_frame = lastFrame.url;
+  if (videos.length) payload.reference_videos = videos.map((item) => item.url);
+  if (audios.length) payload.reference_audios = audios.map((item) => item.url);
+  return payload;
+}
+
+export function fmgoK20FastPayload(modelName, input) {
+  if (!isFmgoK20FastModel(modelName)) throw new Error("请选择 k2.0-fast-720p 模型");
+  const duration = Number(input.duration);
+  const resolution = String(input.resolution || "").toLowerCase();
+  if (![10, 15].includes(duration)) throw new Error(`${FMGO_K20_FAST_MODEL} 只支持 10 秒或 15 秒`);
+  if (resolution !== "720p") throw new Error(`${FMGO_K20_FAST_MODEL} 固定为 720p`);
+  if (!["16:9", "9:16", "1:1"].includes(input.aspectRatio))
+    throw new Error(`${FMGO_K20_FAST_MODEL} 不支持 ${input.aspectRatio} 比例`);
+
+  const materials = Array.isArray(input.materials) ? input.materials : [];
+  const imageMaterials = materials.filter((item) => item.kind === "image");
+  const ordinaryImages = imageMaterials.filter((item) => !["first_frame", "last_frame"].includes(item.subType));
+  const firstFrame = imageMaterials.find((item) => item.subType === "first_frame");
+  const lastFrame = imageMaterials.find((item) => item.subType === "last_frame");
+  const videos = materials.filter((item) => item.kind === "video");
+  const audios = materials.filter((item) => item.kind === "audio");
+  if (imageMaterials.length > 9) throw new Error(`${FMGO_K20_FAST_MODEL} 的图片参考最多 9 张`);
+  if (videos.length > 3) throw new Error(`${FMGO_K20_FAST_MODEL} 的视频参考最多 3 个`);
+  if (audios.length > 3) throw new Error(`${FMGO_K20_FAST_MODEL} 的音频参考最多 3 个`);
+  if (lastFrame && !firstFrame) throw new Error(`${FMGO_K20_FAST_MODEL} 使用尾帧时必须同时提供首帧`);
+  if (audios.length && !ordinaryImages.length && !videos.length) {
+    throw new Error(`${FMGO_K20_FAST_MODEL} 的音频参考必须同时提供普通参考图或参考视频`);
+  }
+
+  const payload = {
+    model: FMGO_K20_FAST_MODEL,
+    prompt: input.prompt,
+    aspect_ratio: input.aspectRatio,
+    resolution: "720p",
+    seconds: String(duration),
+    motion_has_audio: Boolean(input.syncAudio),
   };
   if (ordinaryImages.length) payload.images = ordinaryImages.map((item) => item.url);
   if (firstFrame) payload.start_frame = firstFrame.url;

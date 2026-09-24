@@ -103,7 +103,7 @@ test("includes LWAIGC as a built-in OpenAI-compatible provider", () => {
     mediaUploadUrl: "https://ai.lwaigc.cn/v1/assets",
   });
   assert.equal(inferAdapter(profile.baseUrl), "lwaigc");
-  assert.equal(LWAIGC_VIDEO_MODELS.length, 39);
+  assert.equal(LWAIGC_VIDEO_MODELS.length, 47);
 });
 
 test("defines the documented LWAIGC WF and FT Seedance 2.0 models", () => {
@@ -412,8 +412,58 @@ test("rejects every SD2.5 one-over-capacity boundary and a 31 second request", (
   assert.match(lwaigcLimitIssue(model, materials(30, 10, 10), 31), /不支持 31 秒/);
 });
 
-test("defines sane capabilities for all 39 documented LWAIGC video models", () => {
-  assert.equal(new Set(LWAIGC_VIDEO_MODELS).size, 39);
+test("defines the eight documented DBB LD LG HN and WF Seedance 2.5 models", () => {
+  const expected = {
+    "dbb-sd2.5-v1": { images: 30, videos: 10, audios: 10, durations: [4, 30], resolutions: ["720p"] },
+    "dbb-sd2.5-v2": { images: 30, videos: 10, audios: 10, durations: [4, 30], resolutions: ["480p", "720p"] },
+    "ld-sd2.5-v1": { images: 30, videos: 10, audios: 10, durations: [4, 30], resolutions: ["480p", "720p", "1080p"] },
+    "ld-sd2.5-v2": { images: 9, videos: 0, audios: 0, durations: [30, 30], resolutions: ["720p"] },
+    "ld-sd2.5-v3": { images: 30, videos: 10, audios: 10, durations: [4, 30], resolutions: ["480p", "720p"] },
+    "lg-sd2.5-v1": { images: 30, videos: 10, audios: 10, durations: [4, 30], resolutions: ["480p", "720p", "1080p"] },
+    "hn-sd2.5-v2": { images: 30, videos: 0, audios: 0, durations: [30, 30], resolutions: ["720p"] },
+    "wf-sd2.5-v5": { images: 30, videos: 0, audios: 10, durations: [30, 30], resolutions: ["720p"] },
+  };
+
+  for (const [model, limits] of Object.entries(expected)) {
+    assert.ok(LWAIGC_VIDEO_MODELS.includes(model), model);
+    const capability = lwaigcCapability(model);
+    assert.deepEqual({
+      images: capability.images,
+      videos: capability.videos,
+      audios: capability.audios,
+      durations: [capability.durations.at(0), capability.durations.at(-1)],
+      resolutions: capability.resolutions,
+    }, limits, model);
+    assert.equal(sdVersionForProfile({ adapter: "lwaigc", model }), "sd25", model);
+  }
+});
+
+test("serializes new LWAIGC Seedance 2.5 resolution rules exactly", () => {
+  const input = {
+    prompt: "保持主体一致",
+    duration: 10,
+    resolution: "1080p",
+    aspectRatio: "16:9",
+    materials: materials(1, 1, 1),
+  };
+  const dynamic = lwaigcVideoPayload("ld-sd2.5-v1", input, "client_ld_v1");
+  assert.equal(dynamic.resolution, "1080p");
+  assert.equal(dynamic.seconds, 10);
+  assert.equal(dynamic.image_urls.length, 1);
+  assert.equal(dynamic.video_urls.length, 1);
+  assert.equal(dynamic.audio_urls.length, 1);
+
+  const fixed = lwaigcVideoPayload("dbb-sd2.5-v1", { ...input, resolution: "720p" }, "client_dbb_v1");
+  assert.equal("resolution" in fixed, false);
+  assert.equal("duration" in fixed, false);
+  assert.equal(lwaigcLimitIssue("ld-sd2.5-v2", materials(9, 0, 0), 30), "");
+  assert.match(lwaigcLimitIssue("ld-sd2.5-v2", materials(9, 0, 1), 30), /视频参考最多 0 个/);
+  assert.equal(lwaigcLimitIssue("wf-sd2.5-v5", materials(30, 10, 0), 30), "");
+  assert.match(lwaigcLimitIssue("wf-sd2.5-v5", materials(30, 10, 1), 30), /视频参考最多 0 个/);
+});
+
+test("defines sane capabilities for all 47 documented LWAIGC video models", () => {
+  assert.equal(new Set(LWAIGC_VIDEO_MODELS).size, 47);
   for (const model of LWAIGC_VIDEO_MODELS) {
     const capability = lwaigcCapability(model);
     assert.ok(capability.images >= 1 && capability.images <= 30, `${model} 图片上限无效`);
@@ -433,10 +483,10 @@ test("sends resolution only for LWAIGC models that require it", () => {
     aspectRatio: "16:9",
     materials: [],
   };
-  for (const model of ["mg-sd431-mini", "mg-sd431-fast", "mg-sd431-Pro"]) {
+  for (const model of ["mg-sd431-mini", "mg-sd431-fast", "mg-sd431-Pro", "dbb-sd2.5-v2", "ld-sd2.5-v1", "ld-sd2.5-v3", "lg-sd2.5-v1"]) {
     assert.equal(lwaigcVideoPayload(model, input, "client_dynamic").resolution, "720p", model);
   }
-  for (const model of ["firefly-seedance2-720p", "sd2-431-720p-pro", "wf-sd2.0-fast-cf", "wf-sd2.0-pro-cf", "wf-sd2.0-v1", "wf-sd2.0-v2", "ft-sd2.0-v1", "ft-sd2.0-v2", "wf-sd2.5-720p", "wf-sd2.5-3030-720p", "wf-sd2.5-v2", "hn-sd2.5-v1", "hn-sd2.5-v2", "wf-sd2.5-v4", "gt-sd2.5-480p", "gt-sd2.5-720p", "gt-sd2.5-1000", "gt-sd2.5-301010", "MiniMax-H3"]) {
+  for (const model of ["firefly-seedance2-720p", "sd2-431-720p-pro", "wf-sd2.0-fast-cf", "wf-sd2.0-pro-cf", "wf-sd2.0-v1", "wf-sd2.0-v2", "ft-sd2.0-v1", "ft-sd2.0-v2", "dbb-Q933-pro-face", "dbb-sd2.0-v2", "wf-sd2.5-720p", "wf-sd2.5-3030-720p", "wf-sd2.5-v2", "hn-sd2.5-v1", "hn-sd2.5-v2", "wf-sd2.5-v4", "gt-sd2.5-480p", "gt-sd2.5-720p", "gt-sd2.5-1000", "gt-sd2.5-301010", "dbb-sd2.5-v1", "ld-sd2.5-v2", "wf-sd2.5-v5", "MiniMax-H3"]) {
     assert.equal("resolution" in lwaigcVideoPayload(model, input, "client_fixed"), false, model);
   }
 });
@@ -481,6 +531,78 @@ test("serializes all three documented dbb-Q933-pro audio references", () => {
   assert.equal(payload.audio_urls.length, 3);
   assert.equal(payload.image_urls.length, 9);
   assert.equal(payload.video_urls.length, 3);
+});
+
+test("uses the updated dbb-Q933-pro-face limits and request fields", () => {
+  const model = "dbb-Q933-pro-face";
+  const fullCapacity = materials(9, 3, 3);
+  const capability = lwaigcCapability(model);
+
+  assert.deepEqual(capability.durations, Array.from({ length: 12 }, (_, index) => index + 4));
+  assert.deepEqual(
+    { images: capability.images, videos: capability.videos, audios: capability.audios, resolutions: capability.resolutions },
+    { images: 9, videos: 3, audios: 3, resolutions: ["720p"] },
+  );
+  assert.equal(lwaigcLimitIssue(model, fullCapacity, 4), "");
+  assert.equal(lwaigcLimitIssue(model, fullCapacity, 15), "");
+  assert.match(lwaigcLimitIssue(model, fullCapacity, 3), /不支持 3 秒/);
+  assert.match(lwaigcLimitIssue(model, materials(10, 3, 3), 10), /图片参考最多 9 个/);
+
+  const payload = lwaigcVideoPayload(model, {
+    prompt: "保持主体外观一致",
+    duration: 10,
+    resolution: "720p",
+    aspectRatio: "16:9",
+    materials: fullCapacity,
+  }, "client_dbb_q933_face");
+  assert.equal(payload.model, model);
+  assert.equal(payload.seconds, 10);
+  assert.equal(payload.aspect_ratio, "16:9");
+  assert.equal(payload.image_urls.length, 9);
+  assert.equal(payload.video_urls.length, 3);
+  assert.equal(payload.audio_urls.length, 3);
+  assert.equal("resolution" in payload, false);
+  assert.equal("duration" in payload, false);
+});
+
+test("adds dbb-sd2.0-v2 with the documented unified DBB request", () => {
+  const model = "dbb-sd2.0-v2";
+  const references = materials(9, 3, 3);
+  const capability = lwaigcCapability(model);
+
+  assert.deepEqual(
+    {
+      images: capability.images,
+      videos: capability.videos,
+      audios: capability.audios,
+      durations: [capability.durations.at(0), capability.durations.at(-1)],
+      resolutions: capability.resolutions,
+    },
+    { images: 9, videos: 3, audios: 3, durations: [4, 15], resolutions: ["720p"] },
+  );
+  assert.equal(sdVersionForProfile({ adapter: "lwaigc", model }), "sd20");
+  assert.equal(lwaigcLimitIssue(model, references, 4), "");
+  assert.equal(lwaigcLimitIssue(model, references, 15), "");
+
+  const payload = lwaigcVideoPayload(model, {
+    prompt: "保持主体外观一致",
+    duration: 10,
+    resolution: "720p",
+    aspectRatio: "16:9",
+    materials: references,
+  }, "client_dbb_sd20_v2");
+  assert.deepEqual(payload, {
+    model,
+    client_task_id: "client_dbb_sd20_v2",
+    prompt: "保持主体外观一致",
+    seconds: 10,
+    aspect_ratio: "16:9",
+    image_urls: references.filter((item) => item.kind === "image").map((item) => item.url),
+    video_urls: references.filter((item) => item.kind === "video").map((item) => item.url),
+    audio_urls: references.filter((item) => item.kind === "audio").map((item) => item.url),
+  });
+  assert.equal("resolution" in payload, false);
+  assert.equal("duration" in payload, false);
 });
 
 test("detects and switches CanSeeDream SD2.5 routes from live capabilities", () => {

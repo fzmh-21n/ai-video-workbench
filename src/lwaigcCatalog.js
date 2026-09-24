@@ -21,6 +21,7 @@ export const LWAIGC_VIDEO_MODELS = [
   "dbb-Q933-pro",
   "dbb-H933-pro",
   "dbb-Q933-pro-face",
+  "dbb-sd2.0-v2",
   "dbb-sd431-720p-fast",
   "hn-sd官渠903-pro",
   "hn-sd903-pro",
@@ -36,6 +37,13 @@ export const LWAIGC_VIDEO_MODELS = [
   "gt-sd2.5-720p",
   "gt-sd2.5-1000",
   "gt-sd2.5-301010",
+  "dbb-sd2.5-v1",
+  "dbb-sd2.5-v2",
+  "ld-sd2.5-v1",
+  "ld-sd2.5-v2",
+  "ld-sd2.5-v3",
+  "lg-sd2.5-v1",
+  "wf-sd2.5-v5",
   "MiniMax-H3",
   "grok-imagine-video-1.5-preview",
 ];
@@ -116,7 +124,10 @@ export function lwaigcCapability(modelName) {
   if (["mg-sd431-mini", "mg-sd431-fast", "mg-sd431-Pro"].includes(model)) {
     return { ...common, images: 4, audios: 1, resolutions: ["480p", "720p"] };
   }
-  if (["dbb-Q933-pro", "dbb-H933-pro", "dbb-Q933-pro-face"].includes(model)) {
+  if (["dbb-Q933-pro-face", "dbb-sd2.0-v2"].includes(model)) {
+    return { ...common, durations: range(4, 15), resolutions: ["720p"], _sdVersion: "sd20" };
+  }
+  if (["dbb-Q933-pro", "dbb-H933-pro"].includes(model)) {
     return { ...common, durations: [10, 15], resolutions: ["720p"] };
   }
   if (model === "dbb-sd431-720p-fast") {
@@ -158,6 +169,24 @@ export function lwaigcCapability(modelName) {
   if (model === "gt-sd2.5-301010") {
     return { ...common, images: 30, videos: 10, audios: 10, durations: [30], resolutions: ["720p"], _sdVersion: "sd25" };
   }
+  if (model === "dbb-sd2.5-v1") {
+    return { ...common, images: 30, videos: 10, audios: 10, durations: range(4, 30), resolutions: ["720p"], _sdVersion: "sd25" };
+  }
+  if (model === "dbb-sd2.5-v2") {
+    return { ...common, images: 30, videos: 10, audios: 10, durations: range(4, 30), resolutions: ["480p", "720p"], _sdVersion: "sd25" };
+  }
+  if (["ld-sd2.5-v1", "lg-sd2.5-v1"].includes(model)) {
+    return { ...common, images: 30, videos: 10, audios: 10, durations: range(4, 30), resolutions: ["480p", "720p", "1080p"], _sdVersion: "sd25" };
+  }
+  if (model === "ld-sd2.5-v2") {
+    return { ...common, images: 9, videos: 0, audios: 0, durations: [30], resolutions: ["720p"], _sdVersion: "sd25" };
+  }
+  if (model === "ld-sd2.5-v3") {
+    return { ...common, images: 30, videos: 10, audios: 10, durations: range(4, 30), resolutions: ["480p", "720p"], _sdVersion: "sd25" };
+  }
+  if (model === "wf-sd2.5-v5") {
+    return { ...common, images: 30, videos: 0, audios: 10, durations: [30], resolutions: ["720p"], _sdVersion: "sd25" };
+  }
   if (model === "MiniMax-H3") {
     return { ...common, videos: 0, durations: range(5, 15), resolutions: ["2K"] };
   }
@@ -197,7 +226,7 @@ export function lwaigcVideoPayload(model, input, clientTaskId) {
   }
 
   payload.aspect_ratio = input.aspectRatio;
-  if (["mg-sd431-mini", "mg-sd431-fast", "mg-sd431-Pro"].includes(model)) {
+  if (["mg-sd431-mini", "mg-sd431-fast", "mg-sd431-Pro", "dbb-sd2.5-v2", "ld-sd2.5-v1", "ld-sd2.5-v3", "lg-sd2.5-v1"].includes(model)) {
     payload.resolution = input.resolution;
   }
   if (images.length) payload.image_urls = images;

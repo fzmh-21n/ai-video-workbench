@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  FMGO_K20_FAST_MODEL,
   FMGO_V25_MODEL,
+  fmgoK20FastPayload,
   fmgoV25Capability,
   fmgoV25Payload,
 } from "../src/fmgoCatalog.js";
@@ -12,6 +14,64 @@ import {
   preferredModelForSdVersion,
   sdVersionForModel,
 } from "../src/providerCatalog.js";
+
+test("adds FMGO k2.0-fast-720p with its documented limits", () => {
+  assert.ok(FALLBACK_MODELS.fmgo.includes(FMGO_K20_FAST_MODEL));
+  const capability = capabilityFor({ adapter: "fmgo", model: FMGO_K20_FAST_MODEL });
+  assert.deepEqual({
+    images: capability.images,
+    videos: capability.videos,
+    audios: capability.audios,
+    durations: capability.durations,
+    resolutions: capability.resolutions,
+    ratios: capability.ratios,
+  }, {
+    images: 9,
+    videos: 3,
+    audios: 3,
+    durations: [10, 15],
+    resolutions: ["720p"],
+    ratios: ["16:9", "9:16", "1:1"],
+  });
+});
+
+test("builds the exact FMGO k2.0-fast-720p mixed-reference request", () => {
+  const payload = fmgoK20FastPayload(FMGO_K20_FAST_MODEL, {
+    prompt: "参考人物形象、镜头运动和音乐节奏",
+    duration: 15,
+    resolution: "720p",
+    aspectRatio: "16:9",
+    syncAudio: true,
+    materials: [
+      { kind: "image", subType: "reference", url: "https://example.com/ref.png" },
+      { kind: "video", url: "https://example.com/ref.mp4" },
+      { kind: "audio", url: "https://example.com/ref.mp3" },
+    ],
+  });
+  assert.deepEqual(payload, {
+    model: "k2.0-fast-720p",
+    prompt: "参考人物形象、镜头运动和音乐节奏",
+    aspect_ratio: "16:9",
+    resolution: "720p",
+    seconds: "15",
+    motion_has_audio: true,
+    images: ["https://example.com/ref.png"],
+    reference_videos: ["https://example.com/ref.mp4"],
+    reference_audios: ["https://example.com/ref.mp3"],
+  });
+});
+
+test("validates FMGO k2.0-fast-720p duration, capacity and audio dependency", () => {
+  const base = { prompt: "测试", duration: 10, resolution: "720p", aspectRatio: "9:16", syncAudio: false };
+  assert.throws(() => fmgoK20FastPayload(FMGO_K20_FAST_MODEL, { ...base, duration: 12, materials: [] }), /只支持 10 秒或 15 秒/);
+  assert.throws(() => fmgoK20FastPayload(FMGO_K20_FAST_MODEL, {
+    ...base, materials: [{ kind: "audio", url: "https://example.com/ref.mp3" }],
+  }), /必须同时提供普通参考图或参考视频/);
+  assert.throws(() => fmgoK20FastPayload(FMGO_K20_FAST_MODEL, {
+    ...base,
+    materials: Array.from({ length: 10 }, (_, index) => ({ kind: "image", url: `https://example.com/${index}.png` })),
+  }), /图片参考最多 9 张/);
+});
 
 test("adds FMGO V2.5 to the model catalog and SD2.5 switch", () => {
   assert.ok(FALLBACK_MODELS.fmgo.includes(FMGO_V25_MODEL));

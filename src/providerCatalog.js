@@ -14,7 +14,14 @@ import {
 } from "./maxforaiCatalog.js";
 import { CLMM_BASE_URL, clmmCapability } from "./clmmCatalog.js";
 import { PIDOI_BASE_URL, PIDOI_MODELS, pidoiCapability } from "./pidoiCatalog.js";
-import { FMGO_V25_MODEL, fmgoV25Capability, isFmgoV25Model } from "./fmgoCatalog.js";
+import {
+  FMGO_K20_FAST_MODEL,
+  FMGO_V25_MODEL,
+  fmgoK20FastCapability,
+  fmgoV25Capability,
+  isFmgoK20FastModel,
+  isFmgoV25Model,
+} from "./fmgoCatalog.js";
 import {
   AIYRX_BASE_URL,
   AIYRX_MODEL_LABELS,
@@ -23,6 +30,7 @@ import {
 } from "./aiyrxCatalog.js";
 import { SEEDANCE_VIDEO_BASE_URL } from "./seedanceVideoCatalog.js";
 import { UNMAU_BASE_URL, UNMAU_FALLBACK_MODELS, unmauCapability } from "./unmauCatalog.js";
+import { SUANLIAI_BASE_URL, SUANLIAI_VIDEO_MODELS, suanliaiCapability } from "./suanliaiCatalog.js";
 
 export const DEFAULT_PROFILES = [
   {
@@ -137,6 +145,14 @@ export const DEFAULT_PROFILES = [
     model: "",
     mediaUploadUrl: `${SEEDANCE_VIDEO_BASE_URL}/v1/uploads/images`,
   },
+  {
+    id: "suanliai",
+    name: "算力AI",
+    baseUrl: SUANLIAI_BASE_URL,
+    adapter: "suanliai",
+    model: SUANLIAI_VIDEO_MODELS[0],
+    mediaUploadUrl: "",
+  },
 ];
 
 export const FALLBACK_MODELS = {
@@ -154,6 +170,7 @@ export const FALLBACK_MODELS = {
     "ss-v2-fast",
     "feimiao-v2-431",
     "feimiao-v2-431-fast",
+    FMGO_K20_FAST_MODEL,
     FMGO_V25_MODEL,
   ],
   paipu: [
@@ -207,10 +224,12 @@ export const FALLBACK_MODELS = {
   aiyrx: AIYRX_VIDEO_MODELS,
   seedancevideo: [],
   unmau: UNMAU_FALLBACK_MODELS,
+  suanliai: SUANLIAI_VIDEO_MODELS,
 };
 
 export const FALLBACK_MODEL_LABELS = {
   fmgo: {
+    [FMGO_K20_FAST_MODEL]: "k2.0-fast-720p · 飞猫K2.0 Fast · 720P · 10/15秒 · 9图/3视频/3音频",
     [FMGO_V25_MODEL]: "feimiao-v2.5 · 飞猫 SD2.5 · 固定480P · 固定5秒",
   },
   maxforai: {
@@ -227,10 +246,19 @@ export const FALLBACK_MODEL_LABELS = {
     "wf-sd2.0-v2": "WF Seedance 2.0 V2 · 933 · 按次 · 卡脸 · 720P · 4–15秒 · 提示词≤2500字",
     "ft-sd2.0-v1": "FT Seedance 2.0 V1 · 900 · 按次 · 卡脸 · 720P · 4–15秒",
     "ft-sd2.0-v2": "FT Seedance 2.0 V2 · 933 · 按次 · 卡脸 · 720P · 4–15秒",
+    "dbb-Q933-pro-face": "DBB Seedance 2.0 Q933 Pro Face · 903 · 真人脸支持 · 720P · 4–15秒 · 9图/3视频/3音频",
+    "dbb-sd2.0-v2": "DBB Seedance 2.0 V2 · 933 · 原生不卡脸 · 720P · 4–15秒 · 素材按接口校验",
     "wf-sd2.5-v2": "WF Seedance 2.5 V2 · 真人脸支持 · 720P · 固定30秒 · 30图/3视频/无音频",
     "hn-sd2.5-v1": "HN Seedance 2.5 V1 · 不支持真人脸 · 按秒 · 720P · 4–30秒 · 30图/10视频/10音频",
     "hn-sd2.5-v2": "HN Seedance 2.5 V2 · 内置过脸 · 720P · 固定30秒 · 30图/无视频音频",
     "wf-sd2.5-v4": "WF Seedance 2.5 V4 · 原生不卡脸 · 按秒 · 720P · 4–30秒 · 30图/10视频/10音频",
+    "dbb-sd2.5-v1": "DBB Seedance 2.5 V1 · 原生不卡脸 · 固定720P · 4–30秒 · 30图/10视频/10音频",
+    "dbb-sd2.5-v2": "DBB Seedance 2.5 V2 · 原生不卡脸 · 480P/720P · 4–30秒 · 30图/10视频/10音频",
+    "ld-sd2.5-v1": "LD Seedance 2.5 V1 · 原生不卡脸 · 480P/720P/1080P · 4–30秒 · 30图/10视频/10音频",
+    "ld-sd2.5-v2": "LD Seedance 2.5 V2 · 内置插件过脸 · 固定720P/30秒 · 9图/无视频音频",
+    "ld-sd2.5-v3": "LD Seedance 2.5 V3 · 微卡脸 · 480P/720P · 4–30秒 · 30图/10视频/10音频",
+    "lg-sd2.5-v1": "LG Seedance 2.5 V1 · 原生不卡脸 · 480P/720P/1080P · 4–30秒 · 30图/10视频/10音频",
+    "wf-sd2.5-v5": "WF Seedance 2.5 V5 · Dola · 固定720P/30秒 · 30图/无视频/10音频",
   },
   canseedream: {
     kele_pool: "可乐线路 · 480P · 15秒 · 450积分",
@@ -254,6 +282,7 @@ export const FALLBACK_MODEL_LABELS = {
     "ad-seedance-2.0-720p": "AD Seedance 2.0 · 720P · 4–15秒 · 9图/3视频/3音频",
     "ad-seedance-2.5-720p": "AD Seedance 2.5 · 720P · 4–30秒 · 30图/10视频/10音频",
   },
+  suanliai: Object.fromEntries(SUANLIAI_VIDEO_MODELS.map((model) => [model, model])),
 };
 
 const SD_VERSION_MODELS = {
@@ -295,6 +324,10 @@ const SD_VERSION_MODELS = {
     sd20: "ad-seedance-2.0-720p",
     sd25: "ad-seedance-2.5-720p",
   },
+  suanliai: {
+    sd20: "004系列/sd2.0(933/4-15秒支持过人脸720P)",
+    sd25: "004系列/sd2.5(30-10-10支持过人脸4-30秒720P)",
+  },
 };
 
 export function preferredModelForSdVersion(adapter, version) {
@@ -330,6 +363,7 @@ function rawCapabilityFor(profile) {
   };
 
   if (adapter === "fmgo") {
+    if (isFmgoK20FastModel(model)) return fmgoK20FastCapability();
     if (isFmgoV25Model(model)) return fmgoV25Capability(model);
     const encodedVariant = model.match(/-(480p|720p|1080p)-(\d+)s$/i);
     const isSs = model === "ss-v2";
@@ -586,6 +620,9 @@ function rawCapabilityFor(profile) {
   if (adapter === "unmau") {
     return profile?.routeCapabilities?.[profile?.model] || unmauCapability(profile?.model);
   }
+  if (adapter === "suanliai") {
+    return profile?.routeCapabilities?.[profile?.model] || suanliaiCapability(profile?.model);
+  }
 
   return base;
 }
@@ -646,7 +683,7 @@ export function sdVersionForProfile(profile) {
       (numericDurations.length > 0 && Math.max(...numericDurations) > 15);
     return exceedsSd20Limits ? "sd25" : "sd20";
   }
-  if (profile?.adapter === "ziyuai" || profile?.adapter === "seedancevideo") {
+  if (profile?.adapter === "ziyuai" || profile?.adapter === "seedancevideo" || profile?.adapter === "suanliai") {
     return rawCapabilityFor(profile)._sdVersion || "sd20";
   }
   if (profile?.adapter === "lwaigc") {
@@ -660,7 +697,7 @@ export function modelForSdVersion(profile, version, availableModels) {
   if (currentModel && sdVersionForProfile(profile) === version) return currentModel;
 
   const preferred = preferredModelForSdVersion(profile?.adapter, version);
-  const dynamicAdapters = new Set(["canseedream", "ziyuai", "maxforai", "clmm", "aiyrx", "seedancevideo", "unmau"]);
+  const dynamicAdapters = new Set(["canseedream", "ziyuai", "maxforai", "clmm", "aiyrx", "seedancevideo", "unmau", "suanliai"]);
   if (!dynamicAdapters.has(profile?.adapter)) return preferred;
   const candidates = Array.isArray(availableModels) && availableModels.length
     ? availableModels
@@ -688,6 +725,7 @@ export function inferAdapter(baseUrl) {
     if (host === "api.aiyrx.xyz") return "aiyrx";
     if (host === "772808.xyz") return "seedancevideo";
     if (host === "newapis.unmau.com") return "unmau";
+    if (host === "suanliai.top" || host === "www.suanliai.top") return "suanliai";
   } catch {}
   return "newapi";
 }
@@ -695,6 +733,15 @@ export function inferAdapter(baseUrl) {
 export function migrateSavedProfile(profile) {
   if (!profile || typeof profile !== "object") return profile;
   const inferredAdapter = inferAdapter(profile.baseUrl);
+  if (profile.id === "suanliai" || inferredAdapter === "suanliai" || profile.adapter === "suanliai") {
+    return {
+      ...profile,
+      baseUrl: SUANLIAI_BASE_URL,
+      adapter: "suanliai",
+      model: String(profile.model || "").trim() || SUANLIAI_VIDEO_MODELS[0],
+      mediaUploadUrl: "",
+    };
+  }
   if (profile.id === "unmau" || inferredAdapter === "unmau" || profile.adapter === "unmau") {
     return {
       ...profile,

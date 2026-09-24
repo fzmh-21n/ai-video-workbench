@@ -2,12 +2,25 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  downloadedChapterTaskIds,
   batchItemDownloadCandidates,
   downloadTaskBuckets,
   orderedDownloadFilename,
   orderedDownloadTasks,
   preferredBatchDownloadTasks,
+  recoverBatchItemTaskIds,
 } from "../src/taskDownload.js";
+
+test("marks both the requested chapter task and the fallback task that supplied the downloaded file", () => {
+  assert.deepEqual(
+    downloadedChapterTaskIds({ id: "current-task" }, { id: "fallback-task" }),
+    ["current-task", "fallback-task"],
+  );
+  assert.deepEqual(
+    downloadedChapterTaskIds({ id: "same-task" }, { id: "same-task" }),
+    ["same-task"],
+  );
+});
 
 test("downloads completed batch videos in numeric chapter order", () => {
   const ordered = orderedDownloadTasks([
@@ -277,6 +290,64 @@ test("does not guess another success when explicit task IDs are missing locally"
 
   assert.deepEqual(batchItemDownloadCandidates(item, stored), []);
   assert.deepEqual(preferredBatchDownloadTasks([item], stored), []);
+});
+
+test("recovers task IDs saved after the video workspace was hidden", () => {
+  const item = {
+    section: 5,
+    sourceName: "第05章.txt",
+    prompt: "本节视频提示词",
+    references: [{ kind: "image", name: "人物.png" }],
+    taskIds: [],
+    lastSubmission: {
+      attemptedAt: 1000,
+      profileId: "unmau",
+      model: "vd-seedance-2.0-480p",
+    },
+  };
+  const stored = [
+    {
+      id: "old-task",
+      createdAtMs: -4101,
+      profileId: "unmau",
+      model: "vd-seedance-2.0-480p",
+      batchSection: 5,
+      reuseSnapshot: { prompt: "本节视频提示词", references: item.references },
+    },
+    {
+      id: "wrong-model",
+      createdAtMs: 1001,
+      profileId: "unmau",
+      model: "other-model",
+      batchSection: 5,
+      reuseSnapshot: { prompt: "本节视频提示词", references: item.references },
+    },
+    {
+      id: "current-task",
+      createdAtMs: 1002,
+      profileId: "unmau",
+      model: "vd-seedance-2.0-480p",
+      batchSection: 5,
+      reuseSnapshot: { prompt: "本节视频提示词", references: item.references },
+    },
+  ];
+
+  assert.deepEqual(recoverBatchItemTaskIds(item, stored), ["current-task"]);
+});
+
+test("uses the saved batch ID for exact task recovery", () => {
+  const item = {
+    section: 1,
+    prompt: "同一提示词",
+    taskIds: [],
+    lastSubmission: { attemptedAt: 1000, profileId: "relay", model: "model", batchId: "new-batch" },
+  };
+  const stored = [
+    { id: "old", batchId: "old-batch", batchSection: 1, createdAtMs: 1001, profileId: "relay", model: "model", reuseSnapshot: { prompt: "同一提示词" } },
+    { id: "current", batchId: "new-batch", batchSection: 1, createdAtMs: 999, profileId: "relay", model: "model", reuseSnapshot: { prompt: "同一提示词" } },
+  ];
+
+  assert.deepEqual(recoverBatchItemTaskIds(item, stored), ["current"]);
 });
 
 test("excludes a completed video marked unusable from batch downloads", () => {

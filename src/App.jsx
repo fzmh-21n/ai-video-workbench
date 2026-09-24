@@ -22,7 +22,7 @@ import {
   getPendingTasks,
   isWorkbenchAuthFailure,
   listTasks,
-  markTaskDownloaded,
+  markTasksDownloaded,
   projectNames as getTaskProjectNames,
   putPolledTaskUpdates,
   putTask,
@@ -37,7 +37,7 @@ import {
 } from "./credentialStore.js";
 import { normalizeApiKey } from "./apiKey.js";
 import { normalizedTaskGroupProgress, normalizedTaskProgress } from "./taskProgress.js";
-import { downloadTaskBuckets, orderedDownloadFilename } from "./taskDownload.js";
+import { downloadedChapterTaskIds, downloadTaskBuckets, orderedDownloadFilename } from "./taskDownload.js";
 import { taskContentRequestUrl } from "./taskContent.js";
 import { batchTimeline, taskTimeline } from "./taskTimeline.js";
 import {
@@ -47,9 +47,27 @@ import {
   withoutDeletedIds,
 } from "./deletionStore.js";
 import { syncAudioForProfile, withSyncAudioPreference } from "./syncAudioPreference.js";
-import { loadFixedContentByVersion, withFixedContentForVersion } from "./fixedContentStore.js";
+import {
+  loadUncommonProviderIds,
+  partitionProviders,
+  saveUncommonProviderIds,
+  withProviderCommonState,
+} from "./providerFavorites.js";
+import {
+  FIXED_CONTENT_TEMPLATES_KEY,
+  addFixedContentTemplate,
+  loadFixedContentByVersion,
+  loadFixedContentTemplates,
+  loadTaskProjectFixedContent,
+  removeFixedContentTemplate,
+  saveFixedContentTemplates,
+  saveTaskProjectFixedContent,
+  updateFixedContentTemplate,
+  withTaskProjectFixedContent,
+} from "./fixedContentStore.js";
 import { reusableAssetFor, taskReuseSnapshot } from "./taskReuse.js";
 import { regeneratedTaskRecord, reviewedTask } from "./taskRegeneration.js";
+import { isTaskCancellable, manuallyCancelledTask } from "./taskCancellation.js";
 import {
   filesFromProjectDirectory,
   loadProjectDirectory,
@@ -58,6 +76,8 @@ import {
 } from "./projectFolderStore.js";
 import BatchPanel from "./BatchPanel.jsx";
 import CostDashboard from "./CostDashboard.jsx";
+import FixedContentControls from "./FixedContentControls.jsx";
+import FixedContentManager from "./FixedContentManager.jsx";
 import TaskProjectManager from "./TaskProjectManager.jsx";
 import ImageWorkbench from "./ImageWorkbench.jsx";
 import {
@@ -190,7 +210,8 @@ function normalizeModels(payload, adapter) {
   return values.length ? values : FALLBACK_MODELS[adapter] || [];
 }
 
-function statusLabel(status) {
+function statusLabel(status, task) {
+  if (task?.cancelledByUser) return "已取消";
   return {
     queued: "排队中",
     processing: "生成中",
@@ -205,7 +226,23 @@ export default function App() {
   const [loginPassword, setLoginPassword] = useState("");
   const [loginError, setLoginError] = useState("");
   const [loggingIn, setLoggingIn] = useState(false);
+  const [serviceUnavailable, setServiceUnavailable] = useState(false);
   const [generationMode, setGenerationMode] = useState(() => localStorage.getItem("ai-workbench-generation-mode-v1") || "video");
+
+  useEffect(() => {
+    let cancelled = false;
+    async function checkService() {
+      try {
+        const response = await fetch("/api/health", { cache: "no-store", signal: AbortSignal.timeout(5000) });
+        if (!cancelled) setServiceUnavailable(!response.ok);
+      } catch {
+        if (!cancelled) setServiceUnavailable(true);
+      }
+    }
+    checkService();
+    const interval = window.setInterval(checkService, 10000);
+    return () => { cancelled = true; window.clearInterval(interval); };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -255,6 +292,8 @@ export default function App() {
 
   if (authStatus !== "authenticated") {
     return (
+      <>
+      {serviceUnavailable && <div className="service-disconnected" role="alert">工作台服务已断开。请检查一键启动窗口；恢复后本页会自动解除提示。</div>}
       <main className="login-shell">
         <form className="login-card" onSubmit={submitLogin}>
           <div className="login-brand">影</div>
@@ -268,6 +307,7 @@ export default function App() {
           <small>此工作台不开放注册</small>
         </form>
       </main>
+      </>
     );
   }
 
@@ -275,9 +315,17 @@ export default function App() {
     localStorage.setItem("ai-workbench-generation-mode-v1", mode);
     setGenerationMode(mode);
   };
-  return generationMode === "image"
-    ? <ImageWorkbench onVideoMode={() => switchGenerationMode("video")} onLogout={logout} />
-    : <Workbench onImageMode={() => switchGenerationMode("image")} onLogout={logout} />;
+  return (
+    <>
+      {serviceUnavailable && <div className="service-disconnected" role="alert">工作台服务已断开，任务状态暂时无法更新。请检查一键启动窗口；恢复后本页会自动解除提示。</div>}
+      <div hidden={generationMode !== "image"}>
+        <ImageWorkbench onVideoMode={() => switchGenerationMode("video")} onLogout={logout} />
+      </div>
+      <div hidden={generationMode !== "video"}>
+        <Workbench onImageMode={() => switchGenerationMode("image")} onLogout={logout} />
+      </div>
+    </>
+  );
 }
 
 function Workbench({ onImageMode, onLogout }) {
@@ -293,7 +341,7 @@ function Workbench({ onImageMode, onLogout }) {
   const [taskDatabaseReady, setTaskDatabaseReady] = useState(false);
   const [taskRefreshVersion, setTaskRefreshVersion] = useState(0);
   const [taskStatusFilter, setTaskStatusFilter] = useState("all");
-  const [taskProjectFilter, setTaskProjectFilter] = useState("all");
+  const [taskProjectFilter, setTaskProjectFilter] = useState(loadActiveTaskProject);
   const [taskProjectOptions, setTaskProjectOptions] = useState([]);
   const [taskProjects, setTaskProjects] = useState(loadTaskProjects);
   const [activeTaskProject, setActiveTaskProject] = useState(loadActiveTaskProject);
@@ -303,14 +351,16 @@ function Workbench({ onImageMode, onLogout }) {
   const [selectedTargetProject, setSelectedTargetProject] = useState(loadActiveTaskProject);
   const [taskQuery, setTaskQuery] = useState("");
   const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
-  const [fixedContentByVersion, setFixedContentByVersion] = useState(() => {
+  const [fixedContentTemplates, setFixedContentTemplates] = useState(() => {
     const initialProfile = profiles.find((profile) => profile.id === activeId) || profiles[0];
-    return loadFixedContentByVersion(
+    const legacyContents = loadFixedContentByVersion(
       loadJson(FIXED_CONTENT_BY_VERSION_KEY, null),
       localStorage.getItem(FIXED_CONTENT_KEY) || "",
       sdVersionForProfile(initialProfile),
     );
+    return loadFixedContentTemplates(loadJson(FIXED_CONTENT_TEMPLATES_KEY, null), legacyContents);
   });
+  const [taskProjectFixedContent, setTaskProjectFixedContent] = useState(loadTaskProjectFixedContent);
   const [projectName, setProjectName] = useState("");
   const [projectAssets, setProjectAssets] = useState([]);
   const [projectDirectoryHandle, setProjectDirectoryHandle] = useState(null);
@@ -328,8 +378,11 @@ function Workbench({ onImageMode, onLogout }) {
   const [notice, setNotice] = useState("请选择中转站并完成 API 配置");
   const [submitting, setSubmitting] = useState(false);
   const [configOpen, setConfigOpen] = useState(false);
+  const [uncommonProfileIds, setUncommonProfileIds] = useState(loadUncommonProviderIds);
+  const [otherProfilesOpen, setOtherProfilesOpen] = useState(false);
   const [costOpen, setCostOpen] = useState(false);
   const [taskProjectOpen, setTaskProjectOpen] = useState(false);
+  const [fixedContentManagerOpen, setFixedContentManagerOpen] = useState(false);
   const [draft, setDraft] = useState(profiles[0]);
   const [draftKey, setDraftKey] = useState("");
   const [draftUploadKey, setDraftUploadKey] = useState("");
@@ -359,6 +412,10 @@ function Workbench({ onImageMode, onLogout }) {
 
   const activeProfile =
     profiles.find((profile) => profile.id === activeId) || profiles[0];
+  const partitionedProfiles = useMemo(
+    () => partitionProviders(profiles, uncommonProfileIds),
+    [profiles, uncommonProfileIds],
+  );
   const rawCapability = useMemo(() => capabilityFor(activeProfile), [activeProfile]);
   const capability = useMemo(() => ({
     ...rawCapability,
@@ -372,9 +429,17 @@ function Workbench({ onImageMode, onLogout }) {
     ));
   }
   const sdVersion = sdVersionForProfile(activeProfile);
-  const fixedContent = fixedContentByVersion[sdVersion] || "";
+  const savedFixedContentTemplateId = taskProjectFixedContent[activeTaskProject];
+  const fixedContentTemplate = fixedContentTemplates.find((item) => item.id === savedFixedContentTemplateId)
+    || fixedContentTemplates[0];
+  const fixedContentTemplateId = fixedContentTemplate?.id || "";
+  const fixedContent = fixedContentTemplate?.[sdVersion] || "";
   function setFixedContent(value) {
-    setFixedContentByVersion((current) => withFixedContentForVersion(current, sdVersion, value));
+    if (!fixedContentTemplate) return;
+    setFixedContentTemplates((current) => updateFixedContentTemplate(current, fixedContentTemplate.id, {
+      ...fixedContentTemplate,
+      [sdVersion]: value,
+    }));
   }
   const availableActiveModels = modelOptions[activeProfile.id];
   const sdVersionAvailability = {
@@ -441,10 +506,19 @@ function Workbench({ onImageMode, onLogout }) {
     profilesRef.current = profiles;
   }, [profiles]);
   useEffect(() => localStorage.setItem(ACTIVE_KEY, activeId), [activeId]);
+  useEffect(() => saveUncommonProviderIds(uncommonProfileIds), [uncommonProfileIds]);
   useEffect(() => {
-    localStorage.setItem(FIXED_CONTENT_BY_VERSION_KEY, JSON.stringify(fixedContentByVersion));
+    saveFixedContentTemplates(fixedContentTemplates);
+    localStorage.removeItem(FIXED_CONTENT_BY_VERSION_KEY);
     localStorage.removeItem(FIXED_CONTENT_KEY);
-  }, [fixedContentByVersion]);
+  }, [fixedContentTemplates]);
+  useEffect(() => {
+    saveTaskProjectFixedContent(taskProjectFixedContent);
+  }, [taskProjectFixedContent]);
+  useEffect(() => {
+    if (!fixedContentTemplateId || taskProjectFixedContent[activeTaskProject] === fixedContentTemplateId) return;
+    setTaskProjectFixedContent((current) => withTaskProjectFixedContent(current, activeTaskProject, fixedContentTemplateId));
+  }, [activeTaskProject, fixedContentTemplateId, taskProjectFixedContent]);
   useEffect(() => {
     localStorage.setItem(SYNC_AUDIO_PREFERENCES_KEY, JSON.stringify(syncAudioPreferences));
   }, [syncAudioPreferences]);
@@ -734,6 +808,7 @@ function Workbench({ onImageMode, onLogout }) {
     setDraftUploadKey(credentials.mediaKey);
     setRememberKey(credentials.remember);
     setConfigStatus("填写配置后测试连接");
+    setOtherProfilesOpen(uncommonProfileIds.includes(profile.id));
     setConfigOpen(true);
   }
 
@@ -745,6 +820,12 @@ function Workbench({ onImageMode, onLogout }) {
     setDraftUploadKey(credentials.mediaKey);
     setRememberKey(credentials.remember);
     setConfigStatus("填写配置后测试连接");
+  }
+
+  function setDraftCommon(common) {
+    setUncommonProfileIds((current) => withProviderCommonState(current, draft.id, common));
+    if (!common) setOtherProfilesOpen(true);
+    setConfigStatus(common ? "已设为常用中转站" : "已移入其他中转站");
   }
 
   function createProfile() {
@@ -812,6 +893,7 @@ function Workbench({ onImageMode, onLogout }) {
       localStorage.setItem(DISMISSED_BUILTIN_PROFILES_KEY, JSON.stringify([...dismissed]));
     }
     clearCredentials(draft.id);
+    setUncommonProfileIds((current) => current.filter((id) => id !== draft.id));
     localStorage.setItem(PROFILE_KEY, JSON.stringify(remaining));
     setProfiles(remaining);
     const next = remaining[0];
@@ -1345,14 +1427,53 @@ function Workbench({ onImageMode, onLogout }) {
     setNotice(`已从常用模型切换到 ${profile.name} · ${model}`);
   }
 
+  function selectFixedContentTemplate(templateId) {
+    const template = fixedContentTemplates.find((item) => item.id === templateId);
+    if (!template) return;
+    setTaskProjectFixedContent((current) => withTaskProjectFixedContent(current, activeTaskProject, template.id));
+    setNotice(`项目“${activeTaskProject}”已固定使用“${template.name}”；重启或切回项目时会自动恢复`);
+  }
+
+  function createFixedContent() {
+    const existingNames = new Set(fixedContentTemplates.map((item) => item.name));
+    let index = fixedContentTemplates.length + 1;
+    while (existingNames.has(`新固定内容 ${index}`)) index += 1;
+    const id = uid("fixed-content");
+    const next = addFixedContentTemplate(fixedContentTemplates, `新固定内容 ${index}`, id);
+    const created = next.find((item) => item.id === id);
+    setFixedContentTemplates(next);
+    return created;
+  }
+
+  function saveFixedContent(id, changes) {
+    setFixedContentTemplates((current) => updateFixedContentTemplate(current, id, changes));
+    setNotice(`固定内容“${String(changes?.name || "").trim()}”已保存`);
+  }
+
+  function deleteFixedContent(id) {
+    const next = removeFixedContentTemplate(fixedContentTemplates, id);
+    const fallbackId = next[0].id;
+    setFixedContentTemplates(next);
+    setTaskProjectFixedContent((current) => Object.fromEntries(Object.entries(current)
+      .map(([projectName, templateId]) => [projectName, templateId === id ? fallbackId : templateId])));
+    setNotice("固定内容已删除；原来使用它的项目已改用列表中的第一条固定内容");
+    return fallbackId;
+  }
+
+  function fixedContentForProjectVersion(projectName, version) {
+    const templateId = taskProjectFixedContent[String(projectName || UNCLASSIFIED_PROJECT)] || fixedContentTemplates[0]?.id;
+    const template = fixedContentTemplates.find((item) => item.id === templateId) || fixedContentTemplates[0];
+    return template?.[version === "sd25" ? "sd25" : "sd20"] || "";
+  }
+
   function createTaskProject(name) {
     const next = addTaskProject(taskProjects, name);
     const createdName = next[next.length - 1];
     setTaskProjects(next);
     setActiveTaskProject(createdName);
     setTaskProjectFilter(createdName);
-    setRatioProjectPrompt({ projectName: createdName, created: true });
-    setNotice(`已新建并切换到任务项目“${createdName}”，请选择这个项目的视频比例`);
+    setRatioProjectPrompt({ projectName: createdName, created: true, templateId: fixedContentTemplateId || fixedContentTemplates[0]?.id || "" });
+    setNotice(`已新建并切换到任务项目“${createdName}”，请选择视频比例和固定内容`);
   }
 
   function selectTaskProject(name) {
@@ -1360,25 +1481,32 @@ function Workbench({ onImageMode, onLogout }) {
     setActiveTaskProject(normalized);
     setTaskProjectFilter(normalized);
     const savedRatio = taskProjectRatio(taskProjectRatios, normalized);
-    if (savedRatio) {
+    const savedTemplateId = taskProjectFixedContent[normalized];
+    const savedTemplate = fixedContentTemplates.find((item) => item.id === savedTemplateId);
+    if (savedRatio && savedTemplate) {
       setRatio(savedRatio);
-      setNotice(`已切换到任务项目“${normalized}”，公共比例已恢复为 ${savedRatio}`);
+      setNotice(`已切换到任务项目“${normalized}”，已恢复比例 ${savedRatio} 和固定内容“${savedTemplate.name}”`);
     } else {
-      setRatioProjectPrompt({ projectName: normalized, created: false });
-      setNotice(`已切换到任务项目“${normalized}”，请先选择这个项目的视频比例`);
+      setRatioProjectPrompt({ projectName: normalized, created: false, templateId: savedTemplate?.id || fixedContentTemplates[0]?.id || "" });
+      setNotice(`已切换到任务项目“${normalized}”，请设置视频比例和固定内容`);
     }
   }
 
   function chooseTaskProjectRatio(value) {
     const projectName = ratioProjectPrompt?.projectName || activeTaskProject;
+    const templateId = ratioProjectPrompt?.templateId || fixedContentTemplates[0]?.id;
     const next = withTaskProjectRatio(taskProjectRatios, projectName, value);
     setTaskProjectRatios(next);
     saveTaskProjectRatios(next);
     setRatio(capability.ratios.includes(value) ? value : capability.ratios[0]);
+    if (templateId) {
+      setTaskProjectFixedContent((current) => withTaskProjectFixedContent(current, projectName, templateId));
+    }
     setRatioProjectPrompt(null);
+    const templateName = fixedContentTemplates.find((item) => item.id === templateId)?.name || "默认固定内容";
     setNotice(capability.ratios.includes(value)
-      ? `项目“${projectName}”已固定为 ${value}；以后重开工作台或切回该项目都会自动恢复`
-      : `项目“${projectName}”已记住 ${value}；当前模型不支持该比例，暂时使用 ${capability.ratios[0]}`);
+      ? `项目“${projectName}”已固定为 ${value}，并使用“${templateName}”；重开工作台会自动恢复`
+      : `项目“${projectName}”已记住 ${value} 和“${templateName}”；当前模型暂时使用 ${capability.ratios[0]}`);
   }
 
   async function deleteTaskProject(name) {
@@ -1396,6 +1524,12 @@ function Workbench({ onImageMode, onLogout }) {
       const next = { ...current };
       delete next[normalized];
       saveTaskProjectRatios(next);
+      return next;
+    });
+    setTaskProjectFixedContent((current) => {
+      const next = { ...current };
+      delete next[normalized];
+      saveTaskProjectFixedContent(next);
       return next;
     });
     if (activeTaskProject === normalized) {
@@ -1451,7 +1585,7 @@ function Workbench({ onImageMode, onLogout }) {
     const targetProfile = profiles.find((profile) => profile.id === task.profileId) || activeProfile;
     const targetModel = task.model || targetProfile.model;
     const targetVersion = sdVersionForProfile({ ...targetProfile, model: targetModel });
-    const versionFixedContent = fixedContentByVersion[targetVersion] || "";
+    const versionFixedContent = fixedContentForProjectVersion(task.projectName, targetVersion);
     let reusablePrompt = String(snapshot.prompt || task.prompt || "");
     if (!snapshot.prompt && versionFixedContent && reusablePrompt.startsWith(versionFixedContent)) {
       reusablePrompt = reusablePrompt.slice(versionFixedContent.length).replace(/^\s+/, "");
@@ -1541,6 +1675,14 @@ function Workbench({ onImageMode, onLogout }) {
     setNotice(dissatisfied ? "已标记为不满意；可以按原参数重新生成，旧视频会保留" : "已取消不满意标记");
   }
 
+  async function cancelTaskGeneration(task) {
+    if (!isTaskCancellable(task)) return;
+    if (!window.confirm("确定取消这条生成任务吗？\n\n工作台会立即停止查询并标记为已取消，但无法保证中转后台停止生成，也不代表自动退款。")) return;
+    await putTask(manuallyCancelledTask(task));
+    setTaskRefreshVersion((value) => value + 1);
+    setNotice("已停止工作台跟踪并标记为已取消；中转后台任务可能仍会继续生成");
+  }
+
   async function regenerateTask(task) {
     if (task.status !== "completed" || task.reviewStatus !== "dissatisfied") return;
     const targetProfile = profiles.find((profile) => profile.id === task.profileId);
@@ -1559,7 +1701,7 @@ function Workbench({ onImageMode, onLogout }) {
     const submissionProfile = { ...targetProfile, model: targetModel };
     const targetCapability = capabilityFor(submissionProfile);
     const targetVersion = sdVersionForProfile(submissionProfile);
-    const versionFixedContent = fixedContentByVersion[targetVersion] || "";
+    const versionFixedContent = fixedContentForProjectVersion(task.projectName, targetVersion);
     let reusablePrompt = String(snapshot.prompt || task.prompt || "");
     if (!snapshot.prompt && versionFixedContent && reusablePrompt.startsWith(versionFixedContent)) {
       reusablePrompt = reusablePrompt.slice(versionFixedContent.length).replace(/^\s+/, "");
@@ -1827,10 +1969,11 @@ function Workbench({ onImageMode, onLogout }) {
           link.click();
           link.remove();
           window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
-          downloaded += 1;
-          downloadedTaskIds.push(task.id);
           try {
-            await markTaskDownloaded(downloadedTask.id);
+            await markTasksDownloaded(downloadedChapterTaskIds(task, downloadedTask));
+            downloaded += 1;
+            downloadedTaskIds.push(task.id);
+            setTaskRefreshVersion((value) => value + 1);
           } catch {
             markErrors.push(task.title || task.id);
           }
@@ -2009,6 +2152,8 @@ function Workbench({ onImageMode, onLogout }) {
               capability={capability}
               duration={duration}
               fixedContent={fixedContent}
+              fixedContentTemplateId={fixedContentTemplateId}
+              fixedContentTemplates={fixedContentTemplates}
               fixedContentVersionLabel={sdVersion === "sd25" ? "SD2.5" : "SD2.0"}
               headers={headersFor(activeProfile)}
               notice={notice}
@@ -2016,6 +2161,7 @@ function Workbench({ onImageMode, onLogout }) {
               onProjectFolder={selectProjectFolder}
               onChooseProjectFolder={chooseProjectFolder}
               onDownloadTasks={downloadTaskCollection}
+              onManageFixedContent={() => setFixedContentManagerOpen(true)}
               onRestoreProjectFolder={restoreProjectFolder}
               onTasksAdded={() => {
                 setPage(1);
@@ -2036,6 +2182,7 @@ function Workbench({ onImageMode, onLogout }) {
               seed={seed}
               setDuration={setDuration}
               setFixedContent={setFixedContent}
+              setFixedContentTemplate={selectFixedContentTemplate}
               setQuantity={setQuantity}
               setRatio={changeProjectRatio}
               setResolution={setResolution}
@@ -2081,18 +2228,15 @@ function Workbench({ onImageMode, onLogout }) {
               />
             </div>
 
-            <label className="field-label fixed-label" htmlFor="fixed-content">
-              固定内容（{sdVersion === "sd25" ? "SD2.5" : "SD2.0"}）
-              <span>两个模型版本分别保存；每次提交自动放在提示词最前方，清空素材不会删除</span>
-            </label>
-            <textarea
-              className="fixed-content"
-              id="fixed-content"
-              value={fixedContent}
-              onChange={(event) => setFixedContent(event.target.value)}
-              placeholder="例如：统一画风、人物一致性、镜头规范等每次都要携带的内容"
+            <FixedContentControls
+              fixedContent={fixedContent}
+              onChange={setFixedContent}
+              onManage={() => setFixedContentManagerOpen(true)}
+              onSelect={selectFixedContentTemplate}
+              selectedTemplateId={fixedContentTemplateId}
+              templates={fixedContentTemplates}
+              versionLabel={sdVersion === "sd25" ? "SD2.5" : "SD2.0"}
             />
-            <div className="fixed-content-count">固定内容 {fixedContent.length} 字</div>
 
             <label className="field-label" htmlFor="prompt">提示词 Prompt</label>
             <div className="prompt-field">
@@ -2332,10 +2476,11 @@ function Workbench({ onImageMode, onLogout }) {
                           const times = taskTimeline(task);
                           return (
                             <article className={`task-card batch-child-task ${childExpanded ? "expanded" : ""}`} key={task.id} onClick={() => toggleTask(task)}>
-                              <div className="task-topline"><label className="task-select-box" onClick={(event) => event.stopPropagation()}><input type="checkbox" checked={selectedTaskIds.includes(task.id)} onChange={() => toggleTaskSelection(task.id)} /></label><code>#{task.title || task.id}</code><span className={`task-status ${task.status}`}>● {statusLabel(task.status)}</span>{task.downloadedAtMs && <span className="task-download-badge">✓ 已下载</span>}</div>
+                              <div className="task-topline"><label className="task-select-box" onClick={(event) => event.stopPropagation()}><input type="checkbox" checked={selectedTaskIds.includes(task.id)} onChange={() => toggleTaskSelection(task.id)} /></label><code>#{task.title || task.id}</code><span className={`task-status ${task.status}`}>● {statusLabel(task.status, task)}</span>{task.downloadedAtMs && <span className="task-download-badge">✓ 已下载</span>}</div>
                               <div className="progress-row"><div className="progress-track"><span style={{ width: `${shownProgress}%` }} /></div><b>{shownProgress}%</b></div>
                               <label className="task-project-assignment" onClick={(event) => event.stopPropagation()}><span>任务项目</span><select value={task.projectName || UNCLASSIFIED_PROJECT} onChange={(event) => moveTasksToProject([task.id], event.target.value)}>{availableTaskProjectOptions.map((name) => <option key={name} value={name}>{name}</option>)}</select></label>
                               {task.error && <p className="task-error">错误：{task.error}</p>}
+                              {isTaskCancellable(task) && <button className="delete-button" onClick={(event) => { event.stopPropagation(); cancelTaskGeneration(task); }}>取消生成</button>}
                               {task.status === "failed" && <button className="secondary-button" onClick={(event) => { event.stopPropagation(); reuseFailedTask(task); }}>复用本条</button>}
                               {task.status === "completed" && (
                                 <div className="task-review-actions" onClick={(event) => event.stopPropagation()}>
@@ -2381,8 +2526,9 @@ function Workbench({ onImageMode, onLogout }) {
                     <div className="task-title-with-select"><label className="task-select-box" onClick={(event) => event.stopPropagation()}><input type="checkbox" checked={selectedTaskIds.includes(task.id)} onChange={() => toggleTaskSelection(task.id)} /></label><code title={task.id}>#{task.title || task.id}</code></div>
                     <div>
                       <button className="icon-button" onClick={(event) => { event.stopPropagation(); renameTask(task); }}>✎</button>
-                      <span className={`task-status ${task.status}`}>● {statusLabel(task.status)}</span>
+                      <span className={`task-status ${task.status}`}>● {statusLabel(task.status, task)}</span>
                       {task.downloadedAtMs && <span className="task-download-badge">✓ 已下载</span>}
+                      {isTaskCancellable(task) && <button className="delete-button" onClick={(event) => { event.stopPropagation(); cancelTaskGeneration(task); }}>取消生成</button>}
                       {task.status === "failed" && <button className="secondary-button" onClick={(event) => { event.stopPropagation(); reuseFailedTask(task); }}>复用本条</button>}
                       {task.status === "failed" && <button className="delete-button" onClick={(event) => { event.stopPropagation(); deleteTask(task); }}>删除</button>}
                     </div>
@@ -2436,13 +2582,29 @@ function Workbench({ onImageMode, onLogout }) {
             <div className="dialog-heading"><div><span>PROVIDERS</span><h2>中转站管理</h2></div><button onClick={() => setConfigOpen(false)}>×</button></div>
             <div className="config-layout">
               <nav className="profile-list">
-                {profiles.map((profile) => <button className={profile.id === draft.id ? "active" : ""} key={profile.id} onClick={() => selectDraft(profile.id)}><strong>{profile.name}</strong><small>{profile.model ? modelLabel(profile, profile.model) : "未选择模型"}</small></button>)}
+                <div className="profile-list-heading"><strong>★ 常用中转站</strong><span>{partitionedProfiles.common.length}</span></div>
+                {partitionedProfiles.common.map((profile) => <button className={profile.id === draft.id ? "active" : ""} key={profile.id} onClick={() => selectDraft(profile.id)}><strong>{profile.name}</strong><small>{profile.model ? modelLabel(profile, profile.model) : "未选择模型"}</small></button>)}
+                {!partitionedProfiles.common.length && <p className="profile-list-empty">暂时没有常用中转站</p>}
+                <button className={`profile-folder${otherProfilesOpen ? " open" : ""}`} type="button" onClick={() => setOtherProfilesOpen((value) => !value)}>
+                  <strong><span>{otherProfilesOpen ? "▾" : "▸"}</span> 其他中转站</strong>
+                  <small>{partitionedProfiles.other.length} 个</small>
+                </button>
+                {otherProfilesOpen && <div className="profile-folder-items">
+                  {partitionedProfiles.other.map((profile) => <button className={profile.id === draft.id ? "active" : ""} key={profile.id} onClick={() => selectDraft(profile.id)}><strong>{profile.name}</strong><small>{profile.model ? modelLabel(profile, profile.model) : "未选择模型"}</small></button>)}
+                  {!partitionedProfiles.other.length && <p className="profile-list-empty">还没有不常用的中转站</p>}
+                </div>}
                 <button className="add-profile" onClick={createProfile}>＋ 新增中转站</button>
               </nav>
               <div className="config-form">
+                <div className="provider-common-setting">
+                  <div><strong>{uncommonProfileIds.includes(draft.id) ? "其他中转站" : "常用中转站"}</strong><span>只改变列表位置，不影响Key、模型和任务</span></div>
+                  <button type="button" className={uncommonProfileIds.includes(draft.id) ? "primary-button" : "secondary-button"} onClick={() => setDraftCommon(uncommonProfileIds.includes(draft.id))}>
+                    {uncommonProfileIds.includes(draft.id) ? "★ 设为常用" : "移入其他中转"}
+                  </button>
+                </div>
                 <label><span>配置名称</span><input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="例如：主力 API" /></label>
                 <label><span>Base URL</span><input value={draft.baseUrl} onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value, adapter: inferAdapter(event.target.value) })} placeholder="https://api.example.com" /></label>
-                <label><span>接口类型</span><select value={draft.adapter} onChange={(event) => setDraft({ ...draft, adapter: event.target.value })}><option value="fmgo">FMGO / 飞猫</option><option value="paipu">Paipu / Lec</option><option value="viralee">ViralE</option><option value="canseedream">CanSeeDream / 看见梦想</option><option value="lwaigc">LWAIGC 官方统一接口</option><option value="meaicc">MEAICC / 林木森AI</option><option value="ziyuai">Ziyu AI / 紫域AI</option><option value="globalaiopc">GlobalAiOpc / 全球AI</option><option value="maxforai">MaxForAI</option><option value="clmm">CLMM Mall</option><option value="pidoi">Pidoi</option><option value="aiyrx">AIYRX</option><option value="unmau">Unmau New API</option><option value="seedancevideo">Seedance 视频 / 772808</option><option value="newapi">New API 通用</option></select></label>
+                <label><span>接口类型</span><select value={draft.adapter} onChange={(event) => setDraft({ ...draft, adapter: event.target.value })}><option value="fmgo">FMGO / 飞猫</option><option value="paipu">Paipu / Lec</option><option value="viralee">ViralE</option><option value="canseedream">CanSeeDream / 看见梦想</option><option value="lwaigc">LWAIGC 官方统一接口</option><option value="meaicc">MEAICC / 林木森AI</option><option value="ziyuai">Ziyu AI / 紫域AI</option><option value="globalaiopc">GlobalAiOpc / 全球AI</option><option value="maxforai">MaxForAI</option><option value="clmm">CLMM Mall</option><option value="pidoi">Pidoi</option><option value="aiyrx">AIYRX</option><option value="unmau">Unmau New API</option><option value="seedancevideo">Seedance 视频 / 772808</option><option value="suanliai">算力AI（自动识别系列）</option><option value="newapi">New API 通用</option></select></label>
                 <label><span>API Key</span><input type="password" value={draftKey} onChange={(event) => setDraftKey(event.target.value)} placeholder="sk-••••••••" /><small>{rememberKey ? "将保存在此浏览器；公共电脑请勿启用。" : "仅保存在当前浏览器会话，不写入源码。"}</small></label>
                 <label className="remember-key-row"><input type="checkbox" checked={rememberKey} onChange={(event) => setRememberKey(event.target.checked)} /><span>在这台浏览器记住当前中转站的 Key</span></label>
                 <label>
@@ -2501,12 +2663,32 @@ function Workbench({ onImageMode, onLogout }) {
           projects={taskProjects}
         />
       )}
+      {fixedContentManagerOpen && (
+        <FixedContentManager
+          activeTemplateId={fixedContentTemplateId}
+          onClose={() => setFixedContentManagerOpen(false)}
+          onCreate={createFixedContent}
+          onDelete={deleteFixedContent}
+          onSave={saveFixedContent}
+          onSelect={selectFixedContentTemplate}
+          templates={fixedContentTemplates}
+        />
+      )}
       {ratioProjectPrompt && (
         <div className="modal-backdrop">
           <section className="project-ratio-dialog" role="dialog" aria-modal="true" aria-label="选择项目视频比例">
             <span>PROJECT RATIO</span>
-            <h2>选择“{ratioProjectPrompt.projectName}”的视频比例</h2>
-            <p>保存后，单条和批量的公共比例都会跟随这个项目；重开工作台或切回项目时自动恢复。</p>
+            <h2>设置“{ratioProjectPrompt.projectName}”</h2>
+            <p>视频比例和固定内容都会跟随这个项目；重开工作台或切回项目时自动恢复。</p>
+            <label className="project-fixed-content-choice">
+              <span>这个项目使用的固定内容</span>
+              <select
+                value={ratioProjectPrompt.templateId || fixedContentTemplates[0]?.id || ""}
+                onChange={(event) => setRatioProjectPrompt((current) => ({ ...current, templateId: event.target.value }))}
+              >
+                {fixedContentTemplates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}
+              </select>
+            </label>
             <div className="project-ratio-options">
               <button className="primary-button" onClick={() => chooseTaskProjectRatio("16:9")}><strong>16:9</strong><small>横屏视频</small></button>
               <button className="primary-button" onClick={() => chooseTaskProjectRatio("9:16")}><strong>9:16</strong><small>竖屏视频</small></button>

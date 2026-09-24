@@ -5,6 +5,7 @@ const VIDEO_CONTENT_UNSUPPORTED = new Set([
   "globalaiopc",
   "clmm",
   "pidoi",
+  "suanliai",
 ]);
 
 export function directTaskContentPaths(adapter, taskId) {

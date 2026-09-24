@@ -125,7 +125,7 @@ export function canBatchResubmit(item) {
   return item?.status === "generated";
 }
 
-export function beginBatchSubmission(item, profile, attemptedAt = Date.now()) {
+export function beginBatchSubmission(item, profile, attemptedAt = Date.now(), batchId = "") {
   return {
     ...item,
     status: "submitting",
@@ -141,6 +141,7 @@ export function beginBatchSubmission(item, profile, attemptedAt = Date.now()) {
       providerName: String(profile?.name || ""),
       model: String(profile?.model || ""),
       attemptedAt,
+      batchId,
     },
   };
 }

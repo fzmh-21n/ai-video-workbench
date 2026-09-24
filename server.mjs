@@ -75,9 +75,12 @@ import {
 import { CLMM_BASE_URL, CLMM_PRICING_URL, clmmLimitIssue, clmmModels, clmmVideoPayload } from "./src/clmmCatalog.js";
 import { PIDOI_BASE_URL, PIDOI_MODELS, pidoiLimitIssue, pidoiVideoPayload } from "./src/pidoiCatalog.js";
 import {
+  FMGO_K20_FAST_MODEL,
   FMGO_V25_MODEL,
+  fmgoK20FastPayload,
   fmgoV25ModelName,
   fmgoV25Payload,
+  isFmgoK20FastModel,
   isFmgoV25Model,
 } from "./src/fmgoCatalog.js";
 import {
@@ -92,6 +95,15 @@ import {
   seedanceVideoPayload,
 } from "./src/seedanceVideoCatalog.js";
 import { UNMAU_BASE_URL, unmauCatalog, unmauVideoPayload } from "./src/unmauCatalog.js";
+import {
+  SUANLIAI_BASE_URL,
+  SUANLIAI_VIDEO_MODELS,
+  suanliaiCatalog,
+  suanliaiReferencePrompt,
+  suanliaiRoutes,
+  suanliaiUploadPath,
+  suanliaiVideoPayload,
+} from "./src/suanliaiCatalog.js";
 import { prepareUnmauImage } from "./src/unmauImage.js";
 import { normalizedTaskProgress } from "./src/taskProgress.js";
 import { taskFailureDetails } from "./src/upstreamTaskFailure.js";
@@ -258,6 +270,7 @@ const FMGO_MODELS = [
   "ss-v2-fast",
   "feimiao-v2-431",
   "feimiao-v2-431-fast",
+  FMGO_K20_FAST_MODEL,
   FMGO_V25_MODEL,
 ];
 
@@ -389,6 +402,7 @@ function inferAdapter(url) {
   if (host === "api.aiyrx.xyz") return "aiyrx";
   if (host === "772808.xyz") return "seedancevideo";
   if (host === "newapis.unmau.com") return "unmau";
+  if (host === "suanliai.top" || host === "www.suanliai.top") return "suanliai";
   return "newapi";
 }
 
@@ -399,7 +413,7 @@ function providerConfig(req, requireModel = true) {
   let model = encodedModel;
   try { model = decodeURIComponent(encodedModel); } catch {}
   const requestedAdapter = String(req.get("x-api-adapter") || "").trim();
-  const adapter = ["fmgo", "paipu", "viralee", "canseedream", "lwaigc", "meaicc", "ziyuai", "globalaiopc", "maxforai", "clmm", "pidoi", "aiyrx", "seedancevideo", "unmau", "qiqi", "newapi"].includes(requestedAdapter)
+  const adapter = ["fmgo", "paipu", "viralee", "canseedream", "lwaigc", "meaicc", "ziyuai", "globalaiopc", "maxforai", "clmm", "pidoi", "aiyrx", "seedancevideo", "unmau", "suanliai", "qiqi", "newapi"].includes(requestedAdapter)
     ? requestedAdapter
     : inferAdapter(resolvedBaseUrl);
   // canseedream.com 目前会 301 跳转至 see.ximeiedu.org。跨域跳转会按
@@ -413,6 +427,7 @@ function providerConfig(req, requireModel = true) {
   if (adapter === "aiyrx") resolvedBaseUrl = AIYRX_BASE_URL;
   if (adapter === "seedancevideo") resolvedBaseUrl = SEEDANCE_VIDEO_BASE_URL;
   if (adapter === "unmau") resolvedBaseUrl = UNMAU_BASE_URL;
+  if (adapter === "suanliai") resolvedBaseUrl = SUANLIAI_BASE_URL;
   if (adapter === "qiqi") resolvedBaseUrl = QIQI_IMAGE_BASE_URL;
   const rawUploadUrl = String(req.get("x-media-upload-url") || "").trim();
   const mediaUploadUrl = adapter === "maxforai"
@@ -429,6 +444,8 @@ function providerConfig(req, requireModel = true) {
         ? `${resolvedBaseUrl}/v1/uploads/images`
       : adapter === "unmau"
         ? `${resolvedBaseUrl}/v1/materials`
+      : adapter === "suanliai" && suanliaiUploadPath(model)
+        ? `${resolvedBaseUrl}${suanliaiUploadPath(model)}`
       : "";
   const requestedMediaUploadKey = normalizeApiKey(req.get("x-media-upload-key"));
   const mediaUploadKey = ["lwaigc", "maxforai"].includes(adapter)
@@ -516,6 +533,8 @@ function fallbackModels(adapter) {
                   ? AIYRX_VIDEO_MODELS
                 : adapter === "seedancevideo"
                   ? []
+                : adapter === "suanliai"
+                  ? SUANLIAI_VIDEO_MODELS
         : [];
 }
 
@@ -581,6 +600,8 @@ function videoUrlsFrom(body, base) {
     body?.result_url,
     body?.url,
     body?.file_url,
+    body?.download_url,
+    body?.result?.video_url,
     typeof body?.object === "string" && /^https?:\/\//i.test(body.object) ? body.object : null,
     body?.metadata?.url,
     typeof body?.content === "string" ? body.content : null,
@@ -1513,7 +1534,9 @@ async function createFmgo(config, input) {
         ? 7
         : isFmgoV25Model(config.model)
           ? 30
-          : isFmgoFeimiaoChatModel(config.model)
+        : isFmgoK20FastModel(config.model)
+          ? 9
+        : isFmgoFeimiaoChatModel(config.model)
             ? 9
             : 7;
   const images = input.materials
@@ -1571,7 +1594,10 @@ async function createFmgo(config, input) {
   }
 
   const soraStyle = isFmgoSoraVideoModel(model);
-  const payload = isFmgoV25Model(model)
+  const structuredFmgoModel = isFmgoV25Model(model) || isFmgoK20FastModel(model);
+  const payload = isFmgoK20FastModel(model)
+    ? fmgoK20FastPayload(upstreamModel, input)
+    : isFmgoV25Model(model)
     ? fmgoV25Payload(upstreamModel, input)
     : soraStyle
     ? {
@@ -1589,7 +1615,7 @@ async function createFmgo(config, input) {
         duration: input.duration,
         response_format: "url",
       };
-  if (images.length && !isFmgoV25Model(model)) {
+  if (images.length && !structuredFmgoModel) {
     if (soraStyle) {
       payload.image_url = images[0];
       if (images.length > 1) payload.images = images.slice(1);
@@ -1597,7 +1623,7 @@ async function createFmgo(config, input) {
       payload.reference_images = images;
     }
   }
-  if (!isFmgoV25Model(model)) payload.generate_audio = input.syncAudio;
+  if (!structuredFmgoModel) payload.generate_audio = input.syncAudio;
   const response = await upstream(
     `${config.baseUrl}/v1/videos`,
     {
@@ -1658,6 +1684,28 @@ async function createVideo(config, input) {
   if (config.adapter === "fmgo") return createFmgo(config, input);
   if (config.adapter === "lwaigc") return createLwaigc(config, input);
   if (config.adapter === "seedancevideo") return createSeedanceVideo(config, input);
+  if (config.adapter === "suanliai") {
+    const routes = suanliaiRoutes(config.model);
+    const response = await upstream(`${config.baseUrl}${routes.createPath}`, {
+      method: "POST",
+      headers: authHeaders(config, {
+        "Content-Type": "application/json",
+        "Idempotency-Key": `video_${crypto.randomUUID()}`,
+      }),
+      body: JSON.stringify(suanliaiVideoPayload(config.model, input)),
+    }, 180_000);
+    const body = await readJson(response);
+    const taskId = taskIdFrom(body);
+    if (!taskId) throw httpError(502, "算力AI 创建成功但没有返回任务 ID");
+    return {
+      adapter: "suanliai",
+      baseUrl: config.baseUrl,
+      taskId,
+      statusPath: `${routes.statusBasePath}/${encodeURIComponent(taskId)}`,
+      contentPath: routes.content ? `/v1/videos/${encodeURIComponent(taskId)}/content` : "",
+      model: config.model,
+    };
+  }
   if (config.adapter === "aiyrx") {
     const idempotencyKey = `video_${crypto.randomUUID()}`;
     const bodyText = JSON.stringify(aiyrxVideoPayload(config.model, input));
@@ -2194,6 +2242,27 @@ app.get("/api/config/models", async (req, res, next) => {
       if (!catalog.models.length) throw httpError(502, "Unmau 当前 KEY 没有返回可用视频模型");
       return res.json(catalog);
     }
+    if (config.adapter === "suanliai") {
+      const bodies = [];
+      const errors = [];
+      for (const pathName of ["/v1/models", "/api/v1/models"]) {
+        try {
+          const response = await upstream(`${SUANLIAI_BASE_URL}${pathName}`, { headers: authHeaders(config) });
+          bodies.push(await readJson(response));
+        } catch (error) {
+          errors.push(error);
+        }
+      }
+      const catalog = suanliaiCatalog(...bodies);
+      if (catalog.models.length) return res.json(catalog);
+      if (errors.length === 2) {
+        return res.json({
+          models: SUANLIAI_VIDEO_MODELS,
+          warning: `实时模型列表暂时不可用，已使用公开文档模型：${errors[0]?.message || "连接失败"}`,
+        });
+      }
+      throw httpError(502, "算力AI 当前 KEY 没有返回可用视频模型");
+    }
     const response = await upstream(`${config.baseUrl}/v1/models`, { headers: authHeaders(config) });
     if (!response.ok && [404, 405, 501].includes(response.status)) {
       const fallback = fallbackModels(config.adapter);
@@ -2463,6 +2532,8 @@ app.post("/api/tasks", upload.array("references", 50), async (req, res, next) =>
       ? maxforaiReferencePrompt(rawPrompt, materials)
       : config.adapter === "lwaigc" && autoReference
         ? lwaigcReferencePrompt(rawPrompt, materials)
+        : config.adapter === "suanliai"
+          ? suanliaiReferencePrompt(config.model, rawPrompt, materials, autoReference)
         : withReferenceMapping(rawPrompt, materials, autoReference);
     if (config.adapter === "seedancevideo" && prompt.length > 10000)
       throw httpError(400, `Seedance 视频提示词最多 10000 字，当前为 ${prompt.length} 字`);
@@ -2478,7 +2549,7 @@ app.post("/api/tasks", upload.array("references", 50), async (req, res, next) =>
       duration: requestedDuration,
       resolution: config.adapter === "seedancevideo"
         ? String(req.body.resolution || "").trim().slice(0, 64)
-        : ["480p", "720p", "1080p", "2K", "4K"].includes(req.body.resolution)
+        : ["480p", "720p", "768p", "1080p", "2k", "2K", "4k", "4K"].includes(req.body.resolution)
           ? req.body.resolution
           : "720p",
       aspectRatio: ["21:9", "16:9", "4:3", "1:1", "3:4", "9:16", "auto", "adaptive"].includes(req.body.aspectRatio)
@@ -2638,7 +2709,10 @@ app.get("/api/tasks/:id/content", async (req, res, next) => {
     const suppliedSourceUrl = req.query.source
       ? publicUrl(String(req.query.source), "已保存的视频地址").toString()
       : null;
-    for (const contentPath of directTaskContentPaths(config.adapter, job.taskId)) {
+    const directContentPaths = job.contentPath
+      ? [job.contentPath]
+      : directTaskContentPaths(config.adapter, job.taskId);
+    for (const contentPath of directContentPaths) {
       const fixedResponse = await upstream(
         `${config.baseUrl}${contentPath}`,
         { headers: authHeaders(config, range ? { Range: range } : {}) },

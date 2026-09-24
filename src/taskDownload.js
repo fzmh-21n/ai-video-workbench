@@ -53,6 +53,10 @@ export function downloadTaskBuckets(tasks, { includeDownloaded = false } = {}) {
   };
 }
 
+export function downloadedChapterTaskIds(requestedTask, downloadedTask = requestedTask) {
+  return [...new Set([requestedTask?.id, downloadedTask?.id].filter(Boolean))];
+}
+
 function normalizedBatchTitle(value) {
   return String(value || "").trim().replace(/\.txt$/i, "");
 }
@@ -148,6 +152,23 @@ export function batchItemTasks(item, storedTasks) {
   const submitted = unique.filter((task) => !String(task?.batchId || "").startsWith("batch-recovered-"));
   return (submitted.length ? submitted : unique)
     .sort((left, right) => numeric(right?.createdAtMs, 0) - numeric(left?.createdAtMs, 0));
+}
+
+export function recoverBatchItemTaskIds(item, storedTasks) {
+  if (item?.taskIds?.length) return item.taskIds;
+  const attemptedAt = Number(item?.lastSubmission?.attemptedAt || 0);
+  if (!attemptedAt) return [];
+  const batchId = String(item?.lastSubmission?.batchId || "");
+  const profileId = String(item?.lastSubmission?.profileId || "");
+  const model = String(item?.lastSubmission?.model || "");
+  return batchItemTasks(item, storedTasks)
+    .filter((task) => batchId
+      ? String(task?.batchId || "") === batchId
+      : Number(task?.createdAtMs || 0) >= attemptedAt - 5000)
+    .filter((task) => !profileId || String(task?.profileId || "") === profileId)
+    .filter((task) => !model || String(task?.model || "") === model)
+    .map((task) => task.id)
+    .filter(Boolean);
 }
 
 export function batchItemDownloadCandidates(item, storedTasks) {

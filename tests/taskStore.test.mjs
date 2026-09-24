@@ -45,3 +45,18 @@ test("recognizes a workbench login expiry as recoverable polling failure", () =>
   assert.equal(isWorkbenchAuthFailure("请先登录工作台"), true);
   assert.equal(isWorkbenchAuthFailure("上游任务失败"), false);
 });
+
+test("an in-flight polling response cannot revive a task manually cancelled by the user", () => {
+  const stored = {
+    id: "task-cancelled",
+    status: "failed",
+    error: "已手动取消",
+    cancelledByUser: true,
+    cancelledAtMs: 123,
+    projectName: "项目A",
+  };
+  const result = mergePolledTaskUpdate(stored, { id: stored.id, status: "processing", progress: 90 });
+  assert.equal(result.status, "failed");
+  assert.equal(result.cancelledByUser, true);
+  assert.equal(result.cancelledAtMs, 123);
+});

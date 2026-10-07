@@ -7,7 +7,7 @@ import {
   saveCostSettings,
   taskEstimatedCost,
 } from "./costAnalytics.js";
-import { UNCLASSIFIED_PROJECT, taskProjectNamesByCreation, tasksOnOrAfter } from "./taskProjects.js";
+import { UNCLASSIFIED_PROJECT, taskProjectCreatedAt, taskProjectNamesByCreation, tasksOnOrAfter } from "./taskProjects.js";
 
 function money(value) {
   return `¥${Number(value || 0).toFixed(2)}`;
@@ -24,7 +24,15 @@ function summarize(tasks, name, settings) {
   };
 }
 
-export default function TaskProjectManager({ activeProject, onClose, onCreate, onDelete, onSelect, onTasksChanged, projects }) {
+function formatCreatedAt(value, projectName) {
+  if (projectName === UNCLASSIFIED_PROJECT) return "系统默认";
+  const date = new Date(Number(value));
+  if (!Number.isFinite(date.getTime())) return "历史时间未记录";
+  const pad = (part) => String(part).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+export default function TaskProjectManager({ activeProject, onClose, onCreate, onDelete, onSelect, onTasksChanged, projectCreatedAtByName, projects }) {
   const [tasks, setTasks] = useState([]);
   const [name, setName] = useState("");
   const [error, setError] = useState("");
@@ -142,9 +150,10 @@ export default function TaskProjectManager({ activeProject, onClose, onCreate, o
               const models = projectSuccessfulModels(tasks, settings, projectName);
               const active = projectName === activeProject;
               const expanded = expandedModels.includes(projectName);
+              const createdAt = taskProjectCreatedAt(projectName, projectCreatedAtByName, tasks);
               return (
                 <article className={`task-project-row${active ? " active" : ""}`} key={projectName}>
-                  <div><strong>{projectName}</strong>{active && <span>当前项目</span>}</div>
+                  <div className="task-project-name"><time>{formatCreatedAt(createdAt, projectName)}</time><strong>{projectName}</strong>{active && <span>当前项目</span>}</div>
                   <p>共 {summary.total} 条 · 已生成 {summary.completed} · 生成中 {summary.processing} · 失败 {summary.failed}</p>
                   <b>预计成本 {money(summary.cost)}</b>
                   <div className="task-project-actions">

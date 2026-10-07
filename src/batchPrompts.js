@@ -111,6 +111,18 @@ export function overnightBatchReport(items, plan) {
   };
 }
 
+const OVERNIGHT_RETRYABLE_STATUSES = new Set(["failed", "generation_failed", "not_submitted"]);
+
+export function overnightRetryableItems(items, plan) {
+  const ids = new Set(plan?.itemIds || []);
+  const seen = new Set();
+  return (items || []).filter((item) => {
+    if (!ids.has(item?.id) || seen.has(item.id) || !OVERNIGHT_RETRYABLE_STATUSES.has(item.status)) return false;
+    seen.add(item.id);
+    return true;
+  });
+}
+
 const BUSY_OR_DONE = new Set(["submitting", "submitted", "generating", "generated", "submission_unknown"]);
 
 export function canBatchMatch(item) {
@@ -282,7 +294,7 @@ export function filterBatchItems(items, filter) {
 }
 
 export function batchSubmissionPlan(mode, concurrency) {
-  if (mode === "strict_order") return { concurrency: 1, staggerMs: 0 };
+  if (mode === "strict_order" || mode === "single_like") return { concurrency: 1, staggerMs: 0 };
   if (mode === "limited_rush") return { concurrency: 5, staggerMs: 50 };
   return {
     concurrency: Math.max(1, Math.min(20, Number(concurrency) || 1)),

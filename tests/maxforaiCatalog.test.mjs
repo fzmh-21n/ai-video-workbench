@@ -25,6 +25,7 @@ test("includes MaxForAI with its official base URL and video catalog", () => {
   assert.deepEqual(FALLBACK_MODELS.maxforai, MAXFORAI_VIDEO_MODELS);
   assert.ok(MAXFORAI_VIDEO_MODELS.includes("wan3.0th"));
   assert.ok(MAXFORAI_VIDEO_MODELS.includes("cc-2.0-933"));
+  assert.ok(MAXFORAI_VIDEO_MODELS.includes("YB-sd-2.5满血"));
   assert.ok(MAXFORAI_VIDEO_MODELS.includes("特价ft-sd2.0满血"));
 });
 
@@ -161,6 +162,26 @@ test("exposes SD2.0 and SD2.5 workbench capacities", () => {
   const sd25 = capabilityFor({ adapter: "maxforai", model: "mg-seedance-2.5" });
   assert.equal(sd20.images, 9); assert.equal(sd20.audios, 3); assert.equal(sd20.videos, 3);
   assert.equal(sd25.images, 30); assert.equal(sd25.audios, 10); assert.equal(sd25.videos, 10);
+});
+
+test("tries YB-sd-2.5满血 through the existing MaxForAI SD2.5 request schema", () => {
+  const model = "YB-sd-2.5满血";
+  const payload = maxforaiVideoPayload(model, {
+    prompt: "参考 @image1 和 @audio1", duration: 20, aspectRatio: "16:9", resolution: "720p",
+    materials: [
+      { kind: "image", url: "https://maxforai.top/v1/assets/image-1" },
+      { kind: "audio", url: "https://maxforai.top/v1/assets/audio-1" },
+    ],
+  });
+  assert.deepEqual(payload, {
+    model, prompt: "参考 @image1 和 @audio1", duration: 20, ratio: "16:9", resolution: "720p",
+    images: ["https://maxforai.top/v1/assets/image-1"],
+    audios: ["https://maxforai.top/v1/assets/audio-1"],
+  });
+  const capability = capabilityFor({ adapter: "maxforai", model });
+  assert.deepEqual([capability.durations[0], capability.durations.at(-1)], [4, 30]);
+  assert.deepEqual([capability.images, capability.videos, capability.audios], [30, 10, 10]);
+  assert.equal(modelForSdVersion({ adapter: "maxforai", model }, "sd25", MAXFORAI_VIDEO_MODELS), model);
 });
 
 test("top model switch selects the documented MaxForAI SD2.5 route", () => {

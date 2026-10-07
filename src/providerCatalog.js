@@ -31,6 +31,8 @@ import {
 import { SEEDANCE_VIDEO_BASE_URL } from "./seedanceVideoCatalog.js";
 import { UNMAU_BASE_URL, UNMAU_FALLBACK_MODELS, unmauCapability } from "./unmauCatalog.js";
 import { SUANLIAI_BASE_URL, SUANLIAI_VIDEO_MODELS, suanliaiCapability } from "./suanliaiCatalog.js";
+import { BAILING_BASE_URL, BAILING_EXAMPLE_MODEL } from "./bailingCatalog.js";
+import { HUAJING_BASE_URL, HUAJING_MODELS, huajingCapability } from "./huajingCatalog.js";
 
 export const DEFAULT_PROFILES = [
   {
@@ -153,6 +155,15 @@ export const DEFAULT_PROFILES = [
     model: SUANLIAI_VIDEO_MODELS[0],
     mediaUploadUrl: "",
   },
+  {
+    id: "bailing",
+    name: "白灵 API",
+    baseUrl: BAILING_BASE_URL,
+    adapter: "bailing",
+    model: BAILING_EXAMPLE_MODEL,
+    mediaUploadUrl: "",
+  },
+  { id: "huajing", name: "华镜 / Huajing", baseUrl: HUAJING_BASE_URL, adapter: "huajing", model: HUAJING_MODELS[0], mediaUploadUrl: "" },
 ];
 
 export const FALLBACK_MODELS = {
@@ -225,6 +236,8 @@ export const FALLBACK_MODELS = {
   seedancevideo: [],
   unmau: UNMAU_FALLBACK_MODELS,
   suanliai: SUANLIAI_VIDEO_MODELS,
+  bailing: [BAILING_EXAMPLE_MODEL],
+  huajing: HUAJING_MODELS,
 };
 
 export const FALLBACK_MODEL_LABELS = {
@@ -233,6 +246,7 @@ export const FALLBACK_MODEL_LABELS = {
     [FMGO_V25_MODEL]: "feimiao-v2.5 · 飞猫 SD2.5 · 固定480P · 固定5秒",
   },
   maxforai: {
+    "YB-sd-2.5满血": "YB-sd-2.5满血 · 试接入（按现有 SD2.5 规格，待中转验证）",
     [MAXFORAI_FT_933_MODEL]: "FT-Seedance 2.0 · 720P · 933全参 · 4–15秒 · 9图/3视频/3音频",
     "wan3.0th": "WAN 3.0 TH · 720P · 4–30秒 · 10图/5视频/5音频",
     "特价ft-sd2.0满血": "FT-Seedance 2.0 · 720P · 933全参",
@@ -335,10 +349,12 @@ export function preferredModelForSdVersion(adapter, version) {
 }
 
 export function pollDelayForAdapter(adapter) {
+  if (adapter === "huajing") return 5_000;
   return adapter === "clmm" ? 3_000 : adapter === "meaicc" || adapter === "globalaiopc" ? 21_000 : 10_000;
 }
 
 export function submissionTimeoutForAdapter(adapter) {
+  if (adapter === "huajing") return 360_000;
   return adapter === "meaicc" ? 600_000 : 180_000;
 }
 
@@ -588,6 +604,7 @@ function rawCapabilityFor(profile) {
   }
 
   if (adapter === "lwaigc") return lwaigcCapability(profile?.model);
+  if (adapter === "huajing") return profile?.routeCapabilities?.[profile?.model] || huajingCapability();
   if (adapter === "meaicc") return meaiccCapability(profile?.model);
   if (adapter === "ziyuai") {
     const live = profile?.routeCapabilities?.[profile?.model];
@@ -623,6 +640,21 @@ function rawCapabilityFor(profile) {
   if (adapter === "suanliai") {
     return profile?.routeCapabilities?.[profile?.model] || suanliaiCapability(profile?.model);
   }
+  if (adapter === "bailing") {
+    return {
+      ...base,
+      images: 50,
+      videos: 50,
+      audios: 50,
+      durations: Array.from({ length: 60 }, (_, index) => index + 1),
+      defaultDuration: 5,
+      resolutions: ["720p", "480p"],
+      ratios: ["16:9", "9:16", "1:1", "4:3", "3:4"],
+      syncAudio: false,
+      syncAudioFixed: true,
+      _preserveLimits: true,
+    };
+  }
 
   return base;
 }
@@ -644,6 +676,7 @@ export function capabilityFor(profile) {
 }
 
 export function preferredDurationForVersion(capability, version) {
+  if (capability?.defaultDuration) return capability.defaultDuration;
   const durations = Array.isArray(capability?.durations) ? capability.durations : [];
   const numeric = durations.filter((value) => typeof value === "number" && Number.isFinite(value));
   if (version === "sd20" && numeric.includes(15)) return 15;
@@ -673,6 +706,7 @@ export function capabilityLimitIssue(profile, materials, duration) {
 }
 
 export function sdVersionForProfile(profile) {
+  if (profile?.adapter === "huajing") return "sd25";
   if (profile?.adapter === "canseedream") {
     const capability = rawCapabilityFor(profile);
     const numericDurations = capability.durations.filter((value) => typeof value === "number");
@@ -697,7 +731,7 @@ export function modelForSdVersion(profile, version, availableModels) {
   if (currentModel && sdVersionForProfile(profile) === version) return currentModel;
 
   const preferred = preferredModelForSdVersion(profile?.adapter, version);
-  const dynamicAdapters = new Set(["canseedream", "ziyuai", "maxforai", "clmm", "aiyrx", "seedancevideo", "unmau", "suanliai"]);
+  const dynamicAdapters = new Set(["canseedream", "ziyuai", "maxforai", "clmm", "aiyrx", "seedancevideo", "unmau", "suanliai", "huajing"]);
   if (!dynamicAdapters.has(profile?.adapter)) return preferred;
   const candidates = Array.isArray(availableModels) && availableModels.length
     ? availableModels
@@ -726,6 +760,8 @@ export function inferAdapter(baseUrl) {
     if (host === "772808.xyz") return "seedancevideo";
     if (host === "newapis.unmau.com") return "unmau";
     if (host === "suanliai.top" || host === "www.suanliai.top") return "suanliai";
+    if (host === "bailingapi.top" || host === "www.bailingapi.top") return "bailing";
+    if (host === "video.huajings.online") return "huajing";
   } catch {}
   return "newapi";
 }

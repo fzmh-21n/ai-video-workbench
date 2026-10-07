@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { addTaskProject, assignTasksToProject, loadActiveTaskProject, loadTaskProjectRatios, loadTaskProjects, removeTaskProject, saveTaskProjectRatios, saveTaskProjects, taskProjectNamesByCreation, taskProjectRatio, tasksAfterProjectDeletion, tasksOnOrAfter, withTaskProjectRatio } from "../src/taskProjects.js";
+import { addTaskProject, assignTasksToProject, loadActiveTaskProject, loadTaskProjectCreatedAt, loadTaskProjectRatios, loadTaskProjects, removeTaskProject, saveTaskProjectCreatedAt, saveTaskProjectRatios, saveTaskProjects, taskProjectCreatedAt, taskProjectNamesByCreation, taskProjectRatio, tasksAfterProjectDeletion, tasksOnOrAfter, withTaskProjectCreatedAt, withTaskProjectRatio } from "../src/taskProjects.js";
 
 function memoryStorage() {
   const values = new Map();
@@ -32,6 +32,19 @@ test("persists a separate video ratio for every task project", () => {
   assert.equal(taskProjectRatio(restored, "横屏项目"), "16:9");
   assert.equal(taskProjectRatio(restored, "竖屏项目"), "9:16");
   assert.equal(taskProjectRatio(restored, "新项目"), "");
+});
+
+test("persists exact creation time for new projects and derives legacy time from the earliest task", () => {
+  const storage = memoryStorage();
+  const createdAt = withTaskProjectCreatedAt({}, "新项目", 123456);
+  saveTaskProjectCreatedAt(createdAt, storage);
+  assert.deepEqual(loadTaskProjectCreatedAt(storage), { 新项目: 123456 });
+  assert.equal(taskProjectCreatedAt("新项目", createdAt, []), 123456);
+  assert.equal(taskProjectCreatedAt("旧项目", {}, [
+    { projectName: "旧项目", createdAtMs: 300 },
+    { projectName: "旧项目", createdAtMs: 100 },
+  ]), 100);
+  assert.equal(taskProjectCreatedAt("空项目", {}, []), 0);
 });
 
 test("lists projects by newest creation and removes only the project definition", () => {

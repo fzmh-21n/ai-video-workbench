@@ -1,4 +1,8 @@
 $Host.UI.RawUI.WindowTitle = "AI Video Workbench - keep this window open"
+$utf8Output = New-Object System.Text.UTF8Encoding $false
+[Console]::OutputEncoding = $utf8Output
+$OutputEncoding = $utf8Output
+& chcp.com 65001 > $null
 
 $workbenchDir = $PSScriptRoot
 $bundledRuntimeDir = Join-Path $env:USERPROFILE ".cache\codex-runtimes\codex-primary-runtime\dependencies"
@@ -78,7 +82,7 @@ New-Item -ItemType Directory -Path (Split-Path -Parent $runtimeLog) -Force | Out
 Write-Host "Runtime log: $runtimeLog"
 
 Write-Host "Preparing AI Video Workbench..." -ForegroundColor Cyan
-& $pnpmCommand run build *>&1 | Tee-Object -FilePath $runtimeLog -Append
+& cmd.exe /d /s /c "`"$pnpmCommand`" run build 2>&1" | Tee-Object -FilePath $runtimeLog -Append
 if ($LASTEXITCODE -ne 0) {
   Write-Host "Workbench build failed. Check the runtime log above." -ForegroundColor Red
   Read-Host "Press Enter to close"
@@ -99,7 +103,7 @@ Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @(
 
 $restartCount = 0
 do {
-  & $pnpmCommand start *>&1 | Tee-Object -FilePath $runtimeLog -Append
+  & cmd.exe /d /s /c "`"$pnpmCommand`" start 2>&1" | Tee-Object -FilePath $runtimeLog -Append
   $exitCode = $LASTEXITCODE
   "[$(Get-Date -Format o)] Workbench exited with code $exitCode" | Tee-Object -FilePath $runtimeLog -Append
   if ($exitCode -eq 0 -or $restartCount -ge 4) { break }

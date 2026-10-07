@@ -17,6 +17,7 @@ import {
   clearManualBatchDownload,
   manuallyCompleteBatchItem,
   overnightBatchReport,
+  overnightRetryableItems,
   parseRecoveredTaskIds,
   providerBatchSubmissionPlan,
   reconciledBatchTerminalState,
@@ -25,7 +26,7 @@ import {
   runOrderedStaggered,
   splitBatchPrompts,
 } from "./batchPrompts.js";
-import { internalizeProjectAliases, planProjectReferences } from "./projectReferences.js";
+import { imageReferenceIssues, internalizeProjectAliases, planProjectAudioReferences, planProjectReferences } from "./projectReferences.js";
 import { allTasks, putTasks } from "./taskStore.js";
 import { taskReuseSnapshot } from "./taskReuse.js";
 import { reviewedTask } from "./taskRegeneration.js";
@@ -116,13 +117,6 @@ function withDownloadedFlags(items, storedTasks) {
   });
 }
 
-function likelyAssetName(value) {
-  const text = String(value || "").trim();
-  if (!text) return false;
-  if (/^\d+[_-]/.test(text)) return true;
-  return text.length <= 50 && !/[。！？；]/.test(text);
-}
-
 function persistedState() {
   try {
     const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null");
@@ -192,6 +186,7 @@ export default function BatchPanel({
   const [uploaded, setUploaded] = useState(restored?.uploaded || {});
   const [uploadedProfileId, setUploadedProfileId] = useState(restored?.uploadedProfileId || "");
   const [overnightPlan, setOvernightPlan] = useState(persistedOvernightPlan);
+  const [autoRetryCycle, setAutoRetryCycle] = useState(0);
 
   const [busy, setBusy] = useState("");
   const [recoverOpen, setRecoverOpen] = useState(false);
@@ -202,6 +197,7 @@ export default function BatchPanel({
   const recoveredBatchRef = useRef("");
   const slowNoticeBatchRef = useRef("");
   const uploadCredentialRef = useRef(apiKey);
+  const autoRetryRunningRef = useRef(false);
 
   useEffect(() => {
     setItems((values) => recoverInterruptedBatchItems(values));
@@ -353,6 +349,19 @@ export default function BatchPanel({
     const ids = new Set(overnightPlan?.itemIds || []);
     return items.filter((item) => ids.has(item.id));
   }, [items, overnightPlan]);
+  const overnightRetryable = useMemo(
+    () => overnightRetryableItems(items, overnightPlan),
+    [items, overnightPlan],
+  );
+  const overnightRetryKey = useMemo(() => JSON.stringify(overnightRetryable.map((item) => ({
+    id: item.id,
+    status: item.status,
+    taskIds: item.taskIds || [],
+    failedAt: item.lastSubmission?.failedAt || 0,
+    references: (item.references || []).map((reference) => reference.id || reference.url || reference.name || reference.tag),
+    missingImages: item.missingImages || [],
+    overrides: item.overrides || {},
+  }))), [overnightRetryable]);
 
   useEffect(() => {
     if (!taskDatabaseReady || !trackedDownloadKey) return undefined;
@@ -414,9 +423,38 @@ export default function BatchPanel({
       ...item,
       prompt: plan.annotatedPrompt,
       references: reindex([...automatic, ...manual]),
-      missingImages: plan.missing
-        .filter((missing) => missing.kind === "image" && likelyAssetName(missing.requested))
-        .map((missing) => missing.requested),
+      missingImages: imageReferenceIssues(plan.annotatedPrompt, projectAssets, [...automatic, ...manual]),
+      status: "matched",
+      error: "",
+    };
+  }
+
+  async function matchAudioItem(item) {
+    const plan = planProjectAudioReferences(item.prompt, projectAssets);
+    if (!plan.matches.length) return item;
+    const automaticAssets = [...new Map(plan.matches.map((match) => [match.asset.key, match.asset])).values()];
+    const durations = await Promise.all(automaticAssets.map((asset) => readMediaDuration(asset.file, "audio")));
+    const durationByKey = new Map(automaticAssets.map((asset, index) => [asset.key, durations[index]]));
+    const preserved = (item.references || []).filter((reference) => reference.kind !== "audio" || reference.source === "manual");
+    const manualAudioNames = new Set(preserved
+      .filter((reference) => reference.kind === "audio")
+      .map((reference) => String(reference.name || "").toLowerCase()));
+    const automatic = automaticAssets
+      .filter((asset) => !manualAudioNames.has(String(asset.file.name || "").toLowerCase()))
+      .map((asset) => ({
+        id: uid("batch-ref"),
+        source: "automatic",
+        projectAssetKey: asset.key,
+        kind: "audio",
+        name: asset.file.name,
+        alias: asset.stem,
+        durationSeconds: durationByKey.get(asset.key) || null,
+        subType: "reference",
+      }));
+    return {
+      ...item,
+      prompt: plan.annotatedPrompt,
+      references: reindex([...preserved, ...automatic]),
       status: "matched",
       error: "",
     };
@@ -429,7 +467,7 @@ export default function BatchPanel({
     try {
       const matched = await matchItem(current);
       setItems((values) => values.map((item) => item.id === id ? matched : item));
-      onNotice(`第 ${matched.section} 节匹配完成：${matched.references.length} 个素材`);
+      onNotice(`第 ${matched.section} 节匹配完成：${matched.references.length} 个素材${matched.missingImages.length ? `；缺少图片：${matched.missingImages.join("、")}` : ""}`);
     } finally {
       setBusy("");
     }
@@ -446,7 +484,8 @@ export default function BatchPanel({
       const byId = new Map(matched.map((item) => [item.id, item]));
       setItems((values) => values.map((item) => byId.get(item.id) || item));
       const refs = matched.reduce((total, item) => total + item.references.length, 0);
-      onNotice(`全部一键参考完成：${matched.length} 节，共匹配 ${refs} 个素材；缺少音频已自动忽略`);
+      const missing = matched.filter((item) => item.missingImages.length);
+      onNotice(`全部一键参考完成：${matched.length} 节，共匹配 ${refs} 个素材；${missing.length ? `${missing.length} 节缺少图片，请查看标红章节；` : ""}缺少音频已自动忽略`);
     } finally {
       setBusy("");
     }
@@ -510,11 +549,12 @@ export default function BatchPanel({
     onNotice(`${batchItemChapterLabel(item.sourceName) || "本章"}第${item.section}节已清空 ${references.length} 个参考素材；提示词和生成记录均已保留`);
   }
 
-  async function preuploadItems(targetItems, quiet = false) {
+  async function preuploadItems(targetItems, quiet = false, startingCache = null) {
     const unique = new Map();
-    const nextUploaded = uploadedProfileId === activeProfile.id ? { ...uploaded } : {};
+    const nextUploaded = startingCache || (uploadedProfileId === activeProfile.id ? { ...uploaded } : {});
     for (const item of targetItems) {
       for (const reference of item.references || []) {
+        if (activeProfile.adapter === "huajing" && reference.kind !== "image") continue;
         const key = uploadKey(item, reference);
         const file = resolveFile(reference);
         if (file && (!nextUploaded[key] || Number(nextUploaded[key].expiresAt) <= Date.now())) {
@@ -583,7 +623,7 @@ export default function BatchPanel({
           });
         }
         const shouldRetry = attempt < maximumAttempts
-          && (connectionError || retryableMaterialUploadStatus(response?.status));
+          && (connectionError || (activeProfile.adapter !== "maxforai" && retryableMaterialUploadStatus(response?.status)));
         if (!shouldRetry) break;
         onNotice(`素材预上传连接不稳定，正在重试 ${attempt}/${maximumAttempts - 1}；已完成的素材不会重复处理`);
         await new Promise((resolve) => setTimeout(resolve, materialUploadRetryDelay(attempt - 1)));
@@ -608,24 +648,29 @@ export default function BatchPanel({
         const progress = completedThisRun
           ? `；本次已成功并保留 ${completedThisRun}/${entries.length} 个素材，下次会从未完成处继续`
           : "";
-        throw new Error(`${body.message || "素材预上传失败"}${progress}`);
+        const error = new Error(`${body.message || "素材预上传失败"}${progress}`);
+        error.status = response.status;
+        throw error;
       }
       for (const material of body.materials || []) {
         nextUploaded[material.key] = {
           url: material.url || "",
           assetId: material.assetId || "",
+          sizeBytes: material.bytes || null,
           expiresAt: body.expiresAt,
         };
       }
       completedThisRun += body.materials?.length || 0;
-      // 紫域逐个上传确认；每成功一个就立即写入状态与本地缓存，中途限流也不丢进度。
+      // 逐个上传确认；每成功一个就立即写入状态与本地缓存，中途限流也不丢进度。
       setUploaded({ ...nextUploaded });
       setUploadedProfileId(activeProfile.id);
-      onNotice(`正在预上传素材：${completedThisRun}/${entries.length}${activeProfile.adapter === "ziyuai" ? "（紫域单通道，限流时会自动等待）" : ""}`);
+      onNotice(`正在预上传素材：${completedThisRun}/${entries.length}${["ziyuai", "maxforai"].includes(activeProfile.adapter) ? "（单通道，限流时会自动等待）" : ""}`);
     }
     setUploaded(nextUploaded);
     setUploadedProfileId(activeProfile.id);
-    if (!quiet) onNotice(`预上传完成：${entries.length} 个唯一素材。相同素材在不同章节中会复用；建议50分钟内提交`);
+    if (!quiet) onNotice(activeProfile.adapter === "huajing"
+      ? `预上传完成：${entries.length} 张图片已保存至华镜素材库，将复用素材 ID；音频和视频随任务上传`
+      : `预上传完成：${entries.length} 个唯一素材。相同素材在不同章节中会复用；建议50分钟内提交`);
     return nextUploaded;
   }
 
@@ -657,7 +702,8 @@ export default function BatchPanel({
     const counts = countsFor(item.references || []);
     const exceeded = KINDS.filter((kind) => counts[kind] > (capability[`${kind}s`] || 0));
     if (exceeded.length) return exceeded.map((kind) => `${LABELS[kind]} ${counts[kind]}/${capability[`${kind}s`] || 0}`).join("、");
-    if (item.missingImages?.length && !allowMissingImages) return `缺少图片：${item.missingImages.join("、")}`;
+    const missingImages = imageReferenceIssues(item.prompt, projectAssets, item.references);
+    if (missingImages.length && !allowMissingImages) return `缺少图片：${missingImages.join("、")}`;
     return "";
   }
 
@@ -685,7 +731,7 @@ export default function BatchPanel({
         name: reference.name,
         subType: reference.subType || "reference",
         durationSeconds: reference.durationSeconds || null,
-        sizeBytes: file?.size || null,
+        sizeBytes: file?.size || cached?.sizeBytes || null,
         url: cached?.url || "",
         assetId: cached?.assetId || "",
         fileIndex: file ? fileIndex++ : null,
@@ -816,7 +862,7 @@ export default function BatchPanel({
     return records;
   }
 
-  async function submitSelected(selectedItems, confirmAll = false, includeGenerated = false) {
+  async function submitSelected(selectedItems, confirmAll = false, includeGenerated = false, options = {}) {
     if (!apiKey) return onNotice("请先配置当前中转站的 API Key");
     const candidates = selectedItems.filter((item) => canBatchSubmit(item) || (includeGenerated && canBatchResubmit(item)));
     const blocked = candidates.filter(issueFor);
@@ -828,25 +874,35 @@ export default function BatchPanel({
         : "没有已匹配且待提交的新章节；提交中、生成中和已生成章节已自动跳过");
     const totalTasks = ready.reduce((total, item) => total + Number(parametersFor(item).quantity || 1), 0);
     const resubmittingCount = ready.filter(canBatchResubmit).length;
-    const submissionPlan = providerBatchSubmissionPlan(activeProfile, submissionMode, concurrency);
+    const providerPlan = providerBatchSubmissionPlan(activeProfile, submissionMode, concurrency);
+    const singleLike = submissionMode === "single_like" && !options.forceSerial;
+    const submissionPlan = options.forceSerial
+      ? { ...providerPlan, concurrency: 1, staggerMs: 0 }
+      : providerPlan;
     const effectiveConcurrency = submissionPlan.concurrency;
-    const modeLabel = submissionPlan.providerLimited
+    const modeLabel = options.forceSerial
+      ? "托管失败串行重试（取得上一条任务 ID 后再提交下一条）"
+      : submissionPlan.providerLimited
       ? "飞猫 SS 稳定模式（每次1条、间隔5秒；每30条暂停5分钟）"
+      : singleLike
+      ? "逐节单点（每节上传素材并取得任务ID后，再处理下一节）"
       : submissionMode === "strict_order"
       ? "严格顺序（上一节拿到任务ID后再提交下一节）"
       : submissionMode === "limited_rush"
         ? "限量抢占（50ms错峰、固定并发5；不保证中转后台顺序）"
         : "有序抢位（按章节号每350ms发出）";
-    if (confirmAll && !window.confirm(`准备提交 ${ready.length} 节，共创建 ${totalTasks} 条任务。${resubmittingCount ? `\n其中 ${resubmittingCount} 节为重新生成，旧视频任务会保留。` : ""}\n中转站：${activeProfile.name}\n模型：${activeProfile.model}\n模式：${modeLabel}\n最大同时在途：${effectiveConcurrency} 节\n\n工作台会先自动预上传全部素材，再开始抢位。确认开始吗？`)) return;
-    setBusy("uploading");
-    onNotice("正在分批预上传素材；已成功的素材会立即保存，临时断线会自动重试");
-    let uploadCache;
-    try {
-      uploadCache = await preuploadItems(ready, true);
-    } catch (error) {
-      setBusy("");
-      onNotice(`自动预上传失败，尚未向中转站创建任务：${error.message || "未知错误"}`);
-      return;
+    if (confirmAll && !window.confirm(`准备提交 ${ready.length} 节，共创建 ${totalTasks} 条任务。${resubmittingCount ? `\n其中 ${resubmittingCount} 节为重新生成，旧视频任务会保留。` : ""}\n中转站：${activeProfile.name}\n模型：${activeProfile.model}\n模式：${modeLabel}\n最大同时在途：${effectiveConcurrency} 节\n\n${singleLike ? "工作台会逐节上传素材并提交，上一节拿到任务 ID 后才处理下一节。" : "工作台会先自动预上传全部素材，再开始抢位。"}确认开始吗？`)) return;
+    let uploadCache = uploadedProfileId === activeProfile.id ? { ...uploaded } : {};
+    if (!singleLike) {
+      setBusy("uploading");
+      onNotice("正在分批预上传素材；已成功的素材会立即保存，临时断线会自动重试");
+      try {
+        uploadCache = await preuploadItems(ready, true);
+      } catch (error) {
+        setBusy("");
+        onNotice(`自动预上传失败，尚未向中转站创建任务：${error.message || "未知错误"}`);
+        return;
+      }
     }
     setBusy("submitting");
     const batchId = uid("batch");
@@ -875,6 +931,9 @@ export default function BatchPanel({
         model: activeProfile.model,
         createdAt: sameProvider ? current.createdAt : batchStartedAt,
         updatedAt: batchStartedAt,
+        autoRetryFailures: sameProvider ? Boolean(current?.autoRetryFailures) : false,
+        retryRound: sameProvider ? Number(current?.retryRound || 0) : 0,
+        lastRetryAt: sameProvider ? Number(current?.lastRetryAt || 0) : 0,
       };
     });
     recordDiagnostic({
@@ -887,10 +946,15 @@ export default function BatchPanel({
       concurrency: effectiveConcurrency,
       submissionMode,
       providerLimited: Boolean(submissionPlan.providerLimited),
+      serialRetry: Boolean(options.forceSerial),
     });
     const dispatchResult = await runOrderedStaggered(ready, effectiveConcurrency, submissionPlan.staggerMs, async (item, sequence) => {
       startedItemIds.add(item.id);
       try {
+        if (singleLike) {
+          onNotice(`正在逐节上传素材并提交：${batchItemChapterLabel(item.sourceName) || ""}第${item.section}节`);
+          uploadCache = await preuploadItems([item], true, uploadCache);
+        }
         const records = await submitOne(item, batchId, uploadCache, sequence, batchStartedAt);
         successes += 1;
         setItems((values) => values.map((value) => value.id === item.id
@@ -913,8 +977,11 @@ export default function BatchPanel({
         failures += 1;
         if (!firstFailureMessage) firstFailureMessage = `${activeProfile.name} · ${activeProfile.model}：${error.message || "提交失败"}`;
         const deterministicReason = deterministicBatchStopReason(error);
-        if (deterministicReason && !stopReason) {
-          stopReason = deterministicReason;
+        const rateLimitReason = singleLike && Number(error.status) === 429
+          ? "素材上传被中转限流（HTTP 429），已停止后续章节；请稍后再继续"
+          : "";
+        if ((deterministicReason || rateLimitReason) && !stopReason) {
+          stopReason = deterministicReason || rateLimitReason;
           recordDiagnostic({
             adapter: activeProfile.adapter,
             providerName: activeProfile.name,
@@ -924,7 +991,7 @@ export default function BatchPanel({
             sequence,
             stage: "client_batch_stop_requested",
             status: error.status || 0,
-            reason: deterministicReason,
+            reason: stopReason,
           });
         }
         setItems((values) => values.map((value) => value.id === item.id
@@ -973,6 +1040,80 @@ export default function BatchPanel({
     } else {
       onNotice(`批量提交完成：成功 ${successes} 节，失败 ${failures} 节${blocked.length ? `，另有 ${blocked.length} 节因缺图或素材超限未提交` : ""}${firstFailureMessage ? `；首个错误：${firstFailureMessage}` : ""}`);
     }
+  }
+
+  useEffect(() => {
+    if (!overnightPlan?.autoRetryFailures || !overnightRetryKey || busy || autoRetryRunningRef.current) return undefined;
+    if (overnightPlan.profileId !== activeProfile.id || !apiKey) return undefined;
+    const ready = overnightRetryable.filter((item) => !issueFor(item));
+    if (!ready.length) return undefined;
+    const timer = window.setTimeout(async () => {
+      if (autoRetryRunningRef.current) return;
+      const queued = overnightRetryableItems(items, overnightPlan).filter((item) => !issueFor(item));
+      if (!queued.length) return;
+      autoRetryRunningRef.current = true;
+      const round = Number(overnightPlan.retryRound || 0) + 1;
+      setOvernightPlan((current) => current?.autoRetryFailures ? {
+        ...current,
+        retryRound: round,
+        lastRetryAt: Date.now(),
+      } : current);
+      onNotice(`托管失败自动重试第 ${round} 轮：${queued.length} 节已进入串行队列；每节取得新任务 ID 后才会提交下一节。`);
+      try {
+        await submitSelected(queued, false, false, { forceSerial: true });
+      } finally {
+        autoRetryRunningRef.current = false;
+        setAutoRetryCycle((value) => value + 1);
+      }
+    }, 5000);
+    return () => window.clearTimeout(timer);
+  }, [
+    activeProfile.id,
+    apiKey,
+    autoRetryCycle,
+    busy,
+    overnightPlan?.autoRetryFailures,
+    overnightPlan?.profileId,
+    overnightRetryKey,
+  ]);
+
+  useEffect(() => {
+    if (
+      !overnightPlan?.autoRetryFailures
+      || !overnightReport.itemCount
+      || overnightReport.generated !== overnightReport.itemCount
+      || overnightReport.generating
+      || overnightReport.failed
+    ) return;
+    setOvernightPlan((current) => current ? { ...current, autoRetryFailures: false } : current);
+    onNotice(`托管自动重试完成：${overnightReport.itemCount} 节已全部生成成功，失败任务已归零。`);
+  }, [
+    overnightPlan?.autoRetryFailures,
+    overnightReport.failed,
+    overnightReport.generated,
+    overnightReport.generating,
+    overnightReport.itemCount,
+  ]);
+
+  function toggleOvernightFailureRetry() {
+    if (!overnightPlan?.itemIds?.length) return onNotice("请先开启托管并加入任务，再开启失败自动重试");
+    if (overnightPlan.autoRetryFailures) {
+      setOvernightPlan((current) => current ? { ...current, autoRetryFailures: false } : current);
+      onNotice("托管失败自动重试已停止；当前已经提交出去的任务仍会继续生成");
+      return;
+    }
+    if (overnightPlan.profileId !== activeProfile.id) {
+      return onNotice(`请先切回托管使用的中转：${overnightPlan.providerName} · ${overnightPlan.model}`);
+    }
+    if (!apiKey) return onNotice("请先恢复并记住托管中转的 API Key");
+    if (!window.confirm("开启后，托管范围内的确定失败任务会逐条重新提交：上一条取得新任务 ID 后才提交下一条；新失败任务会进入下一轮队列，直到全部成功或你手动停止。重复生成可能产生费用，确认开启吗？")) return;
+    setOvernightPlan((current) => current ? {
+      ...current,
+      autoRetryFailures: true,
+      retryRound: 0,
+      lastRetryAt: 0,
+    } : current);
+    onNotice("托管失败自动重试已开启：采用单条串行队列，5 秒后开始检查失败任务");
   }
 
   async function recoverMeaiccTasks() {
@@ -1125,6 +1266,31 @@ export default function BatchPanel({
     }
   }
 
+  async function matchAllAudio() {
+    if (!projectAssets.some((asset) => asset.kind === "audio")) return onNotice("当前项目文件夹没有可用音频文件");
+    const candidates = items.filter(canBatchMatch);
+    if (!candidates.length) return onNotice("没有可匹配音频的章节；提交中、生成中和已生成章节已自动跳过");
+    setBusy("matching-audio");
+    try {
+      const results = [];
+      for (const item of candidates) results.push(await matchAudioItem(item));
+      const matched = results.filter((item, index) => item !== candidates[index]);
+      if (!matched.length) {
+        onNotice("当前批量提示词中没有找到能与项目音频对应的声线或声音编号，原参考素材未作修改");
+        return;
+      }
+      const byId = new Map(matched.map((item) => [item.id, item]));
+      setItems((values) => values.map((item) => byId.get(item.id) || item));
+      const audioCount = matched.reduce(
+        (total, item) => total + (item.references || []).filter((reference) => reference.kind === "audio").length,
+        0,
+      );
+      onNotice(`批量一键匹配音频完成：处理 ${matched.length} 节，共匹配 ${audioCount} 个音频参考；图片、场景和视频参考保持不变。`);
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function undoBatchItemUnusable(item) {
     setBusy("reviewing");
     try {
@@ -1200,6 +1366,9 @@ export default function BatchPanel({
         model: activeProfile.model,
         createdAt: keepCurrent ? current.createdAt : startedAt,
         updatedAt: startedAt,
+        autoRetryFailures: keepCurrent ? Boolean(current?.autoRetryFailures) : false,
+        retryRound: keepCurrent ? Number(current?.retryRound || 0) : 0,
+        lastRetryAt: keepCurrent ? Number(current?.lastRetryAt || 0) : 0,
       };
     });
     onNotice(activeItems.length
@@ -1284,14 +1453,15 @@ export default function BatchPanel({
           </div>
         )) : <strong>尚未导入 TXT</strong>}</div><span>{items.length} 节 · 已匹配 {summary.matched || 0} · 生成中 {(summary.generating || 0) + (summary.submitted || 0) + (summary.submitting || 0)} · 已生成 {summary.generated || 0} · 失败 {(summary.failed || 0) + (summary.generation_failed || 0)}</span></div>
         <button disabled={!!busy || !items.length} onClick={matchAll}>{busy === "matching" ? "匹配中…" : "全部一键参考"}</button>
+        <button disabled={!!busy || !items.length || !projectAssets.some((asset) => asset.kind === "audio")} onClick={matchAllAudio}>{busy === "matching-audio" ? "匹配音频中…" : "一键匹配音频"}</button>
         <button disabled={!!busy || !audioReferenceCount} onClick={removeAllAudioReferences}>移除全部音频参考（{audioReferenceCount}）</button>
         <button disabled={!!busy || !items.length} onClick={preuploadAll}>{busy === "uploading" ? "上传中…" : `预上传全部素材${validUploaded ? `（${validUploaded}）` : ""}`}</button>
         <button className="overnight-toolbar-button" disabled={!!busy} onClick={startOrCheckOvernight}>{overnightPlan?.itemIds?.length ? "离开前检查" : "托管当前任务"}</button>
         {activeProfile.adapter === "meaicc" && (
           <button disabled={!!busy || !items.length} onClick={() => setRecoverOpen((value) => !value)}>{busy === "recovering" ? "找回中…" : "找回MEAICC任务"}</button>
         )}
-        <label><span>提交模式</span><select value={submissionMode} onChange={(event) => setSubmissionMode(event.target.value)}><option value="ordered_rush">有序抢位（350ms）</option><option value="limited_rush">限量抢占（50ms）</option><option value="strict_order">严格顺序</option></select></label>
-        <label title={submissionMode === "limited_rush" ? "限量抢占固定为5条同时在途" : ""}><span>最大同时在途</span><select value={submissionMode === "limited_rush" ? 5 : submissionMode === "strict_order" ? 1 : concurrency} disabled={submissionMode !== "ordered_rush"} onChange={(event) => setConcurrency(Number(event.target.value))}>{CONCURRENCY_OPTIONS.map((value) => <option key={value} value={value}>{value} 条</option>)}</select></label>
+        <label><span>提交模式</span><select value={submissionMode} onChange={(event) => setSubmissionMode(event.target.value)}><option value="ordered_rush">有序抢位（350ms）</option><option value="limited_rush">限量抢占（50ms）</option><option value="strict_order">严格顺序</option><option value="single_like">逐节单点（上传并提交一节，再处理下一节）</option></select></label>
+        <label title={submissionMode === "limited_rush" ? "限量抢占固定为5条同时在途" : ""}><span>最大同时在途</span><select value={submissionMode === "limited_rush" ? 5 : ["strict_order", "single_like"].includes(submissionMode) ? 1 : concurrency} disabled={submissionMode !== "ordered_rush"} onChange={(event) => setConcurrency(Number(event.target.value))}>{CONCURRENCY_OPTIONS.map((value) => <option key={value} value={value}>{value} 条</option>)}</select></label>
         <button disabled={!!busy || !(summary.generated || 0)} onClick={() => submitSelected(items.filter(canBatchResubmit), true, true)}>用当前模型重做已生成（{summary.generated || 0}）</button>
         <button className="primary-button" disabled={!!busy || !items.length} onClick={() => submitSelected(items, true)}>{busy === "uploading" ? "自动预上传中…" : busy === "submitting" ? "批量提交中…" : "开始批量提交"}</button>
       </div>
@@ -1333,8 +1503,15 @@ export default function BatchPanel({
           <div>
             <strong>离开托管｜{overnightPlan.providerName} · {overnightPlan.model}</strong>
             <span>{overnightReport.itemCount ? `${overnightReport.itemCount} 节 · 已取得 ${overnightReport.acceptedTaskCount} 个新任务 ID · 已生成 ${overnightReport.generated} · 生成中 ${overnightReport.generating} · 失败 ${overnightReport.failed} · 未确认送达 ${overnightReport.awaitingReceipt}` : "已开启，等待你开始批量提交任务"}</span>
+            {overnightPlan.autoRetryFailures && <span>失败自动重试已开启 · 串行第 {Number(overnightPlan.retryRound || 0)} 轮 · 当前待重试 {overnightRetryable.length} 节{overnightPlan.profileId !== activeProfile.id ? " · 请切回托管中转" : !apiKey ? " · 等待恢复 API Key" : ""}</span>}
           </div>
           <button type="button" disabled={!!busy || !overnightReport.itemCount} onClick={checkOvernightReadiness}>离开前检查</button>
+          <button
+            type="button"
+            className={`overnight-auto-retry${overnightPlan.autoRetryFailures ? " active" : ""}`}
+            disabled={!overnightReport.itemCount || (!overnightPlan.autoRetryFailures && overnightPlan.profileId !== activeProfile.id)}
+            onClick={toggleOvernightFailureRetry}
+          >{overnightPlan.autoRetryFailures ? "停止失败自动重试" : `失败自动重试（${overnightRetryable.length}）`}</button>
           <button type="button" disabled={finalDownloading || !overnightReport.generated} onClick={downloadOvernightCollection}>{finalDownloading ? "下载中…" : `回来收菜（${overnightReport.generated}）`}</button>
           <button type="button" className="overnight-clear" disabled={!!busy || finalDownloading} onClick={() => setOvernightPlan(null)}>结束本次托管</button>
         </div>
@@ -1356,7 +1533,7 @@ export default function BatchPanel({
         <label><span>生成数量</span><select value={quantity} onChange={(event) => setQuantity(Number(event.target.value))}>{[1, 2, 3, 4].map((value) => <option key={value}>{value}</option>)}</select></label>
         <label><span>随机种子</span><input value={seed} onChange={(event) => setSeed(event.target.value)} disabled={!capability.seed} /></label>
       </div>
-        <label className="check-row"><input type="checkbox" checked={syncAudio} onChange={(event) => setSyncAudio(event.target.checked)} />生成同步音频（当前中转默认开启）</label>
+        {!["bailing", "huajing"].includes(activeProfile.adapter) && <label className="check-row"><input type="checkbox" checked={syncAudio} onChange={(event) => setSyncAudio(event.target.checked)} />生成同步音频（当前中转默认开启）</label>}
       <label className="check-row warning-check"><input type="checkbox" checked={allowMissingImages} onChange={(event) => setAllowMissingImages(event.target.checked)} />仍然提交缺少图片的章节</label>
       <div className="notice" role="status">ⓘ {onNotice && notice}</div>
 
@@ -1364,17 +1541,19 @@ export default function BatchPanel({
         {!visibleItems.length && <div className="batch-filter-empty">当前筛选状态下没有章节</div>}
         {visibleItems.map((item) => {
           const counts = countsFor(item.references || []);
+          const missingImages = imageReferenceIssues(item.prompt, projectAssets, item.references);
           const issue = issueFor(item);
           const chapterLabel = batchItemChapterLabel(item.sourceName);
           const shownProgress = normalizedTaskProgress(item.status, item.progress);
           return (
-            <article className={`batch-card ${issue ? "has-issue" : ""}`} key={item.id}>
+            <article className={`batch-card ${issue || missingImages.length ? "has-issue" : ""}`} key={item.id}>
               <div className="batch-card-top">
                 <button className="batch-card-head" onClick={() => updateItem(item.id, { expanded: !item.expanded })}>
                   <strong>{chapterLabel ? `${chapterLabel} · ` : ""}第{item.section}节｜{item.title}</strong>
                   <span className="batch-card-summary">
                     <span>图{counts.image} · 音{counts.audio} · 视{counts.video}</span>
                     <span className={`batch-status batch-status-${item.status || "pending"}`}>{STATUS_LABELS[item.status] || "待匹配"}</span>
+                    {!!missingImages.length && <span className="batch-missing-badge">缺少图片 {missingImages.length}</span>}
                     {item.downloaded && <span className="batch-downloaded-badge">✓ 已下载</span>}
                   </span>
                 </button>
@@ -1400,7 +1579,7 @@ export default function BatchPanel({
                   <b>{shownProgress}%</b>
                 </div>
               )}
-              {issue && <div className="batch-issue">{issue}</div>}
+              {!!(issue || missingImages.length) && <div className="batch-issue">{issue || `缺少图片：${missingImages.join("、")}（已允许继续提交）`}</div>}
               {item.error && <div className="batch-error">{item.lastSubmission?.providerName || item.lastSubmission?.model
                 ? <><strong>{[item.lastSubmission.providerName, item.lastSubmission.model].filter(Boolean).join(" · ")}</strong>：{item.error}{item.lastSubmission.taskCreated === false ? `（${item.lastSubmission.statusCode ? `HTTP ${item.lastSubmission.statusCode} · ` : ""}未取得任务 ID）` : ""}</>
                 : item.error}</div>}

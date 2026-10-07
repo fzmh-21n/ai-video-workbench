@@ -55,7 +55,8 @@ function uniqueEntries(entries) {
 function cleanRequestedName(value) {
   const source = String(value).trim();
   const requestedSource = source.replace(/^@[^=]+=/, "");
-  return { source, requested: cleanMatchValue(requestedSource) };
+  const requested = requestedSource.replace(/(\.(?:png|jpe?g|webp)|[）)])\s*[。．.!！?？]+\s*$/i, "$1");
+  return { source, requested: cleanMatchValue(requested) };
 }
 
 function splitOutsideParentheses(value) {
@@ -101,7 +102,15 @@ function requestedNames(content, role) {
         const assignedVoiceNumber = line.match(/^(声音[0-9０-９]+)\s*=/);
         if (assignedVoiceNumber) return cleanRequestedName(assignedVoiceNumber[1]);
         const namedVoice = line.match(/^([^【：:]+?)\s*【声音[0-9０-９]+】\s*[：:]/);
-        return namedVoice ? cleanRequestedName(namedVoice[1]) : [];
+        if (namedVoice) return cleanRequestedName(namedVoice[1]);
+        return line.split(/[；;。]/).flatMap((clause) => {
+          if (/沉默|无(?:新)?对白|不说话|未开口/.test(clause)) return [];
+          return splitOutsideParentheses(clause).flatMap((part) => {
+            const numberedName = part.trim().match(/^([\p{Script=Han}]{2,8})\s*([0-9０-９]{1,3})(?![0-9０-９.．])/u);
+            if (!numberedName || /^(?:平均|时长|语速|重音|节奏|配音|镜头|场景)$/.test(numberedName[1])) return [];
+            return [{ source: numberedName[0], requested: `声音${cleanMatchValue(numberedName[2])}`, voiceName: numberedName[1] }];
+          });
+        });
       }),
     );
   }
@@ -179,13 +188,17 @@ function annotateContent(content, matches, role) {
       ? match.source.slice(match.requested.length)
       : "";
     if (role === "background") suffix = "，";
-    if (role === "people") suffix = `${suffix.replace(/[，,]\s*$/, "")}，`;
+    if (role === "people") {
+      const index = next.indexOf(match.source);
+      const following = index < 0 ? "" : next.slice(index + match.source.length);
+      if (!/[，,、；;。.!！?？]\s*$/.test(suffix) && !/^[，,、；;]/.test(following)) suffix += "，";
+    }
     const existingIndex = next.indexOf(visible);
     if (existingIndex >= 0) {
       if (role === "people") {
         const lineEnd = next.indexOf("\n", existingIndex);
         const end = lineEnd < 0 ? next.length : lineEnd;
-        const line = next.slice(existingIndex, end).replace(/[，,]\s*$/, "");
+        const line = next.slice(existingIndex, end).replace(/[，,]+\s*$/, "");
         next = `${next.slice(0, existingIndex)}${line}，${next.slice(end)}`;
       }
       if (role === "background") {
@@ -205,7 +218,7 @@ function annotateContent(content, matches, role) {
     }
     const index = next.indexOf(match.source);
     if (index < 0 || next.slice(Math.max(0, index - imageName.length - 2), index).indexOf("@") >= 0) continue;
-    next = `${next.slice(0, index)}${visible}${suffix}${next.slice(index + match.source.length)}`;
+    next = `${next.slice(0, index)}${match.voiceName || ""}${visible}${suffix}${next.slice(index + match.source.length)}`;
   }
   return next;
 }
@@ -228,7 +241,7 @@ export function planProjectReferences(prompt, assets) {
         }
       }
       if (asset) matches.push({ ...rule, ...entry, requested, asset });
-      else if (requested && (rule.role !== "background" || /^\d{3}[_-]/.test(requested))) {
+      else if (requested && (rule.role !== "background" || /^(?:\d{3}[_-]|场景图[_-]\d+)/.test(requested) || /\.(?:png|jpe?g|webp)$/i.test(requested))) {
         missing.push({ ...rule, ...entry, requested });
       }
     }
@@ -265,6 +278,38 @@ export function planProjectReferences(prompt, assets) {
     annotatedPrompt = annotatedPrompt.replace(voice.token, `（@${alias}=${voice.requested}）`);
   }
   return { annotatedPrompt, matches, missing };
+}
+
+export function imageReferenceIssues(prompt, assets, references) {
+  const plan = planProjectReferences(prompt, assets || []);
+  const attached = (references || []).filter((reference) => reference.kind === "image" || (!reference.kind && reference.projectAssetKey?.startsWith("image:")));
+  const hasAttachedName = (requested) => attached.some((reference) =>
+    cleanMatchValue(reference.name) === requested || fileStem(reference.name) === requested);
+  const issues = plan.missing
+    .filter((item) => item.kind === "image" && !hasAttachedName(item.requested))
+    .map((item) => item.requested);
+  for (const match of plan.matches.filter((item) => item.kind === "image")) {
+    if (!attached.some((reference) => reference.projectAssetKey === match.asset.key || cleanMatchValue(reference.name) === assetFileName(match.asset))) {
+      issues.push(assetFileName(match.asset));
+    }
+  }
+  for (const token of String(prompt).matchAll(/(?:角色图|场景图|\d{3})[_＿-][^\s、，,；;。．!！?？【】=]+?\.(?:png|jpe?g|webp)/giu)) {
+    const requested = cleanMatchValue(token[0]);
+    if (!hasAttachedName(requested)) issues.push(requested);
+  }
+  return [...new Set(issues)];
+}
+
+export function planProjectAudioReferences(prompt, assets) {
+  const plan = planProjectReferences(
+    prompt,
+    (assets || []).filter((asset) => asset.kind === "audio"),
+  );
+  return {
+    annotatedPrompt: plan.annotatedPrompt,
+    matches: plan.matches.filter((match) => match.kind === "audio"),
+    missing: plan.missing.filter((missing) => missing.kind === "audio"),
+  };
 }
 
 function escapeRegExp(value) {

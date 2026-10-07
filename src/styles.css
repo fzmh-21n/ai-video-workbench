@@ -117,6 +117,27 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .panel-heading > span { color: #9b8972; font-size: 12px; }
 .panel-body { padding: 16px; }
 
+.face-layout { max-width: 1880px; margin: 0 auto 14px; display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.face-screen .panel-body > p { margin: 0 0 14px; color: #776755; line-height: 1.6; }
+.face-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; }
+.face-controls input { min-height: 38px; min-width: 180px; max-width: 100%; }
+.face-controls input[type="file"] { flex: 1; }
+.face-controls button { min-height: 38px; }
+.face-video-list { margin-top: 12px !important; overflow-wrap: anywhere; }
+.face-reference-search { min-height: 38px; width: min(100%, 320px); margin-top: 12px; }
+.face-reference-list { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 14px; }
+.face-reference-list > div { display: flex; gap: 8px; align-items: center; padding: 6px 8px; border: 1px solid #e5d7c2; border-radius: 8px; background: #fffdfa; }
+.face-reference-list button { border: 0; background: transparent; color: #a05742; }
+.face-results { max-width: 1880px; margin: 0 auto; }
+.face-video-result { padding: 14px 0; border-top: 1px solid #ecdfcc; }
+.face-video-result h3 { margin: 0 0 8px; overflow-wrap: anywhere; }
+.face-warning { color: #a05742 !important; }
+.face-groups { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+.face-group { display: flex; gap: 12px; padding: 12px; border: 1px solid #e5d7c2; border-radius: 10px; background: #fffdfa; }
+.face-group img { width: 96px; height: 96px; object-fit: cover; border-radius: 8px; }
+.face-group p { margin: 5px 0 0; font-size: 13px; line-height: 1.5; }
+@media (max-width: 860px) { .face-layout { grid-template-columns: 1fr; } }
+
 .field-label { display: block; margin-bottom: 8px; color: #796b5a; }
 .field-label span { margin-left: 10px; color: #aa9a86; font-size: 12px; font-weight: 400; }
 .project-bar {
@@ -166,6 +187,17 @@ textarea:focus, input:focus, select:focus { border-color: #d29a37; box-shadow: 0
 .section-heading > span { font-size: 12px; color: #a97a28; background: #fff8e9; padding: 7px 10px; border-radius: 20px; }
 
 .reference-toolbar { display: flex; justify-content: flex-end; gap: 8px; margin: 10px 0; }
+.image-json-prompts { margin-bottom: 16px; }
+.image-json-prompts .reference-toolbar { flex-wrap: wrap; }
+.image-json-list { display: grid; gap: 8px; max-height: 650px; overflow-y: auto; padding: 2px; }
+.image-json-row { border: 1px solid #e6d5ba; border-radius: 10px; background: #fffdfa; }
+.image-json-row > summary { padding: 12px; cursor: pointer; overflow-wrap: anywhere; }
+.image-json-row > summary span { margin-left: 12px; color: #86745e; font-size: 12px; white-space: nowrap; }
+.image-json-row-body { padding: 12px; border-top: 1px solid #eee0ca; }
+.image-json-row-body > input { width: 100%; margin-bottom: 12px; }
+.image-json-row-body > textarea { min-height: 220px; }
+.image-json-row-actions { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 8px; }
+.image-json-row-actions > span { color: #86745e; font-size: 12px; }
 .upload-mode-note { margin: -4px 0 10px; color: #8a6b40; font-size: 12px; }
 .reference-toolbar button,
 .url-adder button,
@@ -391,9 +423,11 @@ input, select {
 .task-project-history > div span { color: #907e65; font-size: 11px; }
 .task-project-history > p { grid-column: 1 / -1; margin: 2px 0 0; color: #806f58; font-size: 12px; }
 .task-project-list { display: grid; gap: 8px; max-height: 500px; overflow: auto; padding: 0 18px 16px; }
-.task-project-row { display: grid; grid-template-columns: minmax(150px,1.2fr) minmax(250px,2fr) 130px auto; align-items: center; gap: 12px; padding: 12px; border: 1px solid #ead8bc; border-radius: 11px; background: #fffaf3; }
+.task-project-row { display: grid; grid-template-columns: minmax(235px,1.35fr) minmax(250px,2fr) 130px auto; align-items: center; gap: 12px; padding: 12px; border: 1px solid #ead8bc; border-radius: 11px; background: #fffaf3; }
 .task-project-row.active { border-color: #87cfc2; background: #eff9f6; }
 .task-project-row > div { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.task-project-row .task-project-name { flex-wrap: wrap; }
+.task-project-name time { color: #a66d22; font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .task-project-row strong { overflow: hidden; color: #493b2c; text-overflow: ellipsis; white-space: nowrap; }
 .task-project-row > div span { padding: 3px 6px; border-radius: 999px; background: #d8f2eb; color: #087d69; font-size: 11px; white-space: nowrap; }
 .task-project-row p { margin: 0; color: #806f58; font-size: 12px; }
@@ -480,6 +514,8 @@ input, select {
 .overnight-panel span { color: #806f58; font-size: 12px; }
 .overnight-panel.ready strong { color: #087866; }
 .overnight-panel button { white-space: nowrap; }
+.overnight-panel .overnight-auto-retry { border-color: #d69b32; background: #fff2d7; color: #8b5900; font-weight: 700; }
+.overnight-panel .overnight-auto-retry.active { border-color: #d66b51; background: #fff0eb; color: #a63d2b; }
 .overnight-panel .overnight-clear { border-color: #dfd3c0; background: #fffdfa; color: #806f58; }
 .overnight-toolbar-button { border-color: #75bfae; background: #eaf8f3; color: #087866; font-weight: 700; }
 .batch-filter-empty { padding: 28px; border: 1px dashed #dfd3c0; border-radius: 10px; text-align: center; color: #907e65; background: #fffaf3; }
@@ -500,6 +536,7 @@ input, select {
 .batch-card-head .batch-status-generated { border-color: #9fd6c6; background: #eaf9f3; color: #16765d; }
 .batch-card-head .batch-status-failed,
 .batch-card-head .batch-status-generation_failed { border-color: #e7ada2; background: #fff0ed; color: #b44335; }
+.batch-card-head .batch-missing-badge { padding: 4px 8px; border: 1px solid #e7ada2; border-radius: 999px; background: #fff0ed; color: #b44335; font-weight: 700; }
 .batch-card-head .batch-downloaded-badge { display: inline-flex; align-items: center; padding: 4px 8px; border: 1px solid #79b9aa; border-radius: 999px; background: #e3f6ef; color: #087d69; font-weight: 700; }
 .batch-item-progress { display: flex; align-items: center; gap: 9px; padding: 0 14px 11px; }
 .batch-item-progress .progress-track { flex: 1; }

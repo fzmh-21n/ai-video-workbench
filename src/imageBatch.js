@@ -6,6 +6,10 @@ export function imageDownloadFilename(task, mimeType = "image/png") {
   const sourceName = String(task?.sourceName || "").trim();
   if (sourceName) return sourceName;
   const extension = { "image/jpeg": "jpg", "image/webp": "webp", "image/png": "png" }[mimeType] || "png";
+  if (task?.sourcePromptId) {
+    const name = String(task.title || "image").replace(/[\\/:*?"<>|\x00-\x1f]/g, "_").replace(/[. ]+$/g, "").trim() || "image";
+    return `${/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)/i.test(name) ? `_${name}` : name}.${extension}`;
+  }
   return `${String(task?.title || "image").trim() || "image"}.${extension}`;
 }
 
@@ -32,6 +36,7 @@ export function imageTaskEntries(tasks) {
     if (!task?.batchId) return [{ type: "task", task }];
     if (seen.has(task.batchId)) return [];
     seen.add(task.batchId);
-    return [{ type: "batch", id: task.batchId, tasks: batches.get(task.batchId) || [] }];
+    const batchTasks = batches.get(task.batchId) || [];
+    return [{ type: "batch", id: task.batchId, tasks: [...batchTasks].sort((left, right) => (left.batchIndex ?? Infinity) - (right.batchIndex ?? Infinity)) }];
   });
 }

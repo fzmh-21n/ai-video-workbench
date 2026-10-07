@@ -6,6 +6,7 @@ import {
   configuredUploadBatchSize,
   configuredUploadRetryDelay,
   createUploadCircuitBreaker,
+  isMaxforaiUploadedAssetUrl,
   materialUploadRetryDelay,
   mediaUploadMode,
   requiresProviderAssetUpload,
@@ -13,8 +14,9 @@ import {
   tmpfilesDirectUrl,
 } from "../src/uploadPolicy.js";
 
-test("uploads Ziyu materials one at a time so completed URLs can be checkpointed", () => {
+test("uploads rate-limited provider materials one at a time so completed URLs can be checkpointed", () => {
   assert.equal(configuredUploadBatchSize("ziyuai"), 1);
+  assert.equal(configuredUploadBatchSize("maxforai"), 1);
   assert.equal(configuredUploadBatchSize("fmgo"), 8);
   assert.equal(configuredUploadBatchSize("meaicc"), 50);
 });
@@ -35,6 +37,13 @@ test("MaxForAI and LWAIGC assets must use the provider asset library even when C
   assert.equal(requiresProviderAssetUpload("lwaigc"), true);
   assert.equal(requiresProviderAssetUpload("unmau"), true);
   assert.equal(requiresProviderAssetUpload("fmgo"), false);
+});
+
+test("reuses the asset URL returned by MaxForAI instead of uploading it again", () => {
+  assert.equal(isMaxforaiUploadedAssetUrl("https://maxforai.top/v1/assets/asset_123", "https://maxforai.top"), true);
+  assert.equal(isMaxforaiUploadedAssetUrl("https://tempfile.redpandaai.co/kieai/30590/maxforai-api-assets/voice.wav", "https://maxforai.top"), true);
+  assert.equal(isMaxforaiUploadedAssetUrl("https://tempfile.redpandaai.co/other/voice.wav", "https://maxforai.top"), false);
+  assert.equal(isMaxforaiUploadedAssetUrl("https://example.com/kieai/30590/maxforai-api-assets/voice.wav", "https://maxforai.top"), false);
 });
 
 test("honors numeric and HTTP-date Retry-After values with a safe cap", () => {

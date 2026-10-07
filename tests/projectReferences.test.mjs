@@ -3,7 +3,9 @@ import test from "node:test";
 
 import {
   cleanMatchValue,
+  imageReferenceIssues,
   internalizeProjectAliases,
+  planProjectAudioReferences,
   planProjectReferences,
 } from "../src/projectReferences.js";
 
@@ -24,6 +26,21 @@ function audio(name) {
     name,
   };
 }
+
+test("audio-only matching annotates voices without touching people or scene references", () => {
+  const prompt = "【出场人物】\n001_林晓\n【出场场景】\n101_客厅\n【角色声线】【配音指令】\n（声音2）林晓｜平静";
+  const result = planProjectAudioReferences(prompt, [
+    image("001_林晓.png"),
+    image("101_客厅.png"),
+    audio("声音2.wav"),
+  ]);
+
+  assert.deepEqual(result.matches.map((match) => match.asset.key), ["audio:声音2.wav"]);
+  assert.match(result.annotatedPrompt, /（@声音2=声音2）林晓/);
+  assert.match(result.annotatedPrompt, /【出场人物】\n001_林晓/);
+  assert.match(result.annotatedPrompt, /【出场场景】\n101_客厅/);
+  assert.doesNotMatch(result.annotatedPrompt, /@001_林晓=|@101_客厅=/);
+});
 
 function numberedName(number, label) {
   return `${String(number).padStart(3, "0")}_${label}`;
@@ -156,6 +173,25 @@ test("matches numbered audio files from voice assignment lines", () => {
 
   assert.deepEqual(result.matches.filter((item) => item.role === "voice").map((item) => item.requested), ["声音1", "声音2"]);
   assert.equal(result.missing.length, 0);
+});
+
+test("matches bare voice numbers beside character names in single and batch matching", () => {
+  const prompt = "【角色声线】：知禾3清亮稳静；春桃4清脆急快；姚8、柳12、阿棠13本节沉默且前半在场。";
+  const assets = [3, 4, 8, 12, 13].map((number) => audio(`声音${number}.wav`));
+  for (const plan of [planProjectReferences(prompt, assets), planProjectAudioReferences(prompt, assets)]) {
+    assert.deepEqual(plan.matches.map((match) => match.asset.file.name), ["声音3.wav", "声音4.wav"]);
+    assert.match(plan.annotatedPrompt, /知禾@声音3=声音3清亮稳静/);
+    assert.match(plan.annotatedPrompt, /春桃@声音4=声音4清脆急快/);
+    assert.doesNotMatch(plan.annotatedPrompt, /@声音(?:8|12|13)=/);
+    assert.deepEqual(plan.missing, []);
+    assert.equal(planProjectReferences(plan.annotatedPrompt, assets).annotatedPrompt, plan.annotatedPrompt);
+  }
+});
+
+test("does not treat numeric voice instructions as numbered assets", () => {
+  const prompt = "【角色声线】：平均3.4字/秒；时长15秒；第5节；知禾3清亮。";
+  const plan = planProjectReferences(prompt, [audio("声音3.wav"), audio("声音5.wav"), audio("声音15.wav")]);
+  assert.deepEqual(plan.matches.map((match) => match.requested), ["声音3"]);
 });
 
 test("matches every inline assignment in the compact voice lock heading", () => {
@@ -460,6 +496,87 @@ test("annotates exact matches while leaving only missing entries unchanged", () 
   assert.match(result.annotatedPrompt, /@101_场景1=101_场景1/);
   assert.match(result.annotatedPrompt, /\n102_场景2\n/);
   assert.match(result.annotatedPrompt, /@103_场景3=103_场景3/);
+});
+
+test("matches character and scene filenames followed by sentence punctuation", () => {
+  const prompt = [
+    "【出场人物】：@角色图_004_沈明珠闺装版=角色图_004_沈明珠闺装版.png，、角色图_009_王福.png。",
+    "【出场场景】：场景图_014_沈府侧门外巷四视角.png。",
+  ].join("\n");
+  const assets = [
+    image("角色图_004_沈明珠闺装版.png"),
+    image("角色图_009_王福.png"),
+    image("场景图_014_沈府侧门外巷四视角.png"),
+  ];
+  const result = planProjectReferences(prompt, assets);
+  assert.deepEqual(result.matches.map((match) => match.asset.file.name), assets.map((asset) => asset.file.name));
+  assert.deepEqual(result.missing, []);
+  assert.match(result.annotatedPrompt, /@角色图_009_王福=角色图_009_王福\.png/);
+  assert.match(result.annotatedPrompt, /@场景图_014_沈府侧门外巷四视角=场景图_014_沈府侧门外巷四视角\.png/);
+  assert.doesNotMatch(result.annotatedPrompt, /png。，，/);
+  assert.equal(planProjectReferences(result.annotatedPrompt, assets).annotatedPrompt, result.annotatedPrompt);
+});
+
+test("matches SD2.5 batch cast entries with a parenthesized role and trailing full stop", () => {
+  const prompt = [
+    "【出场人物】：角色图_004_沈明珠闺装版.png（沈明珠）、角色图_017_许映荷.png（许映荷）。",
+    "【出场场景】：场景图_015_许家米行后院四视角.png（米行后院）。",
+  ].join("\n");
+  const assets = [
+    image("角色图_004_沈明珠闺装版.png"),
+    image("角色图_017_许映荷.png"),
+    image("场景图_015_许家米行后院四视角.png"),
+  ];
+  const result = planProjectReferences(prompt, assets);
+  assert.deepEqual(result.matches.map((match) => match.asset.file.name), assets.map((asset) => asset.file.name));
+  assert.deepEqual(result.missing, []);
+  const partiallyMatched = prompt.replace(
+    "角色图_004_沈明珠闺装版.png（沈明珠）",
+    "@角色图_004_沈明珠闺装版=角色图_004_沈明珠闺装版.png（沈明珠）",
+  );
+  const retry = planProjectReferences(partiallyMatched, assets);
+  assert.equal(retry.matches.some((match) => match.asset.file.name === "角色图_017_许映荷.png"), true);
+  assert.deepEqual(retry.missing, []);
+});
+
+test("reports a missing named character and scene after stripping sentence punctuation", () => {
+  const prompt = "【出场人物】：角色图_011_沈父.png。\n【出场场景】：场景图_009_沈府明珠卧房四视角.png。";
+  const result = planProjectReferences(prompt, []);
+  assert.deepEqual(result.missing.map((item) => item.requested), [
+    "角色图_011_沈父.png",
+    "场景图_009_沈府明珠卧房四视角.png",
+  ]);
+});
+
+test("reports an explicitly named scene even without a numbered filename", () => {
+  const result = planProjectReferences("【出场场景】：码头夜景.png。", []);
+  assert.deepEqual(result.missing.map((item) => item.requested), ["码头夜景.png"]);
+});
+
+test("checks that every matched image is actually attached before submission", () => {
+  const prompt = "【出场人物】：角色图_001_阿青.png、角色图_002_阿明.png。";
+  const assets = [image("角色图_001_阿青.png"), image("角色图_002_阿明.png")];
+  assert.deepEqual(imageReferenceIssues(prompt, assets, [{ projectAssetKey: assets[0].key, name: assets[0].name }]), ["角色图_002_阿明.png"]);
+  assert.deepEqual(imageReferenceIssues(prompt, assets, assets.map((asset) => ({ projectAssetKey: asset.key, name: asset.name }))), []);
+});
+
+test("does not hide an unmatched image when a batch item was previously matched", () => {
+  const prompt = "【出场人物】：角色图_001_阿青.png、角色图_002_阿明.png。";
+  const assets = [image("角色图_001_阿青.png")];
+  assert.deepEqual(imageReferenceIssues(prompt, assets, [{ projectAssetKey: assets[0].key, name: assets[0].name }]), ["角色图_002_阿明.png"]);
+});
+
+test("accepts a manually attached image with the exact requested filename", () => {
+  assert.deepEqual(
+    imageReferenceIssues("【出场人物】：角色图_001_阿青.png。", [], [{ kind: "image", name: "角色图_001_阿青.png" }]),
+    [],
+  );
+});
+
+test("flags explicit role and scene filenames even under an unfamiliar section heading", () => {
+  const prompt = "【画面素材】角色图_001_阿青.png、场景图_002_码头.png";
+  const references = [{ kind: "image", name: "角色图_001_阿青.png" }];
+  assert.deepEqual(imageReferenceIssues(prompt, [], references), ["场景图_002_码头.png"]);
 });
 
 test("is idempotent when the same prompt is planned repeatedly", () => {

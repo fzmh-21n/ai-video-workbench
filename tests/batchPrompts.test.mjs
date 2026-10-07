@@ -19,6 +19,7 @@ import {
   clearManualBatchDownload,
   manuallyCompleteBatchItem,
   overnightBatchReport,
+  overnightRetryableItems,
   parseRecoveredTaskIds,
   providerBatchSubmissionPlan,
   reconciledBatchTerminalState,
@@ -106,6 +107,22 @@ test("requires a newly received task ID before declaring an overnight batch safe
   assert.equal(ready.acceptedTaskCount, 2);
   assert.equal(ready.awaitingReceipt, 0);
   assert.equal(ready.safeToShutdown, true);
+});
+
+test("queues only definite failed hosted items once and never retries active or uncertain tasks", () => {
+  const plan = { itemIds: ["submit-failed", "generation-failed", "not-submitted", "active", "unknown", "outside"] };
+  const retryable = overnightRetryableItems([
+    { id: "submit-failed", status: "failed" },
+    { id: "generation-failed", status: "generation_failed" },
+    { id: "not-submitted", status: "not_submitted" },
+    { id: "active", status: "generating" },
+    { id: "unknown", status: "submission_unknown" },
+    { id: "outside", status: "generated" },
+    { id: "submit-failed", status: "failed" },
+    { id: "not-hosted", status: "failed" },
+  ], plan);
+
+  assert.deepEqual(retryable.map((item) => item.id), ["submit-failed", "generation-failed", "not-submitted"]);
 });
 
 test("shows the source chapter beside repeated section numbers", () => {
@@ -343,6 +360,7 @@ test("stops dispatching unsent work after a deterministic batch error", async ()
 test("uses fixed plans for limited rush and strict order", () => {
   assert.deepEqual(batchSubmissionPlan("limited_rush", 20), { concurrency: 5, staggerMs: 50 });
   assert.deepEqual(batchSubmissionPlan("strict_order", 20), { concurrency: 1, staggerMs: 0 });
+  assert.deepEqual(batchSubmissionPlan("single_like", 20), { concurrency: 1, staggerMs: 0 });
   assert.deepEqual(batchSubmissionPlan("ordered_rush", 3), { concurrency: 3, staggerMs: 350 });
 });
 

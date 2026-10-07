@@ -10,6 +10,7 @@ import {
   imageModelsFor,
 } from "./imageCatalog.js";
 import { completedImageReferenceIds, imageDownloadFilename, imagePromptWithFixedContent, imageTaskEntries } from "./imageBatch.js";
+import { parseImagePromptJson, imageJsonGenerationItem, completedImagePromptIds } from "./imageJsonImport.js";
 import { normalizedTaskProgress } from "./taskProgress.js";
 import {
   IMAGE_DELETED_TASK_IDS_KEY,
@@ -23,6 +24,7 @@ const MODELS_KEY = "image-workbench-models-v1";
 const TASKS_KEY = "image-workbench-tasks-v1";
 const FIXED_CONTENT_KEY = "image-workbench-fixed-content-v1";
 const WORK_MODE_KEY = "image-workbench-mode-v1";
+const JSON_PROMPTS_KEY = "image-workbench-json-prompts-v1";
 const BATCH_IMAGE_LIMIT = 50;
 
 function loadJson(key, fallback) {
@@ -56,7 +58,7 @@ async function mapWithConcurrency(items, concurrency, mapper) {
   return results;
 }
 
-export default function ImageWorkbench({ onVideoMode, onLogout }) {
+export default function ImageWorkbench({ onVideoMode, onFaceMode, onLogout }) {
   const [activeId, setActiveId] = useState(() => localStorage.getItem(ACTIVE_PROVIDER_KEY) || IMAGE_PROVIDER_PROFILES[0].id);
   const [models, setModels] = useState(() => loadJson(MODELS_KEY, {}));
   const activeProfile = IMAGE_PROVIDER_PROFILES.find((profile) => profile.id === activeId) || IMAGE_PROVIDER_PROFILES[0];
@@ -64,7 +66,9 @@ export default function ImageWorkbench({ onVideoMode, onLogout }) {
   const capability = imageModelCapability(activeProfile.adapter, model);
   const [apiKey, setApiKey] = useState(() => readCredentials(activeProfile.id).apiKey);
   const [rememberKey, setRememberKey] = useState(() => readCredentials(activeProfile.id).remember);
-  const [workMode, setWorkMode] = useState(() => localStorage.getItem(WORK_MODE_KEY) === "batch" ? "batch" : "single");
+  const [workMode, setWorkMode] = useState(() => ["batch", "json"].includes(localStorage.getItem(WORK_MODE_KEY)) ? localStorage.getItem(WORK_MODE_KEY) : "single");
+  const [jsonPrompts, setJsonPrompts] = useState(() => loadJson(JSON_PROMPTS_KEY, []));
+  const [importingJson, setImportingJson] = useState(false);
   const [fixedContent, setFixedContent] = useState(() => localStorage.getItem(FIXED_CONTENT_KEY) || "");
   const [prompt, setPrompt] = useState("");
   const [aspectRatio, setAspectRatio] = useState("16:9");
@@ -84,6 +88,7 @@ export default function ImageWorkbench({ onVideoMode, onLogout }) {
   const referencesRef = useRef(references);
   const imageBlobRef = useRef(imageBlob);
   const fileInput = useRef(null);
+  const jsonInput = useRef(null);
 
   useEffect(() => {
     localStorage.setItem(ACTIVE_PROVIDER_KEY, activeProfile.id);
@@ -97,6 +102,7 @@ export default function ImageWorkbench({ onVideoMode, onLogout }) {
   }, [models]);
 
   useEffect(() => { localStorage.setItem(WORK_MODE_KEY, workMode); }, [workMode]);
+  useEffect(() => { localStorage.setItem(JSON_PROMPTS_KEY, JSON.stringify(jsonPrompts)); }, [jsonPrompts]);
   useEffect(() => { localStorage.setItem(FIXED_CONTENT_KEY, fixedContent); }, [fixedContent]);
 
   useEffect(() => {
@@ -188,6 +194,8 @@ export default function ImageWorkbench({ onVideoMode, onLogout }) {
   const referenceLimit = workMode === "batch" ? BATCH_IMAGE_LIMIT : capability.references;
   const completedReferenceIds = completedImageReferenceIds(references, tasks);
   const taskEntries = imageTaskEntries(tasks);
+  const completedJsonIds = completedImagePromptIds(jsonPrompts, tasks, fixedContent);
+  const completedJsonCount = jsonPrompts.filter((item) => completedJsonIds.has(item.id)).length;
 
   function saveCurrentCredentials(nextKey, nextRemember) {
     setApiKey(nextKey);
@@ -224,6 +232,32 @@ export default function ImageWorkbench({ onVideoMode, onLogout }) {
     setNotice(`已清空 ${completedReferenceIds.size} 张处理完成的原图；提示词和固定内容均已保留`);
   }
 
+  async function importJsonFiles(files) {
+    if (!files?.length) return;
+    setImportingJson(true);
+    try {
+      const imported = [];
+      for (const file of files) {
+        imported.push(...parseImagePromptJson(await file.text(), file.name).map((item) => ({ ...item, id: crypto.randomUUID() })));
+      }
+      setJsonPrompts((current) => [...current, ...imported]);
+      setNotice(`已导入 ${imported.length} 条角色/场景描述，每条提示词可单独修改；尚未提交生成`);
+    } catch (error) {
+      setNotice(error.message || "JSON 导入失败；原有列表已保留");
+    } finally {
+      setImportingJson(false);
+    }
+  }
+
+  function updateJsonPrompt(id, changes) {
+    setJsonPrompts((current) => current.map((item) => item.id === id ? { ...item, ...changes } : item));
+  }
+
+  function clearCompletedJsonPrompts() {
+    setJsonPrompts((current) => current.filter((item) => !completedJsonIds.has(item.id)));
+    setNotice(`已清空 ${completedJsonCount} 条已完成描述；固定内容和其它提示词均已保留`);
+  }
+
   function insertReference(index) {
     const tag = workMode === "batch" ? "@Image1" : `@Image${index + 1}`;
     setPrompt((value) => `${value}${value && !value.endsWith(" ") ? " " : ""}${tag}`);
@@ -250,24 +284,41 @@ export default function ImageWorkbench({ onVideoMode, onLogout }) {
 
   async function submitImage() {
     if (!apiKey.trim()) return setNotice("请先填写当前图片中转站的 API Key");
-    if (!prompt.trim()) return setNotice("请填写图片提示词");
+    if (workMode === "json") {
+      if (!jsonPrompts.length) return setNotice("请先导入角色/场景 JSON");
+      const invalidIndex = jsonPrompts.findIndex((item) => !item.name.trim() || !item.prompt.trim());
+      if (invalidIndex !== -1) return setNotice(`第 ${invalidIndex + 1} 条的名称和提示词不能为空`);
+    } else if (!prompt.trim()) return setNotice("请填写图片提示词");
     if (workMode === "batch" && !references.length) return setNotice("请先添加需要批量处理的原图");
     if (workMode === "single" && references.length > capability.references) return setNotice(`当前图片模型最多参考 ${capability.references} 张图片`);
     setSubmitting(true);
     setNotice("");
     try {
-      const submittedPrompt = imagePromptWithFixedContent(fixedContent, prompt);
-      const batchId = workMode === "batch" ? `image-batch-${Date.now()}` : null;
-      const items = workMode === "batch" ? references : [null];
+      const batchId = workMode !== "single" ? `image-batch-${crypto.randomUUID()}` : null;
+      const items = workMode === "json" ? jsonPrompts : workMode === "batch" ? references : [null];
+      let submittedCount = 0;
       const results = await mapWithConcurrency(items, 3, async (source, index) => {
+        const entry = workMode === "json" ? imageJsonGenerationItem(source, fixedContent) : {
+          prompt: imagePromptWithFixedContent(fixedContent, prompt),
+          title: source?.name || prompt.trim().slice(0, 24) || model,
+          sourceName: source?.name || null,
+          references: source ? [source] : references,
+        };
         try {
           const form = new FormData();
-          form.set("prompt", submittedPrompt);
+          form.set("prompt", entry.prompt);
           form.set("aspectRatio", aspectRatio);
           form.set("size", size);
           form.set("quality", quality);
-          const requestReferences = source ? [source] : references;
-          for (const item of requestReferences) form.append("references", item.file, item.name);
+          form.set("title", entry.title);
+          if (batchId) {
+            form.set("batchId", batchId);
+            form.set("batchIndex", String(index + 1));
+          }
+          if (entry.sourcePromptId) form.set("sourcePromptId", entry.sourcePromptId);
+          if (entry.sourceName) form.set("sourceName", entry.sourceName);
+          if (workMode === "batch" && source?.id) form.set("sourceReferenceId", source.id);
+          for (const item of entry.references) form.append("references", item.file, item.name);
           const response = await fetch("/api/image-tasks", {
             method: "POST",
             headers: profileHeaders(activeProfile, apiKey.trim(), model),
@@ -275,28 +326,34 @@ export default function ImageWorkbench({ onVideoMode, onLogout }) {
           });
           const body = await response.json().catch(() => ({}));
           if (!response.ok) throw new Error(body.message || "图片任务提交失败");
-          return (body.tasks || []).map((task) => ({
+          const createdTasks = (body.tasks || []).map((task) => ({
             ...task,
-            title: source?.name || prompt.trim().slice(0, 24) || model,
-            sourceName: source?.name || null,
+            title: entry.title,
+            sourceName: entry.sourceName,
+            sourcePromptId: entry.sourcePromptId || null,
             batchId,
             batchIndex: source ? index + 1 : null,
-            sourceReferenceId: source?.id || null,
-            prompt: submittedPrompt,
+            sourceReferenceId: workMode === "batch" ? source?.id || null : null,
+            prompt: entry.prompt,
             model,
             providerId: activeProfile.id,
             providerName: activeProfile.name,
           }));
+          if (!createdTasks.length) throw new Error("中转未返回图片任务编号，请核对中转后台，勿重复提交");
+          // Save each accepted task immediately, including long JSON batches.
+          setTasks((current) => [...createdTasks, ...current]);
+          submittedCount += 1;
+          if (batchId) setNotice(`正在提交图片 ${submittedCount}/${items.length}；已接单任务会立即保存`);
+          return createdTasks;
         } catch (error) {
           return { error: error.message || "图片任务提交失败", sourceName: source?.name || "单条任务" };
         }
       });
       const created = results.flatMap((result) => Array.isArray(result) ? result : []);
       const failures = results.filter((result) => !Array.isArray(result));
-      if (created.length) setTasks((current) => [...created, ...current]);
       if (!created.length) throw new Error(failures[0]?.error || "图片任务提交失败");
-      setNotice(workMode === "batch"
-        ? `批量图片已提交 ${created.length} 张${failures.length ? `，失败 ${failures.length} 张` : ""}；最多同时提交 3 张以避免中转限流`
+      setNotice(workMode !== "single"
+        ? `批量图片已提交 ${created.length} 张${failures.length ? `，失败 ${failures.length} 张（${failures[0].sourceName}：${failures[0].error}）` : ""}；最多同时提交 3 张以避免中转限流`
         : `图片任务已提交：${activeProfile.name} · ${model}`);
     } catch (error) {
       setNotice(error.message || "图片任务提交失败");
@@ -406,6 +463,7 @@ export default function ImageWorkbench({ onVideoMode, onLogout }) {
         </div>
         <div className="provider-switcher">
           <button className="secondary-button" onClick={onVideoMode}>视频生成</button>
+          <button className="secondary-button" onClick={onFaceMode}>明星脸初筛</button>
           <label><span>当前中转站</span><select value={activeProfile.id} onChange={(event) => setActiveId(event.target.value)}>{IMAGE_PROVIDER_PROFILES.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label>
           <span className={`connection-pill ${apiKey ? "ready" : ""}`}>{apiKey ? model : "等待图片 API 配置"}</span>
           <button className="logout-button" onClick={onLogout}>退出登录</button>
@@ -416,8 +474,9 @@ export default function ImageWorkbench({ onVideoMode, onLogout }) {
         <section className="panel generation-panel">
           <div className="panel-heading"><h2>图片生成参数</h2><span className="idle-pill">● IMAGE</span></div>
           <div className="work-mode-switch" role="tablist" aria-label="图片工作模式">
-            <button className={workMode === "single" ? "active" : ""} onClick={() => setWorkMode("single")}>单条生成</button>
-            <button className={workMode === "batch" ? "active" : ""} onClick={() => setWorkMode("batch")}>批量处理</button>
+            <button disabled={submitting} className={workMode === "single" ? "active" : ""} onClick={() => setWorkMode("single")}>单条生成</button>
+            <button disabled={submitting} className={workMode === "batch" ? "active" : ""} onClick={() => setWorkMode("batch")}>原图批量处理</button>
+            <button disabled={submitting} className={workMode === "json" ? "active" : ""} onClick={() => setWorkMode("json")}>角色/场景 JSON</button>
           </div>
           <div className="panel-body">
             <div className="image-provider-config">
@@ -433,6 +492,28 @@ export default function ImageWorkbench({ onVideoMode, onLogout }) {
             <textarea className="fixed-content" id="image-fixed-content" value={fixedContent} onChange={(event) => setFixedContent(event.target.value)} placeholder="例如：统一画风、人物一致性、构图和清晰度要求" />
             <div className="fixed-content-count">固定内容 {fixedContent.length} 字</div>
 
+            {workMode === "json" ? <section className="image-json-prompts">
+              <div className="section-heading"><div><h3>角色/场景批量提示词</h3><p>JSON 数组中每个 name + description 对应一条；原文导入，点击条目可编辑，下载以名称命名。</p></div><span>{jsonPrompts.length} 条</span></div>
+              <div className="reference-toolbar">
+                <button disabled={submitting || importingJson || !completedJsonCount} onClick={clearCompletedJsonPrompts}>清空已处理（{completedJsonCount}）</button>
+                <button disabled={submitting || importingJson} onClick={() => jsonInput.current?.click()}>{importingJson ? "导入中…" : "＋ 导入角色/场景 JSON"}</button>
+                <input ref={jsonInput} hidden multiple type="file" accept=".json,application/json" onChange={(event) => { importJsonFiles(Array.from(event.target.files || [])); event.target.value = ""; }} />
+              </div>
+              {!jsonPrompts.length && <div className="batch-filter-empty">可同时导入角色和场景文件。每条描述单独生成一张图片，不需要原图；已有固定内容会统一加在每条前面。</div>}
+              <div className="image-json-list">
+                {jsonPrompts.map((item, index) => <details className="image-json-row" key={item.id}>
+                  <summary><strong>{index + 1}. {item.name}</strong><span>{completedJsonIds.has(item.id) ? "已生成 · " : ""}{item.prompt.length} 字</span></summary>
+                  <div className="image-json-row-body">
+                    <p className="upload-mode-note">来源：{item.sourceFile}{item.aliases ? ` · 别名：${item.aliases}` : ""}</p>
+                    <label className="field-label" htmlFor={`image-json-name-${item.id}`}>名称 / 下载文件名</label>
+                    <input id={`image-json-name-${item.id}`} disabled={submitting} value={item.name} onChange={(event) => updateJsonPrompt(item.id, { name: event.target.value })} />
+                    <label className="field-label" htmlFor={`image-json-prompt-${item.id}`}>本条提示词</label>
+                    <textarea id={`image-json-prompt-${item.id}`} disabled={submitting} value={item.prompt} onChange={(event) => updateJsonPrompt(item.id, { prompt: event.target.value })} />
+                    <div className="image-json-row-actions"><span>固定内容在提交时自动加到前面</span><button disabled={submitting} onClick={() => setJsonPrompts((current) => current.filter((row) => row.id !== item.id))}>移除本条</button></div>
+                  </div>
+                </details>)}
+              </div>
+            </section> : <>
             <label className="field-label" htmlFor="image-prompt">图片提示词 Prompt</label>
             <textarea id="image-prompt" value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder={workMode === "batch" ? "每张原图都会作为该任务的 @Image1，填写共同处理要求" : "描述要生成的画面；有参考图时可使用 @Image1、@Image2"} />
             <div className="character-count">{prompt.length} 字</div>
@@ -449,6 +530,7 @@ export default function ImageWorkbench({ onVideoMode, onLogout }) {
               {!references.length && <div className="empty-reference"><strong>{workMode === "batch" ? "把需要批量处理的原图拖到这里" : "把参考图片拖到这里"}</strong><span>也可以点击上方添加图片；支持 PNG、JPG、WebP 等常用图片格式</span></div>}
               {references.map((item, index) => <article className="reference-card" key={item.id}><button className="tag" onClick={() => insertReference(index)}>{workMode === "batch" ? "@Image1" : `@Image${index + 1}`}</button><button className="remove" onClick={() => removeReference(item.id)}>×</button><div className="reference-preview"><img src={item.preview} alt="" /></div><strong title={item.name}>{item.name}</strong></article>)}
             </div>
+            </>}
 
             <div className="settings-grid image-settings-grid">
               {activeProfile.adapter === "fmgo"
@@ -459,7 +541,7 @@ export default function ImageWorkbench({ onVideoMode, onLogout }) {
               <label><span>输出规格</span><input readOnly value={activeProfile.adapter === "fmgo" ? capability.imageSize : size} /></label>
             </div>
             {notice && <div className="notice">ⓘ {notice}</div>}
-            <div className="submit-row"><button className="primary-button" disabled={submitting} onClick={submitImage}>{submitting ? "提交中…" : workMode === "batch" ? `一键批量生成（${references.length}）` : "开始生成图片"}</button></div>
+            <div className="submit-row"><button className="primary-button" disabled={submitting || importingJson} onClick={submitImage}>{submitting ? "提交中…" : workMode === "json" ? `一键批量生成（${jsonPrompts.length}）` : workMode === "batch" ? `一键批量生成（${references.length}）` : "开始生成图片"}</button></div>
           </div>
         </section>
 

@@ -13,7 +13,9 @@ import {
 } from "./providerCatalog.js";
 import {
   fileStem,
+  imageReferenceIssues,
   internalizeProjectAliases,
+  planProjectAudioReferences,
   planProjectReferences,
 } from "./projectReferences.js";
 import {
@@ -80,18 +82,22 @@ import FixedContentControls from "./FixedContentControls.jsx";
 import FixedContentManager from "./FixedContentManager.jsx";
 import TaskProjectManager from "./TaskProjectManager.jsx";
 import ImageWorkbench from "./ImageWorkbench.jsx";
+import FaceScreen from "./FaceScreen.jsx";
 import {
   UNCLASSIFIED_PROJECT,
   addTaskProject,
   assignTasksToProject,
   loadActiveTaskProject,
+  loadTaskProjectCreatedAt,
   loadTaskProjectRatios,
   loadTaskProjects,
   removeTaskProject,
+  saveTaskProjectCreatedAt,
   saveTaskProjectRatios,
   saveTaskProjects,
   taskProjectRatio,
   tasksAfterProjectDeletion,
+  withTaskProjectCreatedAt,
   withTaskProjectRatio,
 } from "./taskProjects.js";
 import {
@@ -319,16 +325,19 @@ export default function App() {
     <>
       {serviceUnavailable && <div className="service-disconnected" role="alert">工作台服务已断开，任务状态暂时无法更新。请检查一键启动窗口；恢复后本页会自动解除提示。</div>}
       <div hidden={generationMode !== "image"}>
-        <ImageWorkbench onVideoMode={() => switchGenerationMode("video")} onLogout={logout} />
+        <ImageWorkbench onVideoMode={() => switchGenerationMode("video")} onFaceMode={() => switchGenerationMode("faces")} onLogout={logout} />
       </div>
       <div hidden={generationMode !== "video"}>
-        <Workbench onImageMode={() => switchGenerationMode("image")} onLogout={logout} />
+        <Workbench onImageMode={() => switchGenerationMode("image")} onFaceMode={() => switchGenerationMode("faces")} onLogout={logout} />
+      </div>
+      <div hidden={generationMode !== "faces"}>
+        <FaceScreen onVideoMode={() => switchGenerationMode("video")} onImageMode={() => switchGenerationMode("image")} onLogout={logout} />
       </div>
     </>
   );
 }
 
-function Workbench({ onImageMode, onLogout }) {
+function Workbench({ onImageMode, onFaceMode, onLogout }) {
   const [workMode, setWorkMode] = useState(() => localStorage.getItem("video-workbench-mode-v1") || "single");
   const [profiles, setProfiles] = useState(() => {
     const saved = loadJson(PROFILE_KEY, null);
@@ -345,6 +354,7 @@ function Workbench({ onImageMode, onLogout }) {
   const [taskProjectOptions, setTaskProjectOptions] = useState([]);
   const [taskProjects, setTaskProjects] = useState(loadTaskProjects);
   const [activeTaskProject, setActiveTaskProject] = useState(loadActiveTaskProject);
+  const [taskProjectCreatedAtByName, setTaskProjectCreatedAtByName] = useState(loadTaskProjectCreatedAt);
   const [taskProjectRatios, setTaskProjectRatios] = useState(loadTaskProjectRatios);
   const [ratioProjectPrompt, setRatioProjectPrompt] = useState(null);
   const [selectedTaskIds, setSelectedTaskIds] = useState([]);
@@ -526,6 +536,9 @@ function Workbench({ onImageMode, onLogout }) {
   useEffect(() => {
     saveTaskProjects(taskProjects, activeTaskProject);
   }, [taskProjects, activeTaskProject]);
+  useEffect(() => {
+    saveTaskProjectCreatedAt(taskProjectCreatedAtByName);
+  }, [taskProjectCreatedAtByName]);
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -928,14 +941,16 @@ function Workbench({ onImageMode, onLogout }) {
       setDraft((current) => ({
         ...current,
         adapter: prepared.adapter,
-        model: models.includes(current.model) ? current.model : models[0] || current.model,
+        model: models.includes(current.model) || (prepared.adapter === "bailing" && current.model !== FALLBACK_MODELS.bailing[0])
+          ? current.model
+          : models[0] || current.model,
         routeCapabilities: body.capabilities || current.routeCapabilities,
         routeLabels: body.labels || current.routeLabels,
       }));
       setConfigStatus(
-        prepared.adapter === "canseedream"
+        body.warning || (prepared.adapter === "canseedream"
           ? `连接成功，读取到 ${models.length} 条当前开放线路`
-          : `连接成功，读取到 ${models.length} 个模型`,
+          : `连接成功，读取到 ${models.length} 个模型`),
       );
     } catch (error) {
       setConfigStatus(
@@ -1015,21 +1030,7 @@ function Workbench({ onImageMode, onLogout }) {
     }
   }
 
-  async function runOneClickReference() {
-    if (!projectAssets.length) {
-      setNotice("请先选择一个包含图片和音频的项目文件夹");
-      return;
-    }
-    if (!prompt.trim()) {
-      setNotice("请先把完整提示词填入提示词框");
-      return;
-    }
-    const plan = planProjectReferences(prompt, projectAssets);
-    if (!plan.matches.length) {
-      setNotice("项目内没有找到能与人物、背景或声线模块对应的素材，未做任何修改");
-      return;
-    }
-
+  async function applyProjectReferencePlan(plan) {
     const selectedAssets = [...new Map(plan.matches.map((match) => [match.asset.key, match.asset])).values()];
     const durations = await Promise.all(
       selectedAssets.map((asset) => readMediaDuration(asset.file, asset.kind)),
@@ -1069,16 +1070,55 @@ function Workbench({ onImageMode, onLogout }) {
     });
     setPrompt(plan.annotatedPrompt);
 
-    const matchedCounts = plan.matches.reduce(
+    return plan.matches.reduce(
       (value, match) => ({ ...value, [match.role]: value[match.role] + 1 }),
       { people: 0, background: 0, voice: 0 },
     );
+  }
+
+  async function runOneClickReference() {
+    if (!projectAssets.length) {
+      setNotice("请先选择一个包含图片和音频的项目文件夹");
+      return;
+    }
+    if (!prompt.trim()) {
+      setNotice("请先把完整提示词填入提示词框");
+      return;
+    }
+    const plan = planProjectReferences(prompt, projectAssets);
+    if (!plan.matches.length) {
+      setNotice("项目内没有找到能与人物、背景或声线模块对应的素材，未做任何修改");
+      return;
+    }
+
+    const matchedCounts = await applyProjectReferencePlan(plan);
     const missingText = plan.missing.length
       ? `；${plan.missing.length} 项在项目内没有对应文件，已保持原文不动`
       : "";
     setNotice(
       `一键参考完成：人物图片 ${matchedCounts.people}、场景图片 ${matchedCounts.background}、声线音频 ${matchedCounts.voice}${missingText}。请检查后再手动开始生成。`,
     );
+  }
+
+  async function runOneClickAudioReference() {
+    if (!projectAssets.some((asset) => asset.kind === "audio")) {
+      setNotice("当前项目文件夹没有可用音频文件");
+      return;
+    }
+    if (!prompt.trim()) {
+      setNotice("请先把完整提示词填入提示词框");
+      return;
+    }
+    const plan = planProjectAudioReferences(prompt, projectAssets);
+    if (!plan.matches.length) {
+      setNotice("没有找到能与【角色声线】【配音指令】或声音编号对应的音频，图片和视频未作修改");
+      return;
+    }
+    const matchedCounts = await applyProjectReferencePlan(plan);
+    const missingText = plan.missing.length
+      ? `；${plan.missing.length} 条声线在项目内没有对应音频`
+      : "";
+    setNotice(`一键匹配音频完成：已匹配 ${matchedCounts.voice} 个声线音频${missingText}；图片、场景和视频参考保持不变。`);
   }
 
   async function addFiles(fileList) {
@@ -1243,6 +1283,11 @@ function Workbench({ onImageMode, onLogout }) {
     if (!apiKey) {
       setNotice("请先配置当前中转站的 API Key");
       openConfig();
+      return;
+    }
+    const missingImages = imageReferenceIssues(prompt, projectAssets, references);
+    if (missingImages.length) {
+      setNotice(`参考图片尚未全部连接，未提交任务：${missingImages.join("、")}。请重新一键参考或手动补齐。`);
       return;
     }
     const translatedPrompt = internalizeProjectAliases(prompt.trim(), references);
@@ -1470,6 +1515,7 @@ function Workbench({ onImageMode, onLogout }) {
     const next = addTaskProject(taskProjects, name);
     const createdName = next[next.length - 1];
     setTaskProjects(next);
+    setTaskProjectCreatedAtByName((current) => withTaskProjectCreatedAt(current, createdName));
     setActiveTaskProject(createdName);
     setTaskProjectFilter(createdName);
     setRatioProjectPrompt({ projectName: createdName, created: true, templateId: fixedContentTemplateId || fixedContentTemplates[0]?.id || "" });
@@ -1520,6 +1566,11 @@ function Workbench({ onImageMode, onLogout }) {
     const nextActiveProject = activeTaskProject === normalized ? UNCLASSIFIED_PROJECT : activeTaskProject;
     saveTaskProjects(remainingProjects, nextActiveProject);
     setTaskProjects(remainingProjects);
+    setTaskProjectCreatedAtByName((current) => {
+      const next = { ...current };
+      delete next[normalized];
+      return next;
+    });
     setTaskProjectRatios((current) => {
       const next = { ...current };
       delete next[normalized];
@@ -2098,6 +2149,7 @@ function Workbench({ onImageMode, onLogout }) {
         </div>
         <div className="provider-switcher">
           <button className="secondary-button" onClick={onImageMode}>图片生成</button>
+          <button className="secondary-button" onClick={onFaceMode}>明星脸初筛</button>
           <div className="model-version-switch" role="group" aria-label="Seedance 模型版本">
             <span>模型版本</span>
             <button
@@ -2213,6 +2265,9 @@ function Workbench({ onImageMode, onLogout }) {
                 <button className="one-click-button" disabled={!projectAssets.length} onClick={runOneClickReference}>
                   一键参考
                 </button>
+                <button className="secondary-button" disabled={!projectAssets.some((asset) => asset.kind === "audio")} onClick={runOneClickAudioReference}>
+                  一键匹配音频
+                </button>
               </div>
               <input
                 ref={projectFolderInput}
@@ -2302,6 +2357,8 @@ function Workbench({ onImageMode, onLogout }) {
             <p className="upload-mode-note">
               {activeProfile.adapter === "paipu"
                 ? "素材上传：图片使用 Paipu 上传接口；本地音频和视频自动转为临时 HTTPS 地址"
+                : activeProfile.adapter === "bailing"
+                ? "白灵需要公网素材 URL；本地文件将使用已配置的 COS，未配置时使用临时转链"
                 : activeProfile.mediaUploadUrl
                 ? "素材上传：使用你填写的自定义上传地址"
                 : "素材上传：未填写地址时自动选择临时转链（约 1–3 小时后失效）"}
@@ -2330,7 +2387,9 @@ function Workbench({ onImageMode, onLogout }) {
                 <div className="empty-reference">
                   <strong>把参考图片、音频或视频拖到这里</strong>
                   <span>
-                    当前 {sdVersion === "sd25" ? "SD2.5" : "SD2.0"} 上限：图片{capability.images}张、音频{capability.audios}个、视频{capability.videos}个；{numericDurations.length ? "最长" : ""}{maximumDurationLabel}
+                    {activeProfile.adapter === "bailing"
+                      ? "白灵文档未公布各模型素材与时长上限；具体以所选模型的实际校验为准"
+                      : `当前 ${sdVersion === "sd25" ? "SD2.5" : "SD2.0"} 上限：图片${capability.images}张、音频${capability.audios}个、视频${capability.videos}个；${numericDurations.length ? "最长" : ""}${maximumDurationLabel}`}
                   </span>
                 </div>
               )}
@@ -2379,10 +2438,10 @@ function Workbench({ onImageMode, onLogout }) {
               <label><span>随机种子</span><input value={seed} onChange={(event) => setSeed(event.target.value)} placeholder={capability.seed ? "空 = 随机" : "当前模型不支持"} disabled={!capability.seed} /></label>
               <label><span>生成数量</span><select value={quantity} onChange={(event) => setQuantity(Number(event.target.value))}>{[1, 2, 3, 4].map((value) => <option key={value}>{value}</option>)}</select></label>
             </div>
-            <label className="check-row">
+            {!["bailing", "huajing"].includes(activeProfile.adapter) && <label className="check-row">
                         <input type="checkbox" checked={syncAudio} onChange={(event) => setSyncAudio(event.target.checked)} />
                         生成同步音频（当前中转默认开启）
-            </label>
+            </label>}
             <div className="notice" role="status">ⓘ {notice}</div>
             <div className="submit-row">
               <button className="primary-button" disabled={submitting} onClick={submitTask}>{submitting ? "提交中…" : "开始生成"}</button>
@@ -2604,7 +2663,7 @@ function Workbench({ onImageMode, onLogout }) {
                 </div>
                 <label><span>配置名称</span><input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="例如：主力 API" /></label>
                 <label><span>Base URL</span><input value={draft.baseUrl} onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value, adapter: inferAdapter(event.target.value) })} placeholder="https://api.example.com" /></label>
-                <label><span>接口类型</span><select value={draft.adapter} onChange={(event) => setDraft({ ...draft, adapter: event.target.value })}><option value="fmgo">FMGO / 飞猫</option><option value="paipu">Paipu / Lec</option><option value="viralee">ViralE</option><option value="canseedream">CanSeeDream / 看见梦想</option><option value="lwaigc">LWAIGC 官方统一接口</option><option value="meaicc">MEAICC / 林木森AI</option><option value="ziyuai">Ziyu AI / 紫域AI</option><option value="globalaiopc">GlobalAiOpc / 全球AI</option><option value="maxforai">MaxForAI</option><option value="clmm">CLMM Mall</option><option value="pidoi">Pidoi</option><option value="aiyrx">AIYRX</option><option value="unmau">Unmau New API</option><option value="seedancevideo">Seedance 视频 / 772808</option><option value="suanliai">算力AI（自动识别系列）</option><option value="newapi">New API 通用</option></select></label>
+                <label><span>接口类型</span><select value={draft.adapter} onChange={(event) => setDraft({ ...draft, adapter: event.target.value })}><option value="fmgo">FMGO / 飞猫</option><option value="paipu">Paipu / Lec</option><option value="viralee">ViralE</option><option value="canseedream">CanSeeDream / 看见梦想</option><option value="lwaigc">LWAIGC 官方统一接口</option><option value="meaicc">MEAICC / 林木森AI</option><option value="ziyuai">Ziyu AI / 紫域AI</option><option value="globalaiopc">GlobalAiOpc / 全球AI</option><option value="maxforai">MaxForAI</option><option value="clmm">CLMM Mall</option><option value="pidoi">Pidoi</option><option value="aiyrx">AIYRX</option><option value="unmau">Unmau New API</option><option value="seedancevideo">Seedance 视频 / 772808</option><option value="suanliai">算力AI（自动识别系列）</option><option value="bailing">白灵 API</option><option value="huajing">华镜 / Huajing</option><option value="newapi">New API 通用</option></select></label>
                 <label><span>API Key</span><input type="password" value={draftKey} onChange={(event) => setDraftKey(event.target.value)} placeholder="sk-••••••••" /><small>{rememberKey ? "将保存在此浏览器；公共电脑请勿启用。" : "仅保存在当前浏览器会话，不写入源码。"}</small></label>
                 <label className="remember-key-row"><input type="checkbox" checked={rememberKey} onChange={(event) => setRememberKey(event.target.checked)} /><span>在这台浏览器记住当前中转站的 Key</span></label>
                 <label>
@@ -2626,11 +2685,19 @@ function Workbench({ onImageMode, onLogout }) {
                     <input
                       value={draft.model}
                       onChange={(event) => setDraft({ ...draft, model: event.target.value })}
-                      placeholder="先测试连接或手动填写模型 ID"
+                      placeholder={draft.adapter === "bailing" ? "填写白灵后台实际开放的模型名" : "先测试连接或手动填写模型 ID"}
                     />
                   )}
+                  {draft.adapter === "bailing" && <input
+                    value={draft.model}
+                    onChange={(event) => setDraft({ ...draft, model: event.target.value })}
+                    placeholder="也可以手动填写模型名"
+                    aria-label="手动填写白灵模型名"
+                  />}
                   <small>
-                    当前列表共 {(modelOptions[draft.id] || FALLBACK_MODELS[draft.adapter] || []).length} 个模型
+                    {draft.adapter === "bailing"
+                      ? `当前列表共 ${(modelOptions[draft.id] || []).length} 个实时模型；也可手动填写模型名`
+                      : `当前列表共 ${(modelOptions[draft.id] || FALLBACK_MODELS[draft.adapter] || []).length} 个模型`}
                   </small>
                 </label>
                 <details className="advanced-config"><summary>高级素材上传设置</summary><label><span>素材上传地址</span><input value={draft.mediaUploadUrl || ""} onChange={(event) => setDraft({ ...draft, mediaUploadUrl: event.target.value })} placeholder="可选，例如 /v1/media/upload" /></label><label><span>独立上传密钥</span><input type="password" value={draftUploadKey} onChange={(event) => setDraftUploadKey(event.target.value)} placeholder="留空则使用当前 API Key" /><small>保存位置跟随上方“记住 Key”选项。</small></label></details>
@@ -2660,6 +2727,7 @@ function Workbench({ onImageMode, onLogout }) {
             setTaskRefreshVersion((value) => value + 1);
             setNotice(`已将 ${count} 条历史任务移动到“${projectName}”；原项目不再保留这些任务`);
           }}
+          projectCreatedAtByName={taskProjectCreatedAtByName}
           projects={taskProjects}
         />
       )}

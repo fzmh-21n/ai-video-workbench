@@ -11,6 +11,7 @@ const VIDEO_CONTENT_UNSUPPORTED = new Set([
 export function directTaskContentPaths(adapter, taskId) {
   const encodedTaskId = encodeURIComponent(String(taskId || ""));
   if (!encodedTaskId) return [];
+  if (adapter === "huajing") return [`/v1/tasks/${encodedTaskId}/video`];
   if (adapter === "fmgo") {
     return [
       `/v1/tasks/${encodedTaskId}/file`,

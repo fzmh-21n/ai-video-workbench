@@ -1,6 +1,7 @@
 export const TASK_PROJECTS_KEY = "video-workbench-task-projects-v1";
 export const ACTIVE_TASK_PROJECT_KEY = "video-workbench-active-task-project-v1";
 export const TASK_PROJECT_RATIOS_KEY = "video-workbench-task-project-ratios-v1";
+export const TASK_PROJECT_CREATED_AT_KEY = "video-workbench-task-project-created-at-v1";
 export const UNCLASSIFIED_PROJECT = "未归类";
 
 function uniqueNames(values) {
@@ -25,6 +26,44 @@ export function loadActiveTaskProject(storage = localStorage) {
 export function saveTaskProjects(projects, activeProject, storage = localStorage) {
   storage.setItem(TASK_PROJECTS_KEY, JSON.stringify(uniqueNames(projects)));
   storage.setItem(ACTIVE_TASK_PROJECT_KEY, String(activeProject || UNCLASSIFIED_PROJECT));
+}
+
+export function loadTaskProjectCreatedAt(storage = localStorage) {
+  try {
+    const parsed = JSON.parse(storage.getItem(TASK_PROJECT_CREATED_AT_KEY) || "{}");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return Object.fromEntries(Object.entries(parsed)
+      .map(([name, value]) => [String(name || "").trim(), Number(value)])
+      .filter(([name, value]) => name && Number.isFinite(value) && value > 0));
+  } catch {
+    return {};
+  }
+}
+
+export function saveTaskProjectCreatedAt(values, storage = localStorage) {
+  storage.setItem(TASK_PROJECT_CREATED_AT_KEY, JSON.stringify(values || {}));
+}
+
+export function withTaskProjectCreatedAt(values, projectName, createdAtMs = Date.now()) {
+  const name = String(projectName || "").trim();
+  const timestamp = Number(createdAtMs);
+  if (!name || name === UNCLASSIFIED_PROJECT || !Number.isFinite(timestamp) || timestamp <= 0) return { ...(values || {}) };
+  return { ...(values || {}), [name]: Number(values?.[name]) || timestamp };
+}
+
+export function taskProjectCreatedAt(projectName, values, tasks = []) {
+  const name = String(projectName || "").trim() || UNCLASSIFIED_PROJECT;
+  if (name === UNCLASSIFIED_PROJECT) return 0;
+  const saved = Number(values?.[name]);
+  if (Number.isFinite(saved) && saved > 0) return saved;
+  const timestamps = (tasks || [])
+    .filter((task) => (task.projectName || UNCLASSIFIED_PROJECT) === name)
+    .map((task) => {
+      const direct = Number(task?.createdAtMs);
+      return Number.isFinite(direct) && direct > 0 ? direct : Date.parse(String(task?.createdAt || ""));
+    })
+    .filter((value) => Number.isFinite(value) && value > 0);
+  return timestamps.length ? Math.min(...timestamps) : 0;
 }
 
 export function loadTaskProjectRatios(storage = localStorage) {

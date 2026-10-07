@@ -4,6 +4,7 @@ export const MAXFORAI_FT_933_MODEL = "FT-Seedance 2.0 720p (933全参）";
 export const MAXFORAI_VIDEO_MODELS = [
   MAXFORAI_FT_933_MODEL,
   "wan3.0th",
+  "YB-sd-2.5满血",
   "cc-2.0-933",
   "mg-sd431-fast", "mg-sd431-mini", "mg-sd431-Pro", "mg-seedance-2.5",
   "zy-特价豆包900", "zy-SD满血933",

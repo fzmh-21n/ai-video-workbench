@@ -1,11 +1,19 @@
 export const AUTOMATIC_UPLOAD_SERVICES = ["Uguu", "Litterbox", "Tmpfiles"];
 
 export function requiresProviderAssetUpload(adapter) {
-  return ["maxforai", "lwaigc", "unmau"].includes(adapter);
+  return ["maxforai", "lwaigc", "unmau", "huajing"].includes(adapter);
+}
+
+export function isMaxforaiUploadedAssetUrl(value, baseUrl) {
+  const source = new URL(value);
+  return source.protocol === "https:" && (
+    (source.origin === baseUrl && /^\/v1\/assets\//.test(source.pathname)) ||
+    (source.hostname === "tempfile.redpandaai.co" && /^\/kieai\/[^/]+\/maxforai-api-assets\/.+/.test(source.pathname))
+  );
 }
 
 export function configuredUploadBatchSize(adapter) {
-  if (adapter === "ziyuai") return 1;
+  if (adapter === "ziyuai" || adapter === "maxforai" || adapter === "huajing") return 1;
   if (adapter === "fmgo") return 8;
   return 50;
 }

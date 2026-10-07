@@ -40,6 +40,7 @@ import {
   AUTOMATIC_UPLOAD_SERVICES,
   configuredUploadRetryDelay,
   createUploadCircuitBreaker,
+  isMaxforaiUploadedAssetUrl,
   mediaUploadMode,
   requiresProviderAssetUpload,
   tmpfilesDirectUrl,
@@ -105,6 +106,8 @@ import {
   suanliaiVideoPayload,
 } from "./src/suanliaiCatalog.js";
 import { prepareUnmauImage } from "./src/unmauImage.js";
+import { BAILING_BASE_URL, bailingModels, bailingVideoPayload } from "./src/bailingCatalog.js";
+import { HUAJING_BASE_URL, huajingCapability, huajingInputIssue, huajingTaskForm, huajingTaskResult, huajingCreateWithRecovery } from "./src/huajingCatalog.js";
 import { normalizedTaskProgress } from "./src/taskProgress.js";
 import { taskFailureDetails } from "./src/upstreamTaskFailure.js";
 import { friendlyUpstreamError } from "./src/upstreamError.js";
@@ -115,6 +118,7 @@ import {
 } from "./serverDiagnostics.mjs";
 import { capabilityLimitIssue, submissionTimeoutForAdapter } from "./src/providerCatalog.js";
 import { cosFingerprintKey, cosPublicUrl, normalizeCosConfig } from "./src/cosStorage.js";
+import { faceScreenRouter } from "./serverFaceScreen.mjs";
 import {
   directTaskContentPaths,
   requiresOriginalTaskKey,
@@ -403,6 +407,8 @@ function inferAdapter(url) {
   if (host === "772808.xyz") return "seedancevideo";
   if (host === "newapis.unmau.com") return "unmau";
   if (host === "suanliai.top" || host === "www.suanliai.top") return "suanliai";
+  if (host === "bailingapi.top" || host === "www.bailingapi.top") return "bailing";
+  if (host === "video.huajings.online") return "huajing";
   return "newapi";
 }
 
@@ -413,7 +419,7 @@ function providerConfig(req, requireModel = true) {
   let model = encodedModel;
   try { model = decodeURIComponent(encodedModel); } catch {}
   const requestedAdapter = String(req.get("x-api-adapter") || "").trim();
-  const adapter = ["fmgo", "paipu", "viralee", "canseedream", "lwaigc", "meaicc", "ziyuai", "globalaiopc", "maxforai", "clmm", "pidoi", "aiyrx", "seedancevideo", "unmau", "suanliai", "qiqi", "newapi"].includes(requestedAdapter)
+  const adapter = ["fmgo", "paipu", "viralee", "canseedream", "lwaigc", "meaicc", "ziyuai", "globalaiopc", "maxforai", "clmm", "pidoi", "aiyrx", "seedancevideo", "unmau", "suanliai", "bailing", "huajing", "qiqi", "newapi"].includes(requestedAdapter)
     ? requestedAdapter
     : inferAdapter(resolvedBaseUrl);
   // canseedream.com 目前会 301 跳转至 see.ximeiedu.org。跨域跳转会按
@@ -428,6 +434,8 @@ function providerConfig(req, requireModel = true) {
   if (adapter === "seedancevideo") resolvedBaseUrl = SEEDANCE_VIDEO_BASE_URL;
   if (adapter === "unmau") resolvedBaseUrl = UNMAU_BASE_URL;
   if (adapter === "suanliai") resolvedBaseUrl = SUANLIAI_BASE_URL;
+  if (adapter === "bailing") resolvedBaseUrl = BAILING_BASE_URL;
+  if (adapter === "huajing") resolvedBaseUrl = HUAJING_BASE_URL;
   if (adapter === "qiqi") resolvedBaseUrl = QIQI_IMAGE_BASE_URL;
   const rawUploadUrl = String(req.get("x-media-upload-url") || "").trim();
   const mediaUploadUrl = adapter === "maxforai"
@@ -684,7 +692,7 @@ function validateMeaiccLimits(config, meta, duration) {
 function validateProviderLimits(config, meta, duration) {
   // 这些中转的能力由带当前 Key 的实时模型接口返回，服务端在创建阶段
   // 拿不到浏览器保存的动态表；保留前端实时校验并交给上游复核。
-  if (["lwaigc", "meaicc", "newapi", "canseedream", "ziyuai", "aiyrx", "unmau"].includes(config.adapter)) return;
+  if (["lwaigc", "meaicc", "newapi", "canseedream", "ziyuai", "aiyrx", "unmau", "bailing", "huajing"].includes(config.adapter)) return;
   const issue = capabilityLimitIssue({ adapter: config.adapter, model: config.model }, meta, duration);
   if (issue) throw httpError(400, issue);
   if (config.adapter === "maxforai" && config.model === MAXFORAI_FT_933_MODEL) {
@@ -948,7 +956,43 @@ async function importAiyrxAsset(config, value, material = {}, req) {
   }, { ...material, kind, name: fileName }, req);
 }
 
+const huajingFolderPromises = new Map();
+
+async function huajingLiveCapability(config, model = config.model) {
+  const body = await readJson(await upstream(`${config.baseUrl}/v1/capabilities?model=${encodeURIComponent(model)}`, { headers: authHeaders(config) }));
+  if (body.ok !== true || !body.capabilities) throw httpError(502, body.message || body.error || "华镜没有返回模型能力");
+  return body.capabilities;
+}
+
+async function uploadHuajingMaterial(config, file, material) {
+  const bytes = fileBytes(file);
+  if (material.kind && material.kind !== "image") return { file: { buffer: bytes, size: bytes.length, originalname: file.originalname, mimetype: file.mimetype }, bytes: bytes.length };
+  const cacheKey = `${config.baseUrl}\n${apiKeyFingerprint(config.apiKey)}`;
+  if (!huajingFolderPromises.has(cacheKey)) {
+    const promise = (async () => {
+      const library = await readJson(await upstream(`${config.baseUrl}/v1/library?limit=1`, { headers: authHeaders(config) }));
+      if (library.ok === false) throw httpError(502, library.error || "华镜素材库查询失败");
+      const existing = library.folders?.find((folder) => folder.name === "AI视频工作台");
+      if (existing?.id) return existing.id;
+      const body = await readJson(await upstream(`${config.baseUrl}/v1/library/folders`, {
+        method: "POST", headers: authHeaders(config, { "Content-Type": "application/json" }), body: JSON.stringify({ name: "AI视频工作台" }),
+      }));
+      if (!body.ok || !body.id) throw httpError(502, body.error || "华镜素材文件夹创建失败");
+      return body.id;
+    })();
+    huajingFolderPromises.set(cacheKey, promise);
+    promise.catch(() => huajingFolderPromises.delete(cacheKey));
+  }
+  const form = new FormData();
+  form.append("folderId", await huajingFolderPromises.get(cacheKey));
+  form.append("image", new Blob([bytes], { type: file.mimetype }), file.originalname);
+  const body = await readJson(await upstream(`${config.baseUrl}/v1/library/assets`, { method: "POST", headers: authHeaders(config), body: form }, 120_000));
+  if (!body.ok || !body.asset?.id) throw httpError(502, body.error || "华镜图片上传没有返回素材 ID");
+  return { assetId: body.asset.id, bytes: bytes.length, url: "" };
+}
+
 async function uploadMedia(config, file, material = {}, req) {
+  if (config.adapter === "huajing") return uploadHuajingMaterial(config, file, material);
   if (config.adapter === "aiyrx") return uploadAiyrxAsset(config, file, material, req);
   const storage = cosConfig();
   if (storage && !requiresProviderAssetUpload(config.adapter)) return uploadCosMedia(storage, file, material, req);
@@ -1050,12 +1094,29 @@ async function uploadMedia(config, file, material = {}, req) {
     form.set("file", new Blob([uploadBytes], { type: uploadMimeType }), uploadName);
     if (config.adapter === "seedancevideo") form.set("originalName", displayName);
     const headers = { Authorization: `Bearer ${config.mediaUploadKey}` };
-    uploadAttemptCount = 1;
-    const response = await upstream(
-      config.mediaUploadUrl,
-      { method: "POST", headers, body: form },
-      180_000,
-    );
+    const maxAttempts = config.adapter === "maxforai" ? 4 : 1;
+    let response;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      uploadAttemptCount = attempt;
+      response = await upstream(
+        config.mediaUploadUrl,
+        { method: "POST", headers, body: form },
+        180_000,
+      );
+      if (response.status !== 429 || attempt === maxAttempts) break;
+      const delayMs = configuredUploadRetryDelay(response.headers.get("retry-after"), attempt - 1);
+      writeDiagnostic(req, "configured_upload_retry_wait", {
+        service: config.adapter,
+        fileName: displayName,
+        status: response.status,
+        attempt,
+        nextAttempt: attempt + 1,
+        delayMs,
+        retryAfter: response.headers.get("retry-after") || "",
+      });
+      await response.body?.cancel().catch(() => {});
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
     const body = await readJson(response);
     const value = body?.url || body?.data?.url || body?.data?.[0]?.url;
     if (!value) throw httpError(502, `素材上传成功但没有返回 URL：${displayName}`);
@@ -1073,6 +1134,7 @@ async function uploadMedia(config, file, material = {}, req) {
       fileName: displayName,
       durationMs: Date.now() - uploadStartedAt,
       status: response.status,
+      attemptCount: uploadAttemptCount,
       sameCredential: config.mediaUploadKey === config.apiKey,
       assetUrlShape: {
         host: uploadedUrl.host,
@@ -1124,7 +1186,7 @@ async function importUnmauImage(config, value, material = {}, req) {
 
 async function importMaxforaiMedia(config, value, material = {}, req) {
   const source = publicUrl(value, "素材 URL");
-  if (source.origin === config.baseUrl && /^\/v1\/assets\//.test(source.pathname)) return source.toString();
+  if (isMaxforaiUploadedAssetUrl(source, config.baseUrl)) return source.toString();
   const kind = ["image", "audio", "video"].includes(material.kind) ? material.kind : "image";
   const maximumBytes = { image: 64, audio: 128, video: 512 }[kind] * 1024 * 1024;
   const response = await upstream(source, { headers: { Accept: "*/*" } }, 180_000);
@@ -1194,18 +1256,35 @@ function imageDataUrl(file) {
 async function prepareMaterials(config, files, meta, req) {
   const materials = new Array(meta.length);
   let cursor = 0;
-  const concurrency = config.adapter === "ziyuai" ? 1 : 4;
+  const concurrency = ["ziyuai", "maxforai", "huajing"].includes(config.adapter) ? 1 : 4;
   const workers = Array.from({ length: Math.min(concurrency, meta.length) }, async () => {
     while (cursor < meta.length) {
       const index = cursor;
       cursor += 1;
       const item = meta[index];
       const kind = ["image", "audio", "video"].includes(item.kind) ? item.kind : "image";
-      if (config.adapter === "aiyrx" && item.assetId) {
+      if ((config.adapter === "aiyrx" || (config.adapter === "huajing" && kind === "image")) && item.assetId) {
         materials[index] = { ...item, kind, assetId: String(item.assetId) };
         continue;
       }
       if (item.url) {
+        if (config.adapter === "huajing") {
+          const response = await upstream(publicUrl(item.url, "参考素材 URL").toString());
+          if (!response.ok) throw httpError(400, `华镜无法读取参考素材：${item.name}`);
+          const chunks = [];
+          let byteCount = 0;
+          for await (const chunk of Readable.fromWeb(response.body)) {
+            byteCount += chunk.length;
+            if (byteCount > 220 * 1024 * 1024) throw httpError(413, "参考素材超过工作台上传大小上限");
+            chunks.push(chunk);
+          }
+          const prepared = await uploadHuajingMaterial(config, {
+            buffer: Buffer.concat(chunks), originalname: item.name || `${kind}.bin`,
+            mimetype: response.headers.get("content-type")?.split(";")[0] || "application/octet-stream",
+          }, { ...item, kind });
+          materials[index] = { ...item, kind, ...prepared, url: "" };
+          continue;
+        }
         if (config.adapter === "aiyrx") {
           const prepared = await importAiyrxAsset(config, item.url, { ...item, kind }, req);
           materials[index] = { ...item, kind, ...prepared, url: "" };
@@ -1680,7 +1759,28 @@ async function createLwaigc(config, input) {
   };
 }
 
+async function createHuajingVideo(config, input) {
+  const cap = await huajingLiveCapability(config);
+  const issue = huajingInputIssue(cap, input);
+  if (issue) throw httpError(400, issue);
+  let form;
+  try { form = huajingTaskForm(config.model, input, cap, fileBytes); }
+  catch (error) { throw httpError(400, error.message); }
+  const idempotencyKey = `huajing_${crypto.randomUUID()}`;
+  const journalPath = path.join(dataDir, "huajing-task-journal.jsonl");
+  const record = { idempotencyKey, model: config.model, apiKeyFingerprint: apiKeyFingerprint(config.apiKey), createdAt: new Date().toISOString() };
+  // Persist the recovery key before the paid request; never retry creation with a new key.
+  appendFileSync(journalPath, `${JSON.stringify(record)}\n`, "utf8");
+  const task = await huajingCreateWithRecovery(async (route, options) => readJson(await upstream(`${config.baseUrl}${route}`, {
+    ...options, headers: authHeaders(config, options.headers),
+  }, options.method === "POST" ? 300_000 : 20_000)), idempotencyKey, form, config.baseUrl);
+  appendFileSync(journalPath, `${JSON.stringify({ ...record, taskId: task.id })}\n`, "utf8");
+  return { adapter: "huajing", baseUrl: config.baseUrl, taskId: task.id, model: config.model,
+    statusPath: `/v1/tasks/${encodeURIComponent(task.id)}`, contentPath: `/v1/tasks/${encodeURIComponent(task.id)}/video` };
+}
+
 async function createVideo(config, input) {
+  if (config.adapter === "huajing") return createHuajingVideo(config, input);
   if (config.adapter === "fmgo") return createFmgo(config, input);
   if (config.adapter === "lwaigc") return createLwaigc(config, input);
   if (config.adapter === "seedancevideo") return createSeedanceVideo(config, input);
@@ -1818,6 +1918,8 @@ async function createVideo(config, input) {
           ? pidoiVideoPayload(config.model, input)
         : config.adapter === "unmau"
           ? unmauVideoPayload(config.model, input)
+        : config.adapter === "bailing"
+          ? bailingVideoPayload(config.model, input)
         : genericPayload(config, input);
   const response = await upstream(`${config.baseUrl}/v1/videos`, {
     method: "POST",
@@ -1993,13 +2095,14 @@ function verifyJobConfig(config, job) {
 
 async function pollJob(config, job) {
   const response = await upstream(`${config.baseUrl}${job.statusPath}`, {
-    headers: authHeaders(config, config.adapter === "fmgo"
+    headers: authHeaders(config, ["fmgo", "huajing"].includes(config.adapter)
       ? { "Cache-Control": "no-cache, no-store", Pragma: "no-cache" }
       : {}),
-    ...(config.adapter === "fmgo" ? { cache: "no-store" } : {}),
+    ...(["fmgo", "huajing"].includes(config.adapter) ? { cache: "no-store" } : {}),
   });
   const responseBody = await readJson(response);
-  const body = config.adapter === "ziyuai" ? ziyuJobFrom(responseBody) : responseBody;
+  const body = config.adapter === "huajing" ? huajingTaskResult(responseBody, config.baseUrl)
+    : config.adapter === "ziyuai" ? ziyuJobFrom(responseBody) : responseBody;
   const status = normalizeStatus(
     body?.status || body?.state || body?.task_status || body?.data?.status || body?.data?.state,
   );
@@ -2010,7 +2113,7 @@ async function pollJob(config, job) {
       status,
       body?.progress ?? body?.percentage ?? body?.data?.progress ?? body?.data?.percentage ?? 0,
     ),
-    videoUrl: videoUrlFrom(body, config.baseUrl),
+    videoUrl: config.adapter === "huajing" ? body.videoUrl : videoUrlFrom(body, config.baseUrl),
   };
   if (result.status === "completed" && result.videoUrl) {
     const cacheKey = `${config.baseUrl}\n${job.taskId}`;
@@ -2126,6 +2229,8 @@ app.use("/api", (req, res, next) => {
   next();
 });
 
+app.use("/api/face-screen", faceScreenRouter(rootDir));
+
 app.get("/api/diagnostics", (req, res) => {
   const sessionId = String(req.query.sessionId || "").trim();
   const adapter = String(req.query.adapter || "").trim();
@@ -2165,6 +2270,26 @@ app.get("/api/storage/status", (_req, res) => {
 app.get("/api/config/models", async (req, res, next) => {
   try {
     const config = providerConfig(req, false);
+    if (config.adapter === "huajing") {
+      const body = await readJson(await upstream(`${config.baseUrl}/v1/models`, { headers: authHeaders(config) }));
+      const capabilities = {};
+      const labels = {};
+      for (const row of body.data || []) {
+        if (!row.id || row.enabled === false) continue;
+        const cap = row.generation || await huajingLiveCapability(config, row.id);
+        if (cap.enabled === false) continue;
+        capabilities[row.id] = huajingCapability(cap);
+        labels[row.id] = `${row.id}${row.creditCost != null || cap.creditCost != null ? ` · ${row.creditCost ?? cap.creditCost}积分` : ""}`;
+      }
+      if (!Object.keys(capabilities).length) throw httpError(502, "华镜当前 Key 没有可用视频模型");
+      return res.json({ models: Object.keys(capabilities), capabilities, labels });
+    }
+    if (config.adapter === "bailing") {
+      const response = await upstream(`${BAILING_BASE_URL}/v1/models`, { headers: authHeaders(config) });
+      const models = bailingModels(await readJson(response));
+      if (!models.length) throw httpError(502, "白灵当前 Key 没有返回模型；请检查 Key 和分组权限");
+      return res.json({ models });
+    }
     if (config.adapter === "canseedream") {
       const keyCheck = await upstream(
         `${config.baseUrl}/api/v3/contents/generations/tasks/cstask_connection_test`,
@@ -2329,9 +2454,10 @@ app.post("/api/materials", upload.array("references", 50), async (req, res, next
         name: item.name,
         url: item.url,
         assetId: item.assetId,
+        bytes: item.bytes || item.sizeBytes || null,
         durationSeconds: item.durationSeconds || null,
       })),
-      expiresAt: materialCacheExpiresAt(materials),
+      expiresAt: config.adapter === "huajing" ? Number.MAX_SAFE_INTEGER : materialCacheExpiresAt(materials),
     });
     writeDiagnostic(req, "materials_response_sent", { materialCount: materials.length });
   } catch (error) {
@@ -2384,7 +2510,12 @@ app.post("/api/image-tasks", upload.array("references", 16), async (req, res, ne
       imageUrl: completed ? `/api/image-tasks/${encodeURIComponent(id)}/content` : undefined,
       createdAt,
       completedAt: completed ? createdAt : undefined,
-      title: files[0]?.originalname || prompt.slice(0, 24) || config.model,
+      title: String(req.body.title || "").trim().slice(0, 200) || files[0]?.originalname || prompt.slice(0, 24) || config.model,
+      batchId: String(req.body.batchId || "").trim().slice(0, 100) || null,
+      batchIndex: req.body.batchId ? safeNumber(req.body.batchIndex, 1, 1, 100_000) : null,
+      sourceName: String(req.body.sourceName || "").trim().slice(0, 255) || null,
+      sourcePromptId: String(req.body.sourcePromptId || "").trim().slice(0, 100) || null,
+      sourceReferenceId: String(req.body.sourceReferenceId || "").trim().slice(0, 100) || null,
       prompt,
       model: config.model,
       providerId: config.adapter,
@@ -2586,10 +2717,10 @@ app.post("/api/tasks", upload.array("references", 50), async (req, res, next) =>
       });
     }
     let jobs;
-    if (config.adapter === "fmgo" && /^ss-v2(?:-fast)?$/i.test(config.model)) {
+    if (config.adapter === "huajing" || (config.adapter === "fmgo" && /^ss-v2(?:-fast)?$/i.test(config.model))) {
       jobs = [];
       for (let index = 0; index < quantity; index += 1) {
-        if (index) await new Promise((resolve) => setTimeout(resolve, 5000));
+        if (index && config.adapter !== "huajing") await new Promise((resolve) => setTimeout(resolve, 5000));
         jobs.push(await createVideo(config, input));
       }
     } else {
@@ -2715,7 +2846,7 @@ app.get("/api/tasks/:id/content", async (req, res, next) => {
     for (const contentPath of directContentPaths) {
       const fixedResponse = await upstream(
         `${config.baseUrl}${contentPath}`,
-        { headers: authHeaders(config, range ? { Range: range } : {}) },
+        { headers: config.adapter === "bailing" ? (range ? { Range: range } : {}) : authHeaders(config, range ? { Range: range } : {}) },
         1_800_000,
       );
       if (fixedResponse.ok) return streamResponse(fixedResponse, res);
@@ -2817,6 +2948,9 @@ function isAmbiguousMeaiccSubmission(error, req) {
 }
 
 app.use((error, req, res, _next) => {
+  if (error.submissionUnknown) return res.status(502).json({
+    code: "SUBMISSION_UNKNOWN", submissionUnknown: true, message: error.message,
+  });
   if (isAmbiguousMeaiccSubmission(error, req)) {
     return res.status(502).json({
       code: "SUBMISSION_UNKNOWN",

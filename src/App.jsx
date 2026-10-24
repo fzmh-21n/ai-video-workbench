@@ -20,27 +20,34 @@ import {
 } from "./projectReferences.js";
 import {
   allTasks,
+  archiveUselessBatches,
   getFailedTasks,
   getPendingTasks,
+  getSubmissionRecords,
   isWorkbenchAuthFailure,
   listTasks,
   markTasksDownloaded,
   projectNames as getTaskProjectNames,
+  renameTaskProjectRecords,
   putPolledTaskUpdates,
   putTask,
   putTasks,
+  putTaskBackup,
   removeTask as removeStoredTask,
   removeTasks as removeStoredTasks,
 } from "./taskStore.js";
+import { uselessTaskBatches } from "./uselessBatches.js";
 import {
   clearCredentials,
   readCredentials,
   saveCredentials,
 } from "./credentialStore.js";
 import { normalizeApiKey } from "./apiKey.js";
+import { normalizeModelNames, modelKeyFingerprint, readModelCatalogs, saveModelCatalog, modelCatalogMatches, removeModelCatalog, restoreModelCatalogs } from "./providerModelStore.js";
 import { normalizedTaskGroupProgress, normalizedTaskProgress } from "./taskProgress.js";
 import { downloadedChapterTaskIds, downloadTaskBuckets, orderedDownloadFilename } from "./taskDownload.js";
 import { taskContentRequestUrl } from "./taskContent.js";
+import { downloadBlob } from "./downloadBlob.js";
 import { batchTimeline, taskTimeline } from "./taskTimeline.js";
 import {
   VIDEO_DELETED_TASK_IDS_KEY,
@@ -72,9 +79,11 @@ import { regeneratedTaskRecord, reviewedTask } from "./taskRegeneration.js";
 import { isTaskCancellable, manuallyCancelledTask } from "./taskCancellation.js";
 import {
   filesFromProjectDirectory,
-  loadProjectDirectory,
+  loadTaskProjectDirectory,
   projectDirectoryPermission,
-  saveProjectDirectory,
+  removeTaskProjectDirectory,
+  renameTaskProjectDirectory,
+  saveTaskProjectDirectory,
 } from "./projectFolderStore.js";
 import BatchPanel from "./BatchPanel.jsx";
 import CostDashboard from "./CostDashboard.jsx";
@@ -83,6 +92,7 @@ import FixedContentManager from "./FixedContentManager.jsx";
 import TaskProjectManager from "./TaskProjectManager.jsx";
 import ImageWorkbench from "./ImageWorkbench.jsx";
 import FaceScreen from "./FaceScreen.jsx";
+import TextWorkbench from "./TextWorkbench.jsx";
 import {
   UNCLASSIFIED_PROJECT,
   addTaskProject,
@@ -100,6 +110,7 @@ import {
   withTaskProjectCreatedAt,
   withTaskProjectRatio,
 } from "./taskProjects.js";
+import { persistTaskProjectRename, taskProjectRenamePlan } from "./taskProjectRename.js";
 import {
   clearDiagnostics,
   diagnosticHeaders,
@@ -203,17 +214,7 @@ function visibleReferenceTag(item) {
 }
 
 function normalizeModels(payload, adapter) {
-  const raw = Array.isArray(payload?.models) ? payload.models : [];
-  const values = raw
-    .map((model) => (typeof model === "string" ? model : model?.id || model?.name))
-    .filter(Boolean);
-  if (adapter === "lwaigc" && Array.isArray(payload?.models)) {
-    return [...new Set([...FALLBACK_MODELS.lwaigc.slice(0, 2), ...values])];
-  }
-  if (adapter === "fmgo" || adapter === "pidoi") {
-    return [...new Set([...values, ...FALLBACK_MODELS[adapter]])];
-  }
-  return values.length ? values : FALLBACK_MODELS[adapter] || [];
+  return normalizeModelNames(payload, FALLBACK_MODELS[adapter] || []);
 }
 
 function statusLabel(status, task) {
@@ -232,22 +233,47 @@ export default function App() {
   const [loginPassword, setLoginPassword] = useState("");
   const [loginError, setLoginError] = useState("");
   const [loggingIn, setLoggingIn] = useState(false);
-  const [serviceUnavailable, setServiceUnavailable] = useState(false);
+  const [serviceConnection, setServiceConnection] = useState("healthy");
   const [generationMode, setGenerationMode] = useState(() => localStorage.getItem("ai-workbench-generation-mode-v1") || "video");
 
   useEffect(() => {
     let cancelled = false;
+    let timer;
+    let consecutiveFailures = 0;
     async function checkService() {
+      const startedAt = performance.now();
       try {
         const response = await fetch("/api/health", { cache: "no-store", signal: AbortSignal.timeout(5000) });
-        if (!cancelled) setServiceUnavailable(!response.ok);
-      } catch {
-        if (!cancelled) setServiceUnavailable(true);
+        if (!response.ok) throw Object.assign(new Error(`HTTP ${response.status}`), { status: response.status });
+        if (cancelled) return;
+        setServiceConnection("healthy");
+        if (consecutiveFailures) recordDiagnostic({
+          scope: "workbench",
+          stage: "client_service_health_recovered",
+          previousFailures: consecutiveFailures,
+          status: response.status,
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+        consecutiveFailures = 0;
+      } catch (error) {
+        if (cancelled) return;
+        consecutiveFailures += 1;
+        setServiceConnection(consecutiveFailures >= 3 ? "disconnected" : "slow");
+        recordDiagnostic({
+          scope: "workbench",
+          stage: "client_service_health_failed",
+          consecutiveFailures,
+          status: error.status || 0,
+          error: error.name || "Error",
+          reason: error.status ? `HTTP ${error.status}` : error.name === "TimeoutError"
+            ? "连接检查超过 5 秒" : "浏览器未能完成连接检查",
+          durationMs: Math.round(performance.now() - startedAt),
+        });
       }
+      if (!cancelled) timer = window.setTimeout(checkService, 10000);
     }
     checkService();
-    const interval = window.setInterval(checkService, 10000);
-    return () => { cancelled = true; window.clearInterval(interval); };
+    return () => { cancelled = true; window.clearTimeout(timer); };
   }, []);
 
   useEffect(() => {
@@ -296,10 +322,18 @@ export default function App() {
     setLoginPassword("");
   }
 
+  const serviceNotice = serviceConnection !== "healthy" && (
+    <div className={`service-disconnected${serviceConnection === "slow" ? " service-connection-slow" : ""}`} role={serviceConnection === "slow" ? "status" : "alert"}>
+      {serviceConnection === "slow"
+        ? "工作台连接较慢，正在自动重试检查；不代表任务生成失败，请勿重复提交。"
+        : "连续多次无法连接工作台，任务状态可能暂时无法更新。请检查一键启动窗口；正在自动重试，请勿重复提交。"}
+    </div>
+  );
+
   if (authStatus !== "authenticated") {
     return (
       <>
-      {serviceUnavailable && <div className="service-disconnected" role="alert">工作台服务已断开。请检查一键启动窗口；恢复后本页会自动解除提示。</div>}
+      {serviceNotice}
       <main className="login-shell">
         <form className="login-card" onSubmit={submitLogin}>
           <div className="login-brand">影</div>
@@ -323,21 +357,24 @@ export default function App() {
   };
   return (
     <>
-      {serviceUnavailable && <div className="service-disconnected" role="alert">工作台服务已断开，任务状态暂时无法更新。请检查一键启动窗口；恢复后本页会自动解除提示。</div>}
+      {serviceNotice}
       <div hidden={generationMode !== "image"}>
-        <ImageWorkbench onVideoMode={() => switchGenerationMode("video")} onFaceMode={() => switchGenerationMode("faces")} onLogout={logout} />
+        <ImageWorkbench onVideoMode={() => switchGenerationMode("video")} onFaceMode={() => switchGenerationMode("faces")} onTextMode={() => switchGenerationMode("text")} onLogout={logout} />
       </div>
       <div hidden={generationMode !== "video"}>
-        <Workbench onImageMode={() => switchGenerationMode("image")} onFaceMode={() => switchGenerationMode("faces")} onLogout={logout} />
+        <Workbench onImageMode={() => switchGenerationMode("image")} onFaceMode={() => switchGenerationMode("faces")} onTextMode={() => switchGenerationMode("text")} onLogout={logout} onAuthExpired={() => setAuthStatus("anonymous")} />
       </div>
       <div hidden={generationMode !== "faces"}>
-        <FaceScreen onVideoMode={() => switchGenerationMode("video")} onImageMode={() => switchGenerationMode("image")} onLogout={logout} />
+        <FaceScreen onVideoMode={() => switchGenerationMode("video")} onImageMode={() => switchGenerationMode("image")} onTextMode={() => switchGenerationMode("text")} onLogout={logout} />
+      </div>
+      <div hidden={generationMode !== "text"}>
+        <TextWorkbench onVideoMode={() => switchGenerationMode("video")} onImageMode={() => switchGenerationMode("image")} onLogout={logout} />
       </div>
     </>
   );
 }
 
-function Workbench({ onImageMode, onFaceMode, onLogout }) {
+function Workbench({ onImageMode, onFaceMode, onTextMode, onLogout, onAuthExpired }) {
   const [workMode, setWorkMode] = useState(() => localStorage.getItem("video-workbench-mode-v1") || "single");
   const [profiles, setProfiles] = useState(() => {
     const saved = loadJson(PROFILE_KEY, null);
@@ -375,6 +412,12 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
   const [projectAssets, setProjectAssets] = useState([]);
   const [projectDirectoryHandle, setProjectDirectoryHandle] = useState(null);
   const [projectNeedsPermission, setProjectNeedsPermission] = useState(false);
+  const [projectFolderLoading, setProjectFolderLoading] = useState(false);
+  const projectFolderLoadRef = useRef(0);
+  const projectFolderInitialProjectRef = useRef(activeTaskProject);
+  const projectFolderTargetRef = useRef(activeTaskProject);
+  const activeTaskProjectRef = useRef(activeTaskProject);
+  activeTaskProjectRef.current = activeTaskProject;
   const [references, setReferences] = useState([]);
   const [duration, setDuration] = useState(15);
   const [resolution, setResolution] = useState("720p");
@@ -387,6 +430,10 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
   const [autoReference, setAutoReference] = useState(true);
   const [notice, setNotice] = useState("请选择中转站并完成 API 配置");
   const [submitting, setSubmitting] = useState(false);
+  const [batchBusy, setBatchBusy] = useState(false);
+  const [cleaningUseless, setCleaningUseless] = useState(false);
+  const [renamingProject, setRenamingProject] = useState(false);
+  const projectRenameRunningRef = useRef(false);
   const [configOpen, setConfigOpen] = useState(false);
   const [uncommonProfileIds, setUncommonProfileIds] = useState(loadUncommonProviderIds);
   const [otherProfilesOpen, setOtherProfilesOpen] = useState(false);
@@ -398,6 +445,10 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
   const [draftUploadKey, setDraftUploadKey] = useState("");
   const [rememberKey, setRememberKey] = useState(false);
   const [modelOptions, setModelOptions] = useState({});
+  const [modelCatalogs, setModelCatalogs] = useState({});
+  const modelCatalogRevisionRef = useRef(0);
+  const modelRequestScopeRef = useRef("");
+  modelRequestScopeRef.current = JSON.stringify([draft.id, draft.baseUrl, draft.adapter, normalizeApiKey(draftKey)]);
   const [configStatus, setConfigStatus] = useState("填写配置后测试连接");
   const [testing, setTesting] = useState(false);
   const [diagnosticBusy, setDiagnosticBusy] = useState("");
@@ -418,6 +469,7 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
   const promptInput = useRef(null);
   const profilesRef = useRef(profiles);
   const pollingRef = useRef(false);
+  const taskListLoadRef = useRef({ running: false, refresh: null });
   const deletedTaskIdsRef = useRef(new Set(loadDeletedIds(VIDEO_DELETED_TASK_IDS_KEY)));
 
   const activeProfile =
@@ -515,6 +567,19 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
     localStorage.setItem(PROFILE_KEY, JSON.stringify(profiles));
     profilesRef.current = profiles;
   }, [profiles]);
+  useEffect(() => {
+    let cancelled = false;
+    const revision = modelCatalogRevisionRef.current;
+    restoreModelCatalogs(profiles, keyFor).then((catalogs) => {
+      if (cancelled || revision !== modelCatalogRevisionRef.current) return;
+      setModelCatalogs(catalogs);
+      setModelOptions(Object.fromEntries(Object.entries(catalogs).map(([id, catalog]) => [id, catalog.models])));
+      setProfiles((values) => values.map((profile) => catalogs[profile.id] ? {
+        ...profile, routeCapabilities: catalogs[profile.id].capabilities, routeLabels: catalogs[profile.id].labels,
+      } : profile));
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
   useEffect(() => localStorage.setItem(ACTIVE_KEY, activeId), [activeId]);
   useEffect(() => saveUncommonProviderIds(uncommonProfileIds), [uncommonProfileIds]);
   useEffect(() => {
@@ -541,16 +606,25 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
   }, [taskProjectCreatedAtByName]);
   useEffect(() => {
     let cancelled = false;
+    const version = ++projectFolderLoadRef.current;
+    const isCurrent = () => !cancelled && version === projectFolderLoadRef.current;
+    setProjectName("");
+    setProjectAssets([]);
+    setProjectDirectoryHandle(null);
+    setProjectNeedsPermission(false);
+    setProjectFolderLoading(true);
     (async () => {
       try {
-        const handle = await loadProjectDirectory();
-        if (!cancelled && handle) await openRememberedProject(handle, false);
+        const handle = await loadTaskProjectDirectory(activeTaskProject, { migrateLegacy: activeTaskProject === projectFolderInitialProjectRef.current });
+        if (isCurrent() && handle) await openRememberedProject(handle, false, isCurrent);
       } catch (error) {
-        if (!cancelled) setNotice(`恢复已保存项目失败：${error.message}`);
+        if (isCurrent()) setNotice(`恢复项目素材文件夹失败：${error.message}`);
+      } finally {
+        if (isCurrent()) setProjectFolderLoading(false);
       }
     })();
     return () => { cancelled = true; };
-  }, []);
+  }, [activeTaskProject]);
   useEffect(() => () => {
     if (videoBlob?.url) URL.revokeObjectURL(videoBlob.url);
   }, [videoBlob]);
@@ -575,7 +649,7 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
   useEffect(() => {
     if (!taskDatabaseReady) return undefined;
     let cancelled = false;
-    (async () => {
+    const refresh = async () => {
       try {
         const result = await listTasks({
           page: 1,
@@ -592,8 +666,27 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
       } catch (error) {
         if (!cancelled) setNotice(error.message || "读取任务列表失败");
       }
-    })();
-    return () => { cancelled = true; };
+    };
+    const loader = taskListLoadRef.current;
+    loader.refresh = refresh;
+    if (!loader.running) {
+      loader.running = true;
+      (async () => {
+        try {
+          while (loader.refresh) {
+            const next = loader.refresh;
+            loader.refresh = null;
+            await next();
+          }
+        } finally {
+          loader.running = false;
+        }
+      })();
+    }
+    return () => {
+      cancelled = true;
+      if (loader.refresh === refresh) loader.refresh = null;
+    };
   }, [taskDatabaseReady, taskRefreshVersion, taskStatusFilter, taskProjectFilter, taskQuery]);
   useEffect(() => {
     setPage(1);
@@ -707,25 +800,25 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
     if (!taskDatabaseReady) return undefined;
     const interval = window.setInterval(async () => {
       if (pollingRef.current) return;
-      const activePending = await getPendingTasks(10).catch(() => []);
-      const failedCandidates = activePending.length < 10
-        ? await getFailedTasks(50).catch(() => [])
-        : [];
-      const recoverableMeaicc = failedCandidates.filter((task) => {
-        const profile = profilesRef.current.find((item) => item.id === task.profileId);
-        const genericFailure = /^(视频生成失败|video generation failed)$/i.test(String(task.error || "").trim());
-        return profile?.adapter === "meaicc"
-          && genericFailure
-          && Number(task.meaiccFailureChecks || 0) < 30;
-      });
-      const recoverableAuthFailures = failedCandidates.filter((task) => isWorkbenchAuthFailure(task.error));
-      const pending = [...activePending, ...recoverableMeaicc, ...recoverableAuthFailures]
-        .filter((task, index, tasks) => tasks.findIndex((item) => item.id === task.id) === index)
-        .slice(0, 10);
-      if (!pending.length) return;
       pollingRef.current = true;
       try {
-        await Promise.all(
+        const activePending = await getPendingTasks(10).catch(() => []);
+        const failedCandidates = activePending.length < 10
+          ? await getFailedTasks(50).catch(() => [])
+          : [];
+        const recoverableMeaicc = failedCandidates.filter((task) => {
+          const profile = profilesRef.current.find((item) => item.id === task.profileId);
+          const genericFailure = /^(视频生成失败|video generation failed)$/i.test(String(task.error || "").trim());
+          return profile?.adapter === "meaicc"
+            && genericFailure
+            && Number(task.meaiccFailureChecks || 0) < 30;
+        });
+        const recoverableAuthFailures = failedCandidates.filter((task) => isWorkbenchAuthFailure(task.error));
+        const pending = [...activePending, ...recoverableMeaicc, ...recoverableAuthFailures]
+          .filter((task, index, tasks) => tasks.findIndex((item) => item.id === task.id) === index)
+          .slice(0, 10);
+        if (!pending.length) return;
+        const updates = await Promise.all(
           pending.map(async (task) => {
             const profile = profilesRef.current.find((item) => item.id === task.profileId);
             if (!profile || !keyFor(profile)) return null;
@@ -733,6 +826,7 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
             const nextPollAt = Date.now() + pollDelayForAdapter(profile.adapter);
             const update = await (async () => { try {
               const response = await fetch(`/api/tasks/${encodeURIComponent(task.id)}`, {
+                signal: AbortSignal.timeout(60_000),
                 headers: {
                   ...headersFor(profile),
                   ...diagnosticHeaders({
@@ -763,18 +857,18 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
                   }
                   return { ...body, meaiccFailureChecks: checks, networkWarning: "", nextPollAt };
                 }
-                return { ...body, error: body.error || "", meaiccFailureChecks: 0, networkWarning: "", nextPollAt };
+                return { ...body, error: body.error || "", meaiccFailureChecks: 0, networkWarning: "", nextPollAt: ["seedancevideo", "baoju"].includes(profile.adapter) ? Date.now() + Math.max(pollDelayForAdapter(profile.adapter), Number(body.retryAfterMs) || 0) : nextPollAt };
               }
               if (TRANSIENT_NETWORK_STATUSES.has(response.status)) {
                 return {
                   id: task.id,
                   transient: true,
-                  nextPollAt,
+                  nextPollAt: ["seedancevideo", "baoju"].includes(profile.adapter) ? Date.now() + Math.max(pollDelayForAdapter(profile.adapter), Number(body.retryAfterMs) || 0) : nextPollAt,
                   networkWarning: `网络暂时不稳定（HTTP ${response.status}），任务仍在保留并会自动重试`,
                 };
               }
               if (response.status === 401 || isWorkbenchAuthFailure(body.message)) {
-                setAuthStatus("anonymous");
+                onAuthExpired();
                 return {
                   id: task.id,
                   transient: true,
@@ -802,11 +896,16 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
             const changed = update.transient
               ? { ...task, nextPollAt: update.nextPollAt, networkWarning: update.networkWarning }
               : { ...task, ...update, id: task.id, networkWarning: "", title: task.title, profileId: task.profileId };
-            await putPolledTaskUpdates([changed]);
-            setTaskRefreshVersion((value) => value + 1);
             return changed;
           }),
         );
+        const changed = updates.filter(Boolean);
+        if (changed.length) {
+          await putPolledTaskUpdates(changed);
+          setTaskRefreshVersion((value) => value + 1);
+        }
+      } catch (error) {
+        setNotice(`任务状态保存失败，原任务已保留，稍后继续查询：${error.message || "浏览器数据库暂时不可用"}`);
       } finally {
         pollingRef.current = false;
       }
@@ -857,8 +956,9 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
     setConfigStatus("请填写新中转站配置");
   }
 
-  function saveProfile(close = false) {
+  async function saveProfile(close = false) {
     try {
+      const requestScope = modelRequestScopeRef.current;
       const parsed = new URL(draft.baseUrl);
       if (parsed.protocol !== "https:") throw new Error("Base URL 必须使用 HTTPS");
       if (!draft.name.trim() || !draft.model.trim()) throw new Error("名称和模型不能为空");
@@ -869,6 +969,17 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
         adapter: draft.adapter === "auto" ? inferAdapter(parsed.origin) : draft.adapter,
         model: draft.model.trim(),
       };
+      const fingerprint = await modelKeyFingerprint(draftKey);
+      if (modelRequestScopeRef.current !== requestScope) return;
+      modelCatalogRevisionRef.current += 1;
+      setTesting(false);
+      if (!modelCatalogMatches(modelCatalogs[saved.id], saved, fingerprint)) {
+        delete saved.routeCapabilities;
+        delete saved.routeLabels;
+        removeModelCatalog(saved.id);
+        setModelOptions((current) => { const next = { ...current }; delete next[saved.id]; return next; });
+        setModelCatalogs((current) => { const next = { ...current }; delete next[saved.id]; return next; });
+      }
       setProfiles((current) => {
         const exists = current.some((item) => item.id === saved.id);
         return exists
@@ -895,6 +1006,8 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
       setConfigStatus("至少保留一个中转站配置");
       return;
     }
+    modelCatalogRevisionRef.current += 1;
+    setTesting(false);
     const remaining = profiles.filter((item) => item.id !== draft.id);
     const draftBaseUrl = String(draft.baseUrl || "").replace(/\/$/, "");
     const deletedBuiltIns = DEFAULT_PROFILES.filter((profile) => (
@@ -906,6 +1019,9 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
       localStorage.setItem(DISMISSED_BUILTIN_PROFILES_KEY, JSON.stringify([...dismissed]));
     }
     clearCredentials(draft.id);
+    removeModelCatalog(draft.id);
+    setModelOptions((current) => { const next = { ...current }; delete next[draft.id]; return next; });
+    setModelCatalogs((current) => { const next = { ...current }; delete next[draft.id]; return next; });
     setUncommonProfileIds((current) => current.filter((id) => id !== draft.id));
     localStorage.setItem(PROFILE_KEY, JSON.stringify(remaining));
     setProfiles(remaining);
@@ -924,6 +1040,8 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
       setConfigStatus("请填写 API Key");
       return;
     }
+    const revision = ++modelCatalogRevisionRef.current;
+    const requestScope = modelRequestScopeRef.current;
     setTesting(true);
     setConfigStatus("正在连接并读取模型…");
     try {
@@ -931,40 +1049,53 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
         ...draft,
         adapter: draft.adapter === "auto" ? inferAdapter(draft.baseUrl) : draft.adapter,
       };
+      const requestedKey = draftKey;
       const response = await fetch("/api/config/models", {
-        headers: headersFor(prepared, draftKey),
+        cache: "no-store",
+        headers: headersFor(prepared, requestedKey),
       });
-      const body = await response.json();
+      let body = await response.json();
+      if (revision !== modelCatalogRevisionRef.current || requestScope !== modelRequestScopeRef.current) return;
       if (!response.ok) throw new Error(body.message || "连接失败");
+      const fingerprint = await modelKeyFingerprint(requestedKey);
+      if (revision !== modelCatalogRevisionRef.current || requestScope !== modelRequestScopeRef.current) return;
+      const previous = readModelCatalogs()[prepared.id];
+      if (body.source === "fallback" && modelCatalogMatches(previous, prepared, fingerprint) && previous.source !== "fallback") {
+        body = { ...previous, source: "cached", warning: `${body.warning || "实时目录暂不可用"}；已保留这把 Key 上次读取的模型列表` };
+      }
       const models = normalizeModels(body, prepared.adapter);
-      setModelOptions((current) => ({ ...current, [draft.id]: models }));
-      setDraft((current) => ({
+      const catalog = saveModelCatalog(prepared, fingerprint, { ...body, models });
+      setModelCatalogs((current) => ({ ...current, [prepared.id]: catalog }));
+      setModelOptions((current) => ({ ...current, [prepared.id]: models }));
+      setDraft((current) => current.id !== prepared.id ? current : ({
         ...current,
         adapter: prepared.adapter,
         model: models.includes(current.model) || (prepared.adapter === "bailing" && current.model !== FALLBACK_MODELS.bailing[0])
           ? current.model
           : models[0] || current.model,
-        routeCapabilities: body.capabilities || current.routeCapabilities,
-        routeLabels: body.labels || current.routeLabels,
+        routeCapabilities: body.capabilities || {},
+        routeLabels: body.labels || {},
       }));
       setConfigStatus(
-        body.warning || (prepared.adapter === "canseedream"
+        body.warning || (!models.length ? "已读取实时目录，但当前 Key 没有返回可用模型，请检查权限或分组" : prepared.adapter === "canseedream"
           ? `连接成功，读取到 ${models.length} 条当前开放线路`
           : `连接成功，读取到 ${models.length} 个模型`),
       );
     } catch (error) {
+      if (revision !== modelCatalogRevisionRef.current || requestScope !== modelRequestScopeRef.current) return;
       setConfigStatus(
         error instanceof TypeError && /failed to fetch/i.test(error.message || "")
           ? "无法连接本地工作台服务，请双击桌面的“一键启动工作台”后再试"
           : error.message || "连接失败",
       );
     } finally {
-      setTesting(false);
+      if (revision === modelCatalogRevisionRef.current) setTesting(false);
     }
   }
 
   function selectProjectFolder(fileList, explicitRootName = "") {
     const entries = Array.from(fileList || []);
+    if (!entries.length && !explicitRootName) return;
     const assets = entries
       .map((entry) => {
         const file = entry?.file || entry;
@@ -993,45 +1124,83 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
     );
   }
 
-  async function openRememberedProject(handle, requestPermission = false) {
+  async function openRememberedProject(handle, requestPermission = false, isCurrent = () => true) {
     const permission = await projectDirectoryPermission(handle, requestPermission);
+    if (!isCurrent()) return false;
     setProjectDirectoryHandle(handle);
     setProjectName(handle.name || "已保存项目");
+    setProjectAssets([]);
     if (permission !== "granted") {
       setProjectNeedsPermission(true);
       setNotice(`已记住项目“${handle.name || "已保存项目"}”，点击“恢复项目”即可继续使用`);
       return false;
     }
     const files = await filesFromProjectDirectory(handle);
+    if (!isCurrent()) return false;
     setProjectNeedsPermission(false);
     selectProjectFolder(files, handle.name);
     return true;
   }
 
   async function chooseProjectFolder() {
+    if (projectFolderLoading) return;
+    const targetProject = activeTaskProject;
     if (!window.showDirectoryPicker) {
+      projectFolderTargetRef.current = targetProject;
       projectFolderInput.current?.click();
       return;
     }
+    const version = ++projectFolderLoadRef.current;
+    const isCurrent = () => version === projectFolderLoadRef.current && activeTaskProjectRef.current === targetProject;
+    setProjectFolderLoading(true);
     try {
       const handle = await window.showDirectoryPicker({ mode: "read" });
-      await saveProjectDirectory(handle);
-      await openRememberedProject(handle, true);
+      await saveTaskProjectDirectory(targetProject, handle);
+      if (isCurrent()) await openRememberedProject(handle, true, isCurrent);
     } catch (error) {
-      if (error?.name !== "AbortError") setNotice(`项目文件夹读取失败：${error.message}`);
+      if (isCurrent() && error?.name !== "AbortError") setNotice(`项目文件夹读取失败：${error.message}`);
+    } finally {
+      if (isCurrent()) setProjectFolderLoading(false);
     }
   }
 
   async function restoreProjectFolder() {
+    if (!projectDirectoryHandle || projectFolderLoading) return;
+    const targetProject = activeTaskProject;
+    const version = ++projectFolderLoadRef.current;
+    const isCurrent = () => version === projectFolderLoadRef.current && activeTaskProjectRef.current === targetProject;
+    setProjectFolderLoading(true);
     try {
-      await openRememberedProject(projectDirectoryHandle, true);
+      await openRememberedProject(projectDirectoryHandle, true, isCurrent);
     } catch (error) {
-      setNotice(`恢复项目文件夹失败：${error.message}`);
+      if (isCurrent()) setNotice(`恢复项目文件夹失败：${error.message}`);
+    } finally {
+      if (isCurrent()) setProjectFolderLoading(false);
+    }
+  }
+
+  async function selectLegacyProjectFolder(fileList) {
+    const files = Array.from(fileList || []);
+    if (!files.length) return;
+    const targetProject = projectFolderTargetRef.current;
+    const version = projectFolderLoadRef.current;
+    try {
+      await removeTaskProjectDirectory(targetProject);
+      if (version !== projectFolderLoadRef.current || activeTaskProjectRef.current !== targetProject) return;
+      setProjectDirectoryHandle(null);
+      setProjectNeedsPermission(false);
+      setProjectFolderLoading(false);
+      selectProjectFolder(files);
+      setNotice("当前浏览器不支持记住文件夹权限，本次选择已生效；切换或重启后需重新选择。建议使用 Chrome 或 Edge。");
+    } catch (error) {
+      if (version === projectFolderLoadRef.current && activeTaskProjectRef.current === targetProject) setNotice(`项目文件夹选择失败：${error.message}`);
     }
   }
 
   async function applyProjectReferencePlan(plan) {
-    const selectedAssets = [...new Map(plan.matches.map((match) => [match.asset.key, match.asset])).values()];
+    const plannedMatches = [...plan.matches, ...(plan.outsideMatches || [])];
+    const outsideKeys = new Set((plan.outsideMatches || []).map((match) => match.asset.key));
+    const selectedAssets = [...new Map(plannedMatches.map((match) => [match.asset.key, match.asset])).values()];
     const durations = await Promise.all(
       selectedAssets.map((asset) => readMediaDuration(asset.file, asset.kind)),
     );
@@ -1047,7 +1216,7 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
             item.file.lastModified === asset.file.lastModified,
         );
         if (existingIndex >= 0) {
-          next[existingIndex] = { ...next[existingIndex], alias: asset.stem, projectAssetKey: asset.key };
+          next[existingIndex] = { ...next[existingIndex], alias: asset.stem, projectAssetKey: asset.key, noAutoMention: outsideKeys.has(asset.key) };
           continue;
         }
         const used = next.filter((item) => item.kind === asset.kind).length;
@@ -1061,6 +1230,7 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
           name: asset.file.name,
           alias: asset.stem,
           projectAssetKey: asset.key,
+          ...(outsideKeys.has(asset.key) ? { noAutoMention: true } : {}),
           preview: URL.createObjectURL(asset.file),
           subType: "reference",
           durationSeconds: durationByKey.get(asset.key) || null,
@@ -1070,9 +1240,9 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
     });
     setPrompt(plan.annotatedPrompt);
 
-    return plan.matches.reduce(
+    return plannedMatches.reduce(
       (value, match) => ({ ...value, [match.role]: value[match.role] + 1 }),
-      { people: 0, background: 0, voice: 0 },
+      { people: 0, background: 0, voice: 0, outside: 0 },
     );
   }
 
@@ -1086,7 +1256,7 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
       return;
     }
     const plan = planProjectReferences(prompt, projectAssets);
-    if (!plan.matches.length) {
+    if (!plan.matches.length && !plan.outsideMatches?.length) {
       setNotice("项目内没有找到能与人物、背景或声线模块对应的素材，未做任何修改");
       return;
     }
@@ -1096,7 +1266,7 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
       ? `；${plan.missing.length} 项在项目内没有对应文件，已保持原文不动`
       : "";
     setNotice(
-      `一键参考完成：人物图片 ${matchedCounts.people}、场景图片 ${matchedCounts.background}、声线音频 ${matchedCounts.voice}${missingText}。请检查后再手动开始生成。`,
+      `一键参考完成：人物图片 ${matchedCounts.people}、场景图片 ${matchedCounts.background}、声线音频 ${matchedCounts.voice}${matchedCounts.outside ? `、模块外参考 ${matchedCounts.outside}（未自动@）` : ""}${missingText}。请检查后再手动开始生成。`,
     );
   }
 
@@ -1352,6 +1522,7 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
           kind: item.kind,
           name: item.name,
           subType: item.subType || "reference",
+          ...(item.noAutoMention ? { noAutoMention: true } : {}),
           durationSeconds: item.durationSeconds || null,
           url: item.url || "",
           fileIndex: item.file ? fileIndex++ : null,
@@ -1555,6 +1726,42 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
       : `项目“${projectName}”已记住 ${value} 和“${templateName}”；当前模型暂时使用 ${capability.ratios[0]}`);
   }
 
+  async function renameTaskProject(oldName, newName) {
+    if (!taskDatabaseReady || projectRenameRunningRef.current || submitting || batchBusy || regeneratingTaskId || downloadingBatchId || cleaningUseless || projectFolderLoading)
+      throw new Error("请等待上传、提交、下载或核对完成；托管自动重试开启时请先停止重试，再修改项目名称");
+    projectRenameRunningRef.current = true;
+    setRenamingProject(true);
+    try {
+      const knownNames = await getTaskProjectNames();
+      const plan = taskProjectRenamePlan({ projects: taskProjects, activeProject: activeTaskProject, createdAtByName: taskProjectCreatedAtByName, ratios: taskProjectRatios, fixedContent: taskProjectFixedContent }, oldName, newName, knownNames);
+      if (!plan) return;
+      const count = await persistTaskProjectRename(plan, async (from, to) => {
+        const moved = await renameTaskProjectDirectory(from, to);
+        try { return await renameTaskProjectRecords(from, to); }
+        catch (error) {
+          if (moved) await renameTaskProjectDirectory(to, from);
+          throw error;
+        }
+      });
+      const replaceName = (name) => name === plan.from ? plan.to : name;
+      setTaskProjects(plan.projects);
+      setActiveTaskProject(plan.activeProject);
+      setTaskProjectCreatedAtByName(plan.createdAtByName);
+      setTaskProjectRatios(plan.ratios);
+      setTaskProjectFixedContent(plan.fixedContent);
+      setTaskProjectOptions((current) => [...new Set(current.map(replaceName))]);
+      setTaskProjectFilter(replaceName);
+      setSelectedTargetProject(replaceName);
+      setRatioProjectPrompt((current) => current ? { ...current, projectName: replaceName(current.projectName) } : current);
+      setTasks((current) => current.map((task) => task.projectName === plan.from ? { ...task, projectName: plan.to } : task));
+      setTaskRefreshVersion((value) => value + 1);
+      setNotice(`项目“${plan.from}”已重命名为“${plan.to}”；${count} 条任务及原有比例、固定内容和计费记录均保留`);
+    } finally {
+      projectRenameRunningRef.current = false;
+      setRenamingProject(false);
+    }
+  }
+
   async function deleteTaskProject(name) {
     const normalized = String(name || "").trim();
     if (!normalized || normalized === UNCLASSIFIED_PROJECT) throw new Error("“未归类”不能删除");
@@ -1562,6 +1769,7 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
     const changed = tasksAfterProjectDeletion(stored, normalized)
       .filter((task, index) => task.projectName !== stored[index].projectName);
     if (changed.length) await putTasks(changed);
+    await removeTaskProjectDirectory(normalized);
     const remainingProjects = removeTaskProject(taskProjects, normalized);
     const nextActiveProject = activeTaskProject === normalized ? UNCLASSIFIED_PROJECT : activeTaskProject;
     saveTaskProjects(remainingProjects, nextActiveProject);
@@ -1656,6 +1864,7 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
           projectAssetKey: asset.key,
           preview: URL.createObjectURL(asset.file),
           subType: reference.subType || "reference",
+          ...(reference.noAutoMention ? { noAutoMention: true } : {}),
           durationSeconds: reference.durationSeconds || await readMediaDuration(asset.file, reference.kind || asset.kind),
         });
       } else if (reference.url) {
@@ -1667,6 +1876,7 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
           alias: reference.alias || "",
           preview: reference.url,
           subType: reference.subType || "reference",
+          ...(reference.noAutoMention ? { noAutoMention: true } : {}),
           durationSeconds: reference.durationSeconds || null,
         });
       } else {
@@ -1678,7 +1888,9 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
     // 就用原提示词再做一次精确项目匹配，让旧失败任务也尽量能一键复用。
     if (!snapshot.references && projectAssets.length) {
       const plan = planProjectReferences(reusablePrompt, projectAssets);
-      const selectedAssets = [...new Map(plan.matches.map((match) => [match.asset.key, match.asset])).values()];
+      const plannedMatches = [...plan.matches, ...(plan.outsideMatches || [])];
+      const outsideKeys = new Set((plan.outsideMatches || []).map((match) => match.asset.key));
+      const selectedAssets = [...new Map(plannedMatches.map((match) => [match.asset.key, match.asset])).values()];
       const durations = await Promise.all(selectedAssets.map((asset) => readMediaDuration(asset.file, asset.kind)));
       selectedAssets.forEach((asset, index) => restored.push({
         id: uid("ref"),
@@ -1687,11 +1899,12 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
         name: asset.file.name,
         alias: asset.stem,
         projectAssetKey: asset.key,
+        ...(outsideKeys.has(asset.key) ? { noAutoMention: true } : {}),
         preview: URL.createObjectURL(asset.file),
         subType: "reference",
         durationSeconds: durations[index] || null,
       }));
-      if (plan.matches.length) reusablePrompt = plan.annotatedPrompt;
+      if (plannedMatches.length) reusablePrompt = plan.annotatedPrompt;
     }
 
     clearReferences();
@@ -1771,6 +1984,7 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
           alias: reference.alias || fileStem(asset.file.name),
           projectAssetKey: asset.key,
           subType: reference.subType || "reference",
+          ...(reference.noAutoMention ? { noAutoMention: true } : {}),
           durationSeconds: reference.durationSeconds || await readMediaDuration(asset.file, reference.kind || asset.kind),
         });
       } else if (reference.url) {
@@ -1781,6 +1995,7 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
           name: reference.name || `素材 ${index + 1}`,
           alias: reference.alias || "",
           subType: reference.subType || "reference",
+          ...(reference.noAutoMention ? { noAutoMention: true } : {}),
           durationSeconds: reference.durationSeconds || null,
         });
       } else {
@@ -1790,7 +2005,9 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
 
     if (!snapshot.references && projectAssets.length) {
       const plan = planProjectReferences(reusablePrompt, projectAssets);
-      const selectedAssets = [...new Map(plan.matches.map((match) => [match.asset.key, match.asset])).values()];
+      const plannedMatches = [...plan.matches, ...(plan.outsideMatches || [])];
+      const outsideKeys = new Set((plan.outsideMatches || []).map((match) => match.asset.key));
+      const selectedAssets = [...new Map(plannedMatches.map((match) => [match.asset.key, match.asset])).values()];
       const durations = await Promise.all(selectedAssets.map((asset) => readMediaDuration(asset.file, asset.kind)));
       selectedAssets.forEach((asset, index) => restored.push({
         id: uid("ref"),
@@ -1799,10 +2016,11 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
         name: asset.file.name,
         alias: asset.stem,
         projectAssetKey: asset.key,
+        ...(outsideKeys.has(asset.key) ? { noAutoMention: true } : {}),
         subType: "reference",
         durationSeconds: durations[index] || null,
       }));
-      if (plan.matches.length) reusablePrompt = plan.annotatedPrompt;
+      if (plannedMatches.length) reusablePrompt = plan.annotatedPrompt;
     }
 
     if (missing.length) {
@@ -1877,6 +2095,7 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
           kind: item.kind,
           name: item.name,
           subType: item.subType || "reference",
+          ...(item.noAutoMention ? { noAutoMention: true } : {}),
           durationSeconds: item.durationSeconds || null,
           sizeBytes: item.file?.size || null,
           url: item.url || "",
@@ -2012,14 +2231,10 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
           if (!response?.ok) {
             throw new Error(body.message || (response ? `HTTP ${response.status}` : "没有可用的任务记录"));
           }
-          const url = URL.createObjectURL(await response.blob());
-          const link = document.createElement("a");
-          link.href = url;
-          link.download = orderedDownloadFilename({ ...downloadedTask, batchTitle: task.batchTitle, batchSection: task.batchSection }, index, completed.length);
-          document.body.appendChild(link);
-          link.click();
-          link.remove();
-          window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+          await downloadBlob(await response.blob(), orderedDownloadFilename(
+            { ...downloadedTask, batchTitle: task.batchTitle, sourceName: task.sourceName, batchSection: task.batchSection },
+            index, completed.length,
+          ));
           try {
             await markTasksDownloaded(downloadedChapterTaskIds(task, downloadedTask));
             downloaded += 1;
@@ -2079,6 +2294,36 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
     }
   }
 
+  async function deleteUselessBatches() {
+    if (!taskDatabaseReady || cleaningUseless || submitting || batchBusy || regeneratingTaskId || downloadingBatchId) return;
+    setCleaningUseless(true);
+    const project = taskProjectFilter;
+    try {
+      const batches = uselessTaskBatches(await allTasks(), project);
+      if (!batches.length) {
+        setNotice("当前任务项目没有整批全部失败的无用任务；包含生成中或成功任务的批次不会删除");
+        return;
+      }
+      const taskCount = batches.reduce((count, batch) => count + batch.tasks.length, 0);
+      if (!window.confirm(`确定删除${project === "all" ? "全部项目" : `项目“${project}”`}中 ${batches.length} 个整批全部失败的批次（${taskCount} 条任务）吗？\n会检查所有页，不受状态和搜索筛选影响；有生成中或成功任务的批次不会删除。\n仅清理右侧任务列表，保留历史计费记录，不删除视频文件或中转站任务。`)) return;
+      const result = await archiveUselessBatches(batches.map((batch) => batch.id), project);
+      const removedIds = new Set(result.taskIds);
+      const removedBatchIds = new Set(batches.filter((batch) => batch.tasks.some((task) => removedIds.has(task.id))).map((batch) => batch.id));
+      if (removedIds.has(videoBlob?.taskId)) setVideoBlob(null);
+      setTasks((current) => current.filter((task) => !removedIds.has(task.id)));
+      setSelectedTaskIds((current) => current.filter((id) => !removedIds.has(id)));
+      setExpandedTaskId((current) => removedIds.has(current) ? null : current);
+      setExpandedBatchId((current) => removedBatchIds.has(current) ? null : current);
+      setTaskRefreshVersion((current) => current + 1);
+      const skipped = batches.length - result.batchCount;
+      setNotice(`已清理 ${result.batchCount} 个全部失败批次、${result.taskIds.length} 条任务，历史计费记录保留${skipped ? `；${skipped} 个批次状态已变化，未清理` : ""}`);
+    } catch (error) {
+      setNotice(error.message || "清理无用任务失败，任务记录未移除");
+    } finally {
+      setCleaningUseless(false);
+    }
+  }
+
   async function deleteBatch(batch) {
     const taskIds = batch.tasks.map((task) => task.id);
     if (!taskIds.length) return;
@@ -2105,9 +2350,9 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
 
   async function exportTaskBackup() {
     try {
-      const savedTasks = await allTasks();
+      const [savedTasks, submissionRecords] = await Promise.all([allTasks(), getSubmissionRecords()]);
       const blob = new Blob(
-        [JSON.stringify({ version: 1, exportedAt: new Date().toISOString(), tasks: savedTasks }, null, 2)],
+        [JSON.stringify({ version: 2, exportedAt: new Date().toISOString(), tasks: savedTasks, submissionRecords }, null, 2)],
         { type: "application/json" },
       );
       const url = URL.createObjectURL(blob);
@@ -2116,7 +2361,7 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
       link.download = `AI视频工作台-任务备份-${new Date().toISOString().slice(0, 10)}.json`;
       link.click();
       window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-      setNotice(`已导出 ${savedTasks.length} 条任务记录，不包含视频文件和 API Key`);
+      setNotice(`已导出 ${savedTasks.length} 条任务记录和 ${submissionRecords.length} 条轻量提交台账，不包含视频文件和 API Key`);
     } catch (error) {
       setNotice(error.message || "导出任务备份失败");
     }
@@ -2129,9 +2374,12 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
       const imported = Array.isArray(parsed) ? parsed : parsed?.tasks;
       if (!Array.isArray(imported) || imported.some((task) => !task?.id))
         throw new Error("任务备份文件格式无效");
-      await putTasks(imported);
+      const submissionRecords = parsed?.submissionRecords || [];
+      if (!Array.isArray(submissionRecords) || submissionRecords.some((record) => !record?.id))
+        throw new Error("提交台账备份格式无效");
+      await putTaskBackup(imported, submissionRecords);
       setTaskRefreshVersion((value) => value + 1);
-      setNotice(`已导入 ${imported.length} 条任务记录；相同任务编号会更新，不会重复添加`);
+      setNotice(`已导入 ${imported.length} 条任务记录和 ${submissionRecords.length} 条轻量提交台账；相同任务编号不会重复添加`);
     } catch (error) {
       setNotice(error.message || "导入任务备份失败");
     }
@@ -2139,7 +2387,8 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
 
   return (
     <main className="workspace-shell">
-      <header className="topbar">
+      <header className="topbar video-topbar">
+        <div className="ui-topbar-main">
         <div className="brand">
           <span className="brand-mark">影</span>
           <div>
@@ -2147,9 +2396,20 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
             <p>图片对应 @Image，音频对应 @Audio，视频对应 @Video</p>
           </div>
         </div>
-        <div className="provider-switcher">
+        <nav className="ui-app-nav" aria-label="创作模块">
+          <span className="ui-app-active" aria-current="page">视频生成</span>
           <button className="secondary-button" onClick={onImageMode}>图片生成</button>
+          <button className="secondary-button" onClick={onTextMode}>文本推理</button>
           <button className="secondary-button" onClick={onFaceMode}>明星脸初筛</button>
+        </nav>
+        <div className="ui-workspace-actions">
+          <button className="task-project-button" title={activeTaskProject} onClick={() => setTaskProjectOpen(true)}>任务项目：{activeTaskProject}</button>
+          <button className="secondary-button" onClick={() => setCostOpen(true)}>成本统计</button>
+          <button className="secondary-button" onClick={() => openConfig()}>中转站管理</button>
+          <button className="logout-button" onClick={onLogout}>退出登录</button>
+        </div>
+        </div>
+        <div className="provider-switcher ui-provider-row">
           <div className="model-version-switch" role="group" aria-label="Seedance 模型版本">
             <span>模型版本</span>
             <button
@@ -2173,20 +2433,18 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
               ))}
             </select>
           </label>
-          <span className={`connection-pill ${keyFor(activeProfile) ? "ready" : ""}`}>
+          <span className={`connection-pill ${keyFor(activeProfile) ? "ready" : ""}`} title={keyFor(activeProfile) ? activeProfile.model : "等待 API 配置"}>
             {keyFor(activeProfile) ? activeProfile.model : "等待 API 配置"}
           </span>
           <span className="network-pill" title="不继承环境变量代理；系统网卡/TUN代理仍会接管请求">直连防丢包</span>
-          <button className="secondary-button" title="只导出当前选择的中转，不包含其他中转" disabled={!!diagnosticBusy} onClick={downloadDiagnostics}>{diagnosticBusy === "exporting" ? "导出中…" : "仅导出当前中转日志"}</button>
-          <button className="secondary-button" disabled={!!diagnosticBusy} onClick={resetDiagnostics}>{diagnosticBusy === "clearing" ? "清空中…" : "清空本次日志"}</button>
-          <button className="task-project-button" onClick={() => setTaskProjectOpen(true)}>任务项目：{activeTaskProject}</button>
-          <button className="secondary-button" onClick={() => setCostOpen(true)}>成本统计</button>
-          <button className="secondary-button" onClick={() => openConfig()}>中转站管理</button>
-          <button className="logout-button" onClick={onLogout}>退出登录</button>
+          <div className="ui-log-actions">
+            <button className="secondary-button" title="只导出当前选择的中转，不包含其他中转" disabled={!!diagnosticBusy} onClick={downloadDiagnostics}>{diagnosticBusy === "exporting" ? "导出中…" : "仅导出当前中转日志"}</button>
+            <button className="secondary-button" disabled={!!diagnosticBusy} onClick={resetDiagnostics}>{diagnosticBusy === "clearing" ? "清空中…" : "清空本次日志"}</button>
+          </div>
         </div>
       </header>
 
-      <div className="workspace-grid">
+      <div className="workspace-grid video-workspace">
         <section className="panel generation-panel">
           <div className="panel-heading">
             <h2>生成参数</h2>
@@ -2196,6 +2454,7 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
             <button className={workMode === "single" ? "active" : ""} onClick={() => setWorkMode("single")}>单条生成</button>
             <button className={workMode === "batch" ? "active" : ""} onClick={() => setWorkMode("batch")}>批量生成</button>
           </div>
+          {capability._capabilityUnverified && <div className="notice">当前模型的参数能力尚未核实，显示的是工作台通用选项，不代表该模型全部支持；提交将使用此中转现有统一接口，具体限制以上游校验为准。</div>}
           {workMode === "batch" ? (
             <BatchPanel
               activeProfile={activeProfile}
@@ -2210,7 +2469,7 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
               headers={headersFor(activeProfile)}
               notice={notice}
               onNotice={setNotice}
-              onProjectFolder={selectProjectFolder}
+              onBusyChange={setBatchBusy}
               onChooseProjectFolder={chooseProjectFolder}
               onDownloadTasks={downloadTaskCollection}
               onManageFixedContent={() => setFixedContentManagerOpen(true)}
@@ -2226,6 +2485,7 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
               projectAssets={projectAssets}
               projectNeedsPermission={projectNeedsPermission}
               projectName={projectName}
+              projectFolderLoading={projectFolderLoading}
               taskProjectName={activeTaskProject}
               quantity={quantity}
               ratio={ratio}
@@ -2252,15 +2512,16 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
                     ? `已读取 ${projectAssets.length} 个可用素材；本地文件只会在开始生成时上传`
                     : projectNeedsPermission
                       ? "项目位置已保留；浏览器需要确认后即可继续读取"
-                      : "选择后会记住项目位置，重启工作台后自动恢复"}
+                      : "文件夹随任务项目保存，切换或重启后自动恢复"}
                 </span>
               </div>
               <div>
                 <button
                   className="secondary-button"
+                  disabled={projectFolderLoading}
                   onClick={projectNeedsPermission ? restoreProjectFolder : chooseProjectFolder}
                 >
-                  {projectNeedsPermission ? "恢复项目" : projectName ? "更换项目" : "选择项目文件夹"}
+                  {projectFolderLoading ? "正在读取文件夹…" : projectNeedsPermission ? "恢复项目" : projectName ? "更换项目" : "选择项目文件夹"}
                 </button>
                 <button className="one-click-button" disabled={!projectAssets.length} onClick={runOneClickReference}>
                   一键参考
@@ -2269,18 +2530,6 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
                   一键匹配音频
                 </button>
               </div>
-              <input
-                ref={projectFolderInput}
-                type="file"
-                multiple
-                hidden
-                webkitdirectory=""
-                directory=""
-                onChange={(event) => {
-                  selectProjectFolder(event.target.files);
-                  event.target.value = "";
-                }}
-              />
             </div>
 
             <FixedContentControls
@@ -2400,7 +2649,7 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
                 const supported = kindPosition <= (capability[`${item.kind}s`] ?? 0);
                 return (
                 <article className={`reference-card ${item.kind} ${supported ? "" : "unsupported"}`} key={item.id}>
-                  <button className="tag" onClick={() => insertTag(item)}>{visibleReferenceTag(item)}</button>
+                  <button className="tag" onClick={() => insertTag(item)}>{item.noAutoMention ? `参考图${kindPosition}` : visibleReferenceTag(item)}</button>
                   <button className="remove" onClick={() => removeReference(item.id)}>×</button>
                   <div className="reference-preview">
                     {item.kind === "image" && <img src={item.preview} alt="" />}
@@ -2408,6 +2657,7 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
                     {item.kind === "audio" && <span>♫</span>}
                   </div>
                   <strong title={item.name}>{item.name}</strong>
+                  {item.noAutoMention && <small>模块外参考，未自动@</small>}
                   <small>{item.file ? formatBytes(item.file.size) : "网络素材"}</small>
                   {item.durationSeconds && <small>{item.durationSeconds} 秒</small>}
                   {!supported && <span className="unsupported-badge">当前模型不支持</span>}
@@ -2449,6 +2699,7 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
             </div>
           </div>
           )}
+          <input ref={projectFolderInput} type="file" multiple hidden webkitdirectory="" directory="" onChange={(event) => { selectLegacyProjectFolder(event.target.files); event.target.value = ""; }} />
         </section>
 
         <aside className="panel task-panel">
@@ -2471,6 +2722,7 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
             </select>
             <input aria-label="搜索任务" value={taskQuery} onChange={(event) => setTaskQuery(event.target.value)} placeholder="搜索名称、编号或模型" />
             <div className="task-backup-buttons">
+              <button disabled={!taskDatabaseReady || cleaningUseless || submitting || batchBusy || regeneratingTaskId || downloadingBatchId} onClick={deleteUselessBatches}>{cleaningUseless ? "正在清理…" : "一键删除无用任务"}</button>
               <button onClick={exportTaskBackup}>导出备份</button>
               <button onClick={() => taskBackupInput.current?.click()}>导入备份</button>
               <input
@@ -2559,7 +2811,7 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
                                 <div className="task-details" onClick={(event) => event.stopPropagation()}>
                                   {task.status === "completed" ? (
                                     videoBlob?.taskId === task.id
-                                      ? <><video src={videoBlob.url} controls /><a className="download-button" href={videoBlob.url} download={orderedDownloadFilename(task, 0, 1)}>下载视频</a></>
+                                      ? <><video src={videoBlob.url} controls /><button className="download-button" disabled={downloadingBatchId === `task-${task.id}`} onClick={() => downloadTaskCollection([task], `task-${task.id}`, "视频", { includeDownloaded: true })}>{downloadingBatchId === `task-${task.id}` ? "下载中…" : "下载视频"}</button></>
                                       : <button className="secondary-button" onClick={() => loadVideo(task)}>加载视频</button>
                                   ) : <p>{task.status === "failed" ? "该任务生成失败" : "视频生成完成后可在这里播放"}</p>}
                                   <details><summary>查看提示词</summary><pre>{task.prompt}</pre></details>
@@ -2617,7 +2869,7 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
                     <div className="task-details" onClick={(event) => event.stopPropagation()}>
                       {task.status === "completed" ? (
                         videoBlob?.taskId === task.id ? (
-                          <><video src={videoBlob.url} controls /><a className="download-button" href={videoBlob.url} download={orderedDownloadFilename(task, 0, 1)}>下载视频</a></>
+                          <><video src={videoBlob.url} controls /><button className="download-button" disabled={downloadingBatchId === `task-${task.id}`} onClick={() => downloadTaskCollection([task], `task-${task.id}`, "视频", { includeDownloaded: true })}>{downloadingBatchId === `task-${task.id}` ? "下载中…" : "下载视频"}</button></>
                         ) : <button className="secondary-button" onClick={() => loadVideo(task)}>加载视频</button>
                       ) : <p>{task.status === "failed" ? "该任务生成失败" : "视频生成完成后可在这里播放"}</p>}
                       <details><summary>查看提示词</summary><pre>{task.prompt}</pre></details>
@@ -2663,7 +2915,7 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
                 </div>
                 <label><span>配置名称</span><input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="例如：主力 API" /></label>
                 <label><span>Base URL</span><input value={draft.baseUrl} onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value, adapter: inferAdapter(event.target.value) })} placeholder="https://api.example.com" /></label>
-                <label><span>接口类型</span><select value={draft.adapter} onChange={(event) => setDraft({ ...draft, adapter: event.target.value })}><option value="fmgo">FMGO / 飞猫</option><option value="paipu">Paipu / Lec</option><option value="viralee">ViralE</option><option value="canseedream">CanSeeDream / 看见梦想</option><option value="lwaigc">LWAIGC 官方统一接口</option><option value="meaicc">MEAICC / 林木森AI</option><option value="ziyuai">Ziyu AI / 紫域AI</option><option value="globalaiopc">GlobalAiOpc / 全球AI</option><option value="maxforai">MaxForAI</option><option value="clmm">CLMM Mall</option><option value="pidoi">Pidoi</option><option value="aiyrx">AIYRX</option><option value="unmau">Unmau New API</option><option value="seedancevideo">Seedance 视频 / 772808</option><option value="suanliai">算力AI（自动识别系列）</option><option value="bailing">白灵 API</option><option value="huajing">华镜 / Huajing</option><option value="newapi">New API 通用</option></select></label>
+                <label><span>接口类型</span><select value={draft.adapter} onChange={(event) => setDraft({ ...draft, adapter: event.target.value })}><option value="fmgo">FMGO / 飞猫</option><option value="paipu">Paipu / Lec</option><option value="viralee">ViralE</option><option value="canseedream">CanSeeDream / 看见梦想</option><option value="lwaigc">LWAIGC 官方统一接口</option><option value="meaicc">MEAICC / 林木森AI</option><option value="ziyuai">Ziyu AI / 紫域AI</option><option value="globalaiopc">GlobalAiOpc / 全球AI</option><option value="maxforai">MaxForAI</option><option value="clmm">CLMM Mall</option><option value="pidoi">Pidoi</option><option value="aiyrx">AIYRX</option><option value="unmau">Unmau New API</option><option value="seedancevideo">Seedance 视频 / 772808 / Panda626</option><option value="suanliai">算力AI（自动识别系列）</option><option value="bailing">白灵 API</option><option value="huajing">华镜 / Huajing</option><option value="baoju">Baoju / aimjbbb</option><option value="newapi">New API 通用</option></select></label>
                 <label><span>API Key</span><input type="password" value={draftKey} onChange={(event) => setDraftKey(event.target.value)} placeholder="sk-••••••••" /><small>{rememberKey ? "将保存在此浏览器；公共电脑请勿启用。" : "仅保存在当前浏览器会话，不写入源码。"}</small></label>
                 <label className="remember-key-row"><input type="checkbox" checked={rememberKey} onChange={(event) => setRememberKey(event.target.checked)} /><span>在这台浏览器记住当前中转站的 Key</span></label>
                 <label>
@@ -2698,7 +2950,12 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
                     {draft.adapter === "bailing"
                       ? `当前列表共 ${(modelOptions[draft.id] || []).length} 个实时模型；也可手动填写模型名`
                       : `当前列表共 ${(modelOptions[draft.id] || FALLBACK_MODELS[draft.adapter] || []).length} 个模型`}
+                    {modelCatalogs[draft.id]
+                      ? modelCatalogs[draft.id].source === "fallback" ? " · 内置参考列表，未核实 Key 权限"
+                        : ` · 已保存读取结果（${new Date(modelCatalogs[draft.id].fetchedAt).toLocaleString("zh-CN")}）；更换 Key 后请重新测试`
+                      : " · 内置参考列表，尚未实时验证"}
                   </small>
+                  {capabilityFor(draft)._capabilityUnverified && <small>此模型未在本地参数表中：不会因名称陌生被隐藏；参数能力待核实，使用前请确认其统一接口和素材限制。</small>}
                 </label>
                 <details className="advanced-config"><summary>高级素材上传设置</summary><label><span>素材上传地址</span><input value={draft.mediaUploadUrl || ""} onChange={(event) => setDraft({ ...draft, mediaUploadUrl: event.target.value })} placeholder="可选，例如 /v1/media/upload" /></label><label><span>独立上传密钥</span><input type="password" value={draftUploadKey} onChange={(event) => setDraftUploadKey(event.target.value)} placeholder="留空则使用当前 API Key" /><small>保存位置跟随上方“记住 Key”选项。</small></label></details>
                 <div className="config-status" role="status">{configStatus}</div>
@@ -2710,6 +2967,7 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
       )}
       {costOpen && (
         <CostDashboard
+          activeProfileId={activeProfile.id}
           modelOptions={modelOptions}
           onClose={() => setCostOpen(false)}
           onSelectModel={selectFavoriteModel}
@@ -2722,6 +2980,8 @@ function Workbench({ onImageMode, onFaceMode, onLogout }) {
           onClose={() => setTaskProjectOpen(false)}
           onCreate={createTaskProject}
           onDelete={deleteTaskProject}
+          onRename={renameTaskProject}
+          mutationBusy={!taskDatabaseReady || renamingProject || submitting || batchBusy || !!regeneratingTaskId || !!downloadingBatchId || cleaningUseless || projectFolderLoading}
           onSelect={selectTaskProject}
           onTasksChanged={(count, projectName) => {
             setTaskRefreshVersion((value) => value + 1);

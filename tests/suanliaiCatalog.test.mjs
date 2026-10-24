@@ -136,3 +136,19 @@ test("reads live model shapes and keeps documented material limits", () => {
   assert.deepEqual(catalog.capabilities["003系列/sd2.5(30-10-10/4-30秒720P)"].images, 30);
   assert.deepEqual(capabilityFor({ adapter: "suanliai", model: "004系列/minimax_h3(8图3音频)" }), suanliaiCapability("004系列/minimax_h3(8图3音频)"));
 });
+
+test("Suanliai accepts new opaque IDs and object:model rows without a model-name keyword gate", () => {
+  const catalog = suanliaiCatalog({ data: [
+    "brand-new-opaque-id", { id: "provider/unfamiliar", object: "model" },
+    { id: "generic-type", type: "model" },
+    { id: "image-only", object: "model", type: "image_generation" },
+    { id: "text-only", object: "model", supported_endpoint_types: ["openai"] },
+    { id: "video-endpoint", object: "model", supported_endpoint_types: ["openai-video"] },
+  ] });
+  assert.deepEqual(catalog.models, ["brand-new-opaque-id", "provider/unfamiliar", "generic-type", "video-endpoint"]);
+});
+
+test("Suanliai retains new IDs returned by nested model lists and rejects explicit non-video tasks", () => {
+  const catalog = suanliaiCatalog({ data: { models: [{ id: "nested-new", tasks: [{ taskKind: "video_generation" }] }, { id: "not-a-video", tasks: [{ taskKind: "image_generation" }] }] } });
+  assert.deepEqual(catalog.models, ["nested-new"]);
+});

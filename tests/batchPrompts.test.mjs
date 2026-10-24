@@ -131,6 +131,12 @@ test("shows the source chapter beside repeated section numbers", () => {
   assert.equal(batchItemChapterLabel("第十二章《标题》.txt"), "第十二章");
 });
 
+test("shows the source episode beside section numbers instead of confusing episode and plot numbering", () => {
+  assert.equal(batchItemChapterLabel("第01集_剧情002-006合集.txt"), "第1集");
+  assert.equal(batchItemChapterLabel("第02集_剧情001-005合集.txt"), "第2集");
+  assert.equal(batchItemChapterLabel("第十二集_剧情001.txt"), "第十二集");
+});
+
 test("recovers batch rows interrupted while submitting", () => {
   const items = recoverInterruptedBatchItems([
     { id: "no-id", status: "submitting", progress: 20, taskIds: [] },
@@ -225,12 +231,70 @@ test("filters batch chapters by the user-facing status groups", () => {
     { id: "d", status: "generating" },
     { id: "e", status: "generated" },
     { id: "f", status: "generation_failed" },
+    { id: "g", status: "submitted" },
+    { id: "h", status: "submission_unknown" },
+    { id: "i", status: "not_submitted" },
+    { id: "j", status: "failed" },
+    { id: "k" },
   ];
+  assert.equal(batchStatusGroup("submitting"), "submitting");
   assert.equal(batchStatusGroup("submitted"), "generating");
+  assert.equal(batchStatusGroup("generating"), "generating");
   assert.equal(batchStatusGroup("submission_unknown"), "failed");
-  assert.deepEqual(filterBatchItems(items, "generating").map((item) => item.id), ["c", "d"]);
-  assert.deepEqual(filterBatchItems(items, "failed").map((item) => item.id), ["f"]);
+  assert.equal(batchStatusGroup("not_submitted"), "pending");
+  assert.equal(batchStatusGroup(undefined), "pending");
+  assert.deepEqual(filterBatchItems(items, "submitting").map((item) => item.id), ["c"]);
+  assert.deepEqual(filterBatchItems(items, "generating").map((item) => item.id), ["d", "g"]);
+  assert.deepEqual(filterBatchItems(items, "pending").map((item) => item.id), ["a", "i", "k"]);
+  assert.deepEqual(filterBatchItems(items, "matched").map((item) => item.id), ["b"]);
+  assert.deepEqual(filterBatchItems(items, "generated").map((item) => item.id), ["e"]);
+  assert.deepEqual(filterBatchItems(items, "failed").map((item) => item.id), ["f", "h", "j"]);
   assert.equal(filterBatchItems(items, "all").length, items.length);
+});
+
+test("shows only completed and not-yet-downloaded sections in the undownloaded filter", () => {
+  const items = [
+    { id: "ready", status: "generated" },
+    { id: "not-downloaded", status: "generated", downloaded: false },
+    { id: "downloaded", status: "generated", downloaded: true },
+    { id: "manual-downloaded", status: "generated", downloaded: false, manuallyMarkedDownloaded: true },
+    { id: "manual-generated", status: "generated", manuallyMarkedGenerated: true },
+    { id: "failed", status: "failed" },
+    { id: "generation-failed", status: "generation_failed" },
+    { id: "unknown", status: "submission_unknown" },
+    { id: "pending", status: "pending" },
+    { id: "not-submitted", status: "not_submitted" },
+    { id: "matched", status: "matched" },
+    { id: "submitting", status: "submitting" },
+    { id: "submitted", status: "submitted" },
+    { id: "generating", status: "generating" },
+    { id: "no-status" },
+  ];
+
+  assert.deepEqual(filterBatchItems(items, "undownloaded").map((item) => item.id), [
+    "ready", "not-downloaded", "manual-generated",
+  ]);
+  assert.equal(filterBatchItems(items, "generated").length, 5);
+  assert.equal(filterBatchItems([], "undownloaded").length, 0);
+  assert.equal(filterBatchItems(undefined, "undownloaded").length, 0);
+});
+
+test("keeps undownloaded filtering in sync with successful automatic and manual download marks", () => {
+  const completed = { id: "section-1", status: "generated", downloaded: false };
+  assert.deepEqual(filterBatchItems([completed], "undownloaded"), [completed]);
+
+  const automaticDownloaded = { ...completed, downloaded: true, downloadedCount: 1 };
+  assert.deepEqual(filterBatchItems([automaticDownloaded], "undownloaded"), []);
+
+  const manualDownloaded = manuallyCompleteBatchItem(completed, true);
+  assert.deepEqual(filterBatchItems([manualDownloaded], "undownloaded"), []);
+  const cleared = clearManualBatchDownload(manualDownloaded);
+  assert.deepEqual(filterBatchItems([cleared], "undownloaded"), [cleared]);
+
+  const alreadyDownloaded = manuallyCompleteBatchItem(automaticDownloaded, true);
+  assert.deepEqual(filterBatchItems([clearManualBatchDownload(alreadyDownloaded)], "undownloaded"), []);
+  const submittingAgain = beginBatchSubmission(manualDownloaded, { id: "panda", model: "seedance-2.5" }, 1000);
+  assert.deepEqual(filterBatchItems([submittingAgain], "undownloaded"), []);
 });
 
 test("forces FMGO SS batches into the provider-safe serial plan", () => {
@@ -278,15 +342,18 @@ test("splits numbered Chinese prompt sections without splitting SC markers", () 
   assert.match(items[1].prompt, /^4\.（第四节/);
 });
 
-test("starts ordered-rush submissions by numeric section while keeping concurrency", async () => {
+test("starts ordered-rush submissions by numeric section while keeping concurrency", { timeout: 5000 }, async () => {
   const started = [];
   let active = 0;
   let maximum = 0;
+  let release;
+  const allStarted = new Promise((resolve) => { release = resolve; });
   await runOrderedStaggered([{ section: 31 }, { section: 29 }, { section: 30 }], 3, 2, async (item) => {
     started.push(item.section);
     active += 1;
     maximum = Math.max(maximum, active);
-    await new Promise((resolve) => setTimeout(resolve, item.section === 29 ? 20 : 12));
+    if (started.length === 3) release();
+    await allStarted;
     active -= 1;
   });
   assert.deepEqual(started, [29, 30, 31]);

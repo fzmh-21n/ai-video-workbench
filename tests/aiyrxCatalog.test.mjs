@@ -74,6 +74,19 @@ test("normalizes the live AIYRX model catalog and exact capability fields", () =
   );
 });
 
+test("AIYRX keeps string and opaque live model IDs without a static-name whitelist", () => {
+  const catalog = aiyrxModels({ models: [
+    "provider/new-route", { id: "new-object-route", object: "model" }, "provider/new-route",
+    { id: "explicit-image", type: "image_generation" },
+    { id: "explicit-text", supported_endpoint_types: ["openai"] },
+  ] });
+  assert.deepEqual(catalog.models, ["provider/new-route", "new-object-route"]);
+});
+
+test("AIYRX also accepts string entries in the standard data array", () => {
+  assert.deepEqual(aiyrxModels({ data: ["brand-new-id"] }).models, ["brand-new-id"]);
+});
+
 test("builds the native AIYRX task request from uploaded asset IDs", () => {
   assert.deepEqual(aiyrxVideoPayload("官逆SD2.5-720P-不卡脸30图10视频10音频", {
     prompt: "测试提示词",

@@ -1,0 +1,96 @@
+.modal-backdrop { padding: 24px; backdrop-filter: none; }
+.config-dialog, .task-project-dialog, .fixed-content-dialog, .cost-dialog, .project-ratio-dialog { border-radius: 20px;
+}
+.dialog-heading { padding: 20px 24px; gap: 16px; }
+.dialog-heading h2 { font-size: 24px; letter-spacing: -.02em; }
+.dialog-heading span, .project-ratio-dialog > span { font-weight: 700; letter-spacing: .16em; }
+.dialog-heading > button { flex: 0 0 36px; width: 36px; height: 36px; }
+.config-dialog { width: min(1000px, 100%); height: 90vh; max-height: 90vh; }
+.config-layout { grid-template-columns: 250px minmax(0, 1fr); min-height: 0; }
+.profile-list { min-height: 0; padding: 16px 12px; }
+.profile-list button { padding: 13px 12px; border-radius: 11px; margin-bottom: 8px; }
+.profile-list strong { font-size: 18px; overflow-wrap: anywhere; }
+.profile-list small { font-size: 16px; line-height: 1.55; }
+.profile-list-heading { padding: 5px 8px 12px; }
+.config-form { min-width: 0; min-height: 0; padding: 24px 28px; }
+.config-form > label, .advanced-config label { margin-bottom: 18px; }
+.config-form label > span, .advanced-config label > span { margin-bottom: 8px; font-weight: 600; }
+.config-form label small, .provider-common-setting span { line-height: 1.5; }
+.config-form .remember-key-row span { font-weight: 400; }
+.provider-common-setting { padding: 14px; }
+.advanced-config { padding: 14px; border-radius: 12px; }
+.advanced-config summary { font-size: 17px; font-weight: 600; }
+.config-status { padding: 12px 14px; line-height: 1.6; overflow-wrap: anywhere; }
+.dialog-actions { gap: 10px; margin-top: 20px; }
+.modal-backdrop .danger-button { padding: 9px 12px; border-radius: 9px; }
+.task-project-dialog { width: min(960px, 96vw); }
+.task-project-intro { margin: 18px 24px 10px; font-size: 17px; line-height: 1.7; }
+.task-project-create { padding: 6px 24px 20px; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; }
+.task-project-history { margin: 0 24px 20px; padding: 16px; grid-template-columns: minmax(0, 1fr) minmax(125px, .8fr) minmax(0, 1fr); gap: 12px; }
+.task-project-history > button { grid-column: 3; }
+.task-project-history input, .task-project-history select { width: 100%; min-width: 0; }
+.task-project-list { gap: 12px; padding: 0 24px 20px; }
+.task-project-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr); grid-template-areas: "name cost" "summary actions"; padding: 18px; gap: 12px 18px; border-radius: 14px; }
+.task-project-row .task-project-name { grid-area: name; align-items: flex-start; gap: 6px 9px; }
+.task-project-name time { flex-basis: 100%; }
+.task-project-row .task-project-name strong { white-space: normal; overflow-wrap: anywhere; line-height: 1.5; }
+.task-project-row > p { grid-area: summary; line-height: 1.8; }
+.task-project-row > b { grid-area: cost; justify-self: end; font-size: 18px; }
+.task-project-row > .task-project-actions { grid-area: actions; gap: 8px; }
+.task-project-actions button { font-size: 16px; padding: 7px 10px; min-height: 34px; }
+.task-project-actions .danger-button { margin-left: 0; }
+.task-project-models { grid-area: auto / 1 / auto / -1; padding-top: 14px; }
+.task-project-model-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) 100px; gap: 8px !important; padding: 12px; }
+.task-project-model-row label { grid-column: 2; }
+.cost-footnote { margin: 0 24px 20px; line-height: 1.7; }
+.fixed-content-dialog { display: flex; flex-direction: column; }
+.fixed-content-manager-layout { min-height: 0; height: min(640px, calc(90vh - 90px)); grid-template-columns: 260px minmax(0, 1fr); }
+.fixed-content-manager-layout aside { min-height: 0; padding: 20px 16px; gap: 12px; }
+.fixed-content-manager-layout aside > input { width: 100%; min-width: 0; }
+.fixed-content-template-list { min-height: 0; gap: 9px; overscroll-behavior: contain; }
+.fixed-content-template-list > button { padding: 12px; overflow-wrap: anywhere; }
+.fixed-content-editor { min-height: 0; min-width: 0; padding: 24px; gap: 18px; overscroll-behavior: contain; }
+.fixed-content-editor label span { font-weight: 600; }
+.fixed-content-editor textarea { min-height: 180px; }
+.project-ratio-dialog { padding: 30px; }
+.project-ratio-dialog h2 { font-size: 24px; }
+.project-ratio-options { gap: 14px; margin-top: 24px; }
+.project-ratio-options button { border-radius: 14px; padding: 22px 14px; }
+.cost-summary-grid { gap: 14px; padding: 20px 24px 4px; }
+.cost-summary-card { padding: 18px; }
+.cost-summary-card b { font-size: 30px; }
+.cost-section { margin: 18px 24px; padding: 18px; }
+.cost-model-filters { grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr); gap: 12px; }
+.cost-model-filters input, .cost-model-filters select { min-width: 0; }
+.login-card { width: min(440px, 100%); padding: 38px; border-radius: 22px; }
+.login-brand { width: 52px; height: 52px; border-radius: 16px; }
+.login-card > span { font-weight: 700; }
+.login-card h1 { font-size: 29px; }
+.login-card label { margin-bottom: 20px; }
+.login-card input { min-height: 46px; }
+.login-card button { min-height: 46px; }
+@media (max-width: 780px) {
+  .modal-backdrop { padding: 12px; }
+  .dialog-heading { padding: 18px; }
+  .config-layout { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
+  .profile-list { display: flex; min-height: 0; padding: 10px; gap: 8px; overflow-x: auto; overflow-y: hidden; }
+  .profile-list button { flex: 0 0 180px; margin: 0; }
+  .config-form { padding: 20px; }
+  .task-project-create, .task-project-history { grid-template-columns: minmax(0, 1fr); }
+  .task-project-history > button { grid-column: 1; }
+  .task-project-row { grid-template-columns: minmax(0, 1fr); grid-template-areas: "name" "cost" "summary" "actions"; }
+  .task-project-row > b { justify-self: start; }
+  .task-project-row > .task-project-actions { justify-content: flex-start; }
+  .task-project-model-row { grid-template-columns: minmax(0, 1fr); }
+  .task-project-model-row label { grid-column: 1; }
+  .fixed-content-manager-layout { height: auto; grid-template-columns: minmax(0, 1fr); overflow: auto; }
+  .fixed-content-template-list { max-height: 180px; }
+  .fixed-content-editor { overflow: visible; }
+  .cost-summary-grid, .cost-model-filters { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 480px) {
+  .task-project-intro, .task-project-history, .cost-section { margin-left: 16px; margin-right: 16px; }
+  .task-project-create, .task-project-list { padding-left: 16px; padding-right: 16px; }
+  .task-project-row, .fixed-content-editor, .cost-section { padding: 14px; }
+  .project-ratio-dialog, .login-card { padding: 24px; }
+}

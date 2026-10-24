@@ -81,7 +81,7 @@ export async function clearDiagnostics(profile) {
 export function diagnosticExportPayload(profile, serverPayload) {
   const sessionId = diagnosticSessionId();
   const adapter = String(profile?.adapter || "");
-  const clientEntries = readEntries().filter((entry) => entry.sessionId === sessionId && entry.adapter === adapter);
+  const clientEntries = readEntries().filter((entry) => entry.sessionId === sessionId && (entry.adapter === adapter || entry.scope === "workbench"));
   const serverEntries = Array.isArray(serverPayload?.entries) ? serverPayload.entries : [];
   const failures = [...clientEntries, ...serverEntries].filter((entry) => (
     /failed|exception|closed/.test(String(entry.stage || ""))
@@ -114,7 +114,7 @@ export function diagnosticExportPayload(profile, serverPayload) {
     },
     clientEntries,
     serverEntries,
-    guidance: `本文件只包含当前浏览器会话中 ${profile?.name || adapter}（接口类型 ${adapter}）的日志，不包含其他中转。日志不包含 API Key、密码、提示词正文或素材 URL。`,
+    guidance: `本文件只包含当前浏览器会话中 ${profile?.name || adapter}（接口类型 ${adapter}）的日志及本会话的工作台连接检查记录，不包含其他中转。日志不包含 API Key、密码、提示词正文或素材 URL。`,
   });
 }
 

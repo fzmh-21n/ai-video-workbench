@@ -39,6 +39,7 @@ export const LWAIGC_VIDEO_MODELS = [
   "gt-sd2.5-1000",
   "gt-sd2.5-301010",
   "dbb-sd2.5-v1",
+  "qi-sd2.5-v1",
   "mf-sd2.5-v2",
   "dbb-sd2.5-v2",
   "ld-sd2.5-v1",
@@ -77,7 +78,7 @@ export function lwaigcReferencePrompt(prompt, materials = []) {
       normalized = normalized.replace(assignment, reference);
       normalized = normalized.replace(new RegExp(escapedReference(alias), "gi"), reference);
     }
-    declarations.push(`${reference}是${name}`);
+    if (item.noAutoMention !== true) declarations.push(`${reference}是${name}`);
   }
   return declarations.length ? `${declarations.join("，")}。\n\n${normalized}` : normalized;
 }
@@ -173,7 +174,7 @@ export function lwaigcCapability(modelName) {
   if (model === "gt-sd2.5-301010") {
     return { ...common, images: 30, videos: 10, audios: 10, durations: [30], resolutions: ["720p"], _sdVersion: "sd25" };
   }
-  if (["dbb-sd2.5-v1", "mf-sd2.5-v2"].includes(model)) {
+  if (["dbb-sd2.5-v1", "mf-sd2.5-v2", "qi-sd2.5-v1"].includes(model)) {
     return { ...common, images: 30, videos: 10, audios: 10, durations: range(4, 30), resolutions: ["720p"], _sdVersion: "sd25" };
   }
   if (model === "dbb-sd2.5-v2") {
@@ -200,7 +201,19 @@ export function lwaigcCapability(modelName) {
   if (model === "grok-imagine-video-1.5-preview") {
     return { ...common, images: 1, videos: 0, audios: 0, durations: [6, 10, 15], resolutions: ["720p"] };
   }
-  return common;
+  if (LWAIGC_VIDEO_MODELS.includes(model)) return common;
+  return {
+    ...common,
+    images: 50,
+    videos: 50,
+    audios: 50,
+    durations: range(1, 30),
+    resolutions: ["720p"],
+    syncAudioFixed: true,
+    _sdVersion: /(?:seedance|sd)[-. ]?2[.-]?5|sd25/i.test(model) ? "sd25" : "sd20",
+    _preserveLimits: true,
+    _capabilityUnverified: true,
+  };
 }
 
 export function lwaigcVideoPayload(model, input, clientTaskId) {
@@ -243,9 +256,10 @@ export function lwaigcVideoPayload(model, input, clientTaskId) {
 }
 
 export function lwaigcLimitIssue(model, materials, duration) {
-  if (!LWAIGC_VIDEO_MODELS.includes(model)) return "请选择 LWAIGC 视频模型";
+  if (!String(model || "").trim()) return "请选择 LWAIGC 视频模型";
   const detected = lwaigcCapability(model);
-  const capability = detected._sdVersion === "sd25" || /(?:seedance|sd)[-.]?2[.-]?5|sd25/i.test(model)
+  if (detected._capabilityUnverified && (materials || []).length > 50) return "工作台单次参考素材最多 50 个";
+  const capability = detected._preserveLimits || detected._sdVersion === "sd25" || /(?:seedance|sd)[-.]?2[.-]?5|sd25/i.test(model)
     ? detected
     : { ...detected, images: 9, audios: 3, videos: 3 };
   const counts = (materials || []).reduce(

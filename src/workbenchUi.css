@@ -1,0 +1,170 @@
+:root {
+  font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  font-size: 18px;
+}
+
+:where(.workspace-shell, .modal-backdrop, .login-shell) button {
+  border: 1px solid #e3d6c2;
+  background: #fffdf9;
+}
+:where(button, input, select, textarea, summary):focus-visible { outline: 2px solid #d29a37; }
+.ui-app-nav .secondary-button { border-color: transparent; background: transparent; color: #8e7c66; }
+.ui-app-nav .secondary-button:hover { background: #fff8e9; }
+.ui-app-active { color: #8a5400; background: #fff0ce; }
+.ui-provider-row { border-top: 1px solid #ecdfcc; }
+.ui-log-actions .secondary-button { color: #8e7c66; background: transparent; }
+
+.workspace-shell {
+  padding: 16px clamp(48px, 6.25vw, 176px) 24px;
+  line-height: 1.5;
+}
+
+.topbar, .workspace-grid, .face-layout, .face-results { max-width: none; width: 100%; }
+.provider-switcher label span, .model-version-switch > span { font-size: 15px; }
+.model-version-switch button { font-size: 16px; }
+
+:where(.workspace-shell, .modal-backdrop, .login-shell) button {
+  min-height: 34px;
+  padding: 7px 11px;
+  border-radius: 8px;
+  font-size: 16px;
+  line-height: 1.4;
+  transition: border-color .15s, background-color .15s, box-shadow .15s;
+}
+:where(.workspace-shell, .modal-backdrop, .login-shell) button:disabled { opacity: .48; }
+:where(button, input, select, textarea, summary):focus-visible { outline-offset: 3px; }
+:where(.workspace-shell, .modal-backdrop, .login-shell) :where(input, select, textarea) {
+  border-radius: 8px;
+  font-size: 17px;
+}
+
+.primary-button {
+  border-radius: 8px !important;
+}
+.topbar { padding: 18px 22px; border-radius: 16px; }
+.brand { flex-shrink: 0; }
+.brand-mark { width: 40px; height: 40px; border-radius: 12px; font-size: 21px; }
+.brand h1 { font-size: 24px; letter-spacing: -.4px; }
+.brand p { font-size: 15px; }
+.video-topbar { display: block; padding: 0 22px; margin-bottom: 20px; }
+.ui-topbar-main { display: flex; align-items: center; flex-wrap: wrap; gap: 20px; padding: 20px 0; }
+.ui-app-nav { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; margin-left: 16px; }
+.ui-app-nav .secondary-button { padding: 9px 12px; }
+.ui-app-active { display: inline-flex; align-items: center; padding: 9px 14px; border-radius: 8px; font-size: 17px; font-weight: 700; }
+.ui-workspace-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-left: auto; min-width: 0; }
+.ui-workspace-actions .task-project-button { max-width: 250px; font-weight: 600; }
+.video-topbar .ui-provider-row { justify-content: flex-start; gap: 10px; padding: 12px 0; }
+.ui-provider-row label { min-width: 0; }
+.ui-provider-row select { min-width: 190px; max-width: 270px; min-height: 36px; padding-top: 6px; padding-bottom: 6px; }
+.connection-pill, .network-pill { max-width: 280px; overflow: hidden; text-overflow: ellipsis; border-radius: 6px; padding: 6px 9px; font-size: 15px; }
+.ui-log-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
+.ui-log-actions .secondary-button { font-size: 15px; }
+
+.workspace-grid { gap: 16px; }
+.video-workspace { grid-template-columns: minmax(0, 1fr) minmax(440px, 28%); align-items: start; }
+.panel { min-width: 0; border-radius: 14px; }
+.panel-heading { min-height: 62px; padding: 16px 20px; }
+.panel-heading h2 { font-size: 20px; font-weight: 700; }
+.panel-body { padding: 20px; }
+.idle-pill { padding: 4px 8px; font-size: 14px; letter-spacing: .05em; }
+.work-mode-switch { padding: 10px 20px; gap: 5px; }
+.work-mode-switch button { flex: 0 1 160px; }
+.project-bar { gap: 12px; padding: 15px; }
+.project-bar strong { font-size: 17px; overflow-wrap: anywhere; }
+.project-bar span { font-size: 15px; }
+.project-bar > div:last-of-type { flex-wrap: wrap; flex-shrink: 1; justify-content: flex-end; }
+.project-bar button { white-space: nowrap; }
+.fixed-content-controls { margin: 0 0 14px; }
+.field-label { font-size: 17px; font-weight: 600; }
+.field-label span { font-size: 15px; font-weight: 400; }
+.fixed-content-controls .fixed-content { min-height: 84px; max-height: 240px; font-size: 16px; }
+.fixed-content-count { font-size: 15px; margin-bottom: 0; }
+.settings-grid { gap: 12px; }
+.settings-grid label span { font-size: 15px; }
+.check-row { font-size: 16px; }
+.notice { padding: 11px 13px; overflow-wrap: anywhere; line-height: 1.6; }
+.reference-toolbar { flex-wrap: wrap; }
+.submit-row { padding-top: 6px; flex-wrap: wrap; }
+.text-layout { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.task-panel .panel-heading > span { padding: 3px 9px; border-radius: 20px; font-size: 15px; }
+.task-controls { grid-template-columns: minmax(0, .8fr) minmax(0, 1.2fr); padding: 14px; gap: 9px; }
+.task-controls > input { grid-column: 1 / -1; }
+.task-controls input, .task-controls select { min-height: 36px; font-size: 16px; }
+.task-backup-buttons { justify-content: flex-start; gap: 6px; }
+.task-backup-buttons button { padding: 6px 9px; font-size: 15px; }
+.task-project-bulk-bar { grid-template-columns: auto minmax(0, 1fr); gap: 8px; padding: 12px 14px; font-size: 15px; }
+.task-project-bulk-bar > span { justify-self: end; }
+.task-project-bulk-bar > select { min-width: 0; min-height: 34px; font-size: 16px; }
+.task-project-bulk-bar > button { min-width: 0; }
+.task-list { padding: 14px; }
+.task-card, .batch-task-group { margin-bottom: 12px; border-radius: 10px; }
+.task-card { padding: 14px; }
+.batch-task-group-head { padding: 14px 14px 10px; gap: 10px; flex-wrap: wrap; }
+.batch-task-group-summary { flex: 1 1 200px; }
+.batch-task-group-head strong { white-space: normal; overflow-wrap: anywhere; font-size: 17px; line-height: 1.6; }
+.batch-task-group-head span { font-size: 15px; line-height: 1.8; }
+.batch-task-actions { margin-left: auto; flex-wrap: wrap; gap: 6px; }
+.batch-task-actions button { padding: 5px 9px; min-height: 29px; font-size: 15px; }
+.batch-group-progress { padding: 0 14px 10px; }
+.progress-row { gap: 8px; margin: 8px 0; }
+.progress-track { height: 5px; }
+.progress-row b { font-size: 14px; }
+.task-time-row { gap: 3px 12px; font-size: 15px; line-height: 1.7; }
+.batch-task-time-row { margin-top: 0; padding: 0 14px 12px; }
+.batch-task-children { padding: 9px; }
+.task-topline { flex-wrap: wrap; }
+.task-topline code { font-family: inherit; font-size: 16px; }
+.task-title-with-select { flex: 1 1 160px; }
+.task-topline > div { min-width: 0; flex-wrap: wrap; }
+.task-status { border-radius: 6px; padding: 4px 7px; font-size: 15px; }
+.task-download-badge { padding: 3px 7px; font-size: 14px; }
+.task-project-assignment select { min-width: 0; }
+.empty-tasks { min-height: 300px; }
+.empty-tasks > span { border-radius: 20px; }
+.pagination { font-size: 15px; }
+
+@media (min-width: 1800px) {
+  .video-workspace { grid-template-columns: minmax(0, 1fr) minmax(480px, 28%); }
+}
+@media (max-width: 1400px) {
+  .workspace-shell { padding: 18px; }
+  .ui-topbar-main { gap: 12px; }
+  .ui-app-nav { margin-left: auto; }
+  .ui-workspace-actions { flex-basis: 100%; justify-content: flex-end; }
+}
+@media (max-width: 1100px) {
+  .video-workspace, .text-layout { grid-template-columns: minmax(0, 1fr); }
+  .video-topbar .ui-provider-row { flex-wrap: wrap; }
+  .ui-log-actions { margin-left: 0; }
+  .task-controls { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+}
+@media (max-width: 780px) {
+  .workspace-shell { padding: 12px; }
+  .video-topbar { padding: 0 15px; }
+  .ui-topbar-main { padding: 16px 0; gap: 14px; }
+  .brand h1 { font-size: 20px; }
+  .ui-app-nav { margin-left: 0; flex-basis: 100%; }
+  .ui-workspace-actions { justify-content: flex-start; }
+  .video-topbar .model-version-switch { width: auto; grid-template-columns: auto auto auto; }
+  .ui-provider-row label { flex: 1 1 230px; }
+  .ui-provider-row select { min-width: 0; max-width: 100%; }
+  .project-bar > div:last-of-type { justify-content: flex-start; }
+  .project-bar button { flex: 0 1 auto; }
+  .panel-heading { padding: 14px 16px; }
+  .panel-body { padding: 16px; }
+}
+@media (max-width: 520px) {
+  .workspace-shell { padding: 8px; }
+  .brand p { max-width: 250px; }
+  .ui-workspace-actions .task-project-button { max-width: 100%; }
+  .task-topline { flex-direction: row; }
+  .task-topline > div { flex-basis: 100%; }
+  .batch-task-group-head { flex-direction: row; }
+  .batch-task-actions { width: auto; }
+  .task-title-with-select { flex-basis: auto; }
+  .settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :where(.workspace-shell, .modal-backdrop, .login-shell) button { transition: none; }
+}

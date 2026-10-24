@@ -81,6 +81,30 @@ function withoutParenthesizedDescription(value) {
   return String(value).replace(/\s*[（(][\s\S]*[）)]\s*$/, "").trim();
 }
 
+function imageNameEntries(content, assets) {
+  // 只扫描三段式图片名；以项目中的完整名字确定跨度，不要求前后有分隔符。
+  const text = String(content).replace(/[０-９＿]/g, (character) => character === "＿" ? "_" : String.fromCharCode(character.charCodeAt(0) - 0xfee0));
+  const candidates = [...new Set(assets.filter((asset) => asset.kind === "image")
+    .flatMap((asset) => [assetFileName(asset), fileStem(assetFileName(asset))])
+    .filter((name) => /^(?:角色图|场景图)_\d{3}_.+/.test(name)))].sort((a, b) => b.length - a.length);
+  const entries = [];
+  for (const token of text.matchAll(/(?:角色图|场景图)_\d{3}_/g)) {
+    const start = token.index;
+    if (entries.some((entry) => start < entry.start + entry.source.length)) continue;
+    const tail = text.slice(start);
+    const nextName = tail.slice(token[0].length).search(/(?:角色图|场景图)_\d{3}_/);
+    const segment = nextName < 0 ? tail : tail.slice(0, token[0].length + nextName);
+    const filename = segment.match(/^[^@\r\n、，,；;。．!！?？【】=→⇒]+?\.(?:png|jpe?g|webp)/i)?.[0];
+    const name = filename || candidates.find((candidate) => tail.startsWith(candidate))
+      || segment.match(/^[^@\r\n、，,；;。．!！?？【】=→⇒（）()：:]+/)?.[0]?.trim();
+    if (!name || name.length <= token[0].length || /^\s*=/.test(tail.slice(name.length))) continue;
+    const declaration = text.slice(0, start).match(/@[^@\s=、，,；;。．!！?？【】→⇒]+\s*=\s*$/);
+    const sourceStart = declaration ? start - declaration[0].length : text[start - 1] === "@" ? start - 1 : start;
+    entries.push({ start: sourceStart, source: content.slice(sourceStart, start + name.length), requested: name });
+  }
+  return entries;
+}
+
 function requestedNames(content, role) {
   const meaningfulLines = content
     .split(/\r?\n/)
@@ -114,24 +138,7 @@ function requestedNames(content, role) {
       }),
     );
   }
-  if (role === "people") {
-    return uniqueEntries(
-      meaningfulLines.flatMap((line) =>
-        splitOutsideParentheses(line).map((part) =>
-          cleanRequestedName(part.split(/[：:]/, 1)[0]),
-        ),
-      ),
-    );
-  }
-
-  // 背景模块的每一行都可能是独立场景；每个词条必须与文件名精准匹配。
-  return uniqueEntries(
-    meaningfulLines.flatMap((line) =>
-      splitOutsideParentheses(line).map((part) =>
-        cleanRequestedName(part),
-      ),
-    ),
-  );
+  return [];
 }
 
 function assetFileName(asset) {
@@ -179,6 +186,14 @@ function inlineVoiceReferences(prompt, assets, claimedAssetKeys) {
 }
 
 function annotateContent(content, matches, role) {
+  if (role !== "voice") {
+    let next = content;
+    for (const match of [...matches].sort((a, b) => b.start - a.start)) {
+      const visible = `@${fileStem(assetFileName(match.asset))}=${match.requested}`;
+      next = `${next.slice(0, match.start)}${visible}${next.slice(match.start + match.source.length)}`;
+    }
+    return next;
+  }
   let next = content;
   const ordered = [...matches].sort((a, b) => b.requested.length - a.requested.length);
   for (const match of ordered) {
@@ -187,33 +202,8 @@ function annotateContent(content, matches, role) {
     let suffix = match.source.startsWith(match.requested)
       ? match.source.slice(match.requested.length)
       : "";
-    if (role === "background") suffix = "，";
-    if (role === "people") {
-      const index = next.indexOf(match.source);
-      const following = index < 0 ? "" : next.slice(index + match.source.length);
-      if (!/[，,、；;。.!！?？]\s*$/.test(suffix) && !/^[，,、；;]/.test(following)) suffix += "，";
-    }
     const existingIndex = next.indexOf(visible);
     if (existingIndex >= 0) {
-      if (role === "people") {
-        const lineEnd = next.indexOf("\n", existingIndex);
-        const end = lineEnd < 0 ? next.length : lineEnd;
-        const line = next.slice(existingIndex, end).replace(/[，,]+\s*$/, "");
-        next = `${next.slice(0, existingIndex)}${line}，${next.slice(end)}`;
-      }
-      if (role === "background") {
-        const afterVisible = existingIndex + visible.length;
-        const trailingDescription = next.slice(afterVisible).match(/^\s*[（(][^\r\n）)]*[）)]/);
-        if (trailingDescription) {
-          next = `${next.slice(0, afterVisible)}${next.slice(afterVisible + trailingDescription[0].length)}`;
-        }
-        const currentAfterVisible = next.slice(afterVisible);
-        if (!/^[，,]/.test(currentAfterVisible)) {
-          next = `${next.slice(0, afterVisible)}，${next.slice(afterVisible)}`;
-        } else if (currentAfterVisible.startsWith(",")) {
-          next = `${next.slice(0, afterVisible)}，${next.slice(afterVisible + 1)}`;
-        }
-      }
       continue;
     }
     const index = next.indexOf(match.source);
@@ -223,13 +213,13 @@ function annotateContent(content, matches, role) {
   return next;
 }
 
-export function planProjectReferences(prompt, assets) {
+export function planProjectReferences(prompt, assets, includeOutsideImages = true) {
   const matches = [];
   const missing = [];
   for (const rule of SECTION_RULES) {
     const range = sectionRange(prompt, rule.heading);
     if (!range) continue;
-    const names = requestedNames(range.content, rule.role);
+    const names = rule.kind === "image" ? imageNameEntries(range.content, assets) : requestedNames(range.content, rule.role);
     for (const entry of names) {
       let requested = entry.requested;
       let asset = bestAsset(requested, rule.kind, assets);
@@ -241,7 +231,7 @@ export function planProjectReferences(prompt, assets) {
         }
       }
       if (asset) matches.push({ ...rule, ...entry, requested, asset });
-      else if (requested && (rule.role !== "background" || /^(?:\d{3}[_-]|场景图[_-]\d+)/.test(requested) || /\.(?:png|jpe?g|webp)$/i.test(requested))) {
+      else if (requested) {
         missing.push({ ...rule, ...entry, requested });
       }
     }
@@ -264,6 +254,20 @@ export function planProjectReferences(prompt, assets) {
     .map((rule) => ({ rule, range: sectionRange(annotatedPrompt, rule.heading) }))
     .filter((item) => item.range)
     .sort((a, b) => b.range.contentStart - a.range.contentStart);
+  const outsideMatches = [];
+  if (includeOutsideImages) {
+    const outsideText = ranges.filter(({ rule }) => rule.kind === "image").reduce(
+      (text, { range }) => `${text.slice(0, range.contentStart)}${" ".repeat(range.end - range.contentStart)}${text.slice(range.end)}`,
+      String(prompt),
+    );
+    const claimedImages = new Set(matches.filter((match) => match.kind === "image").map((match) => match.asset.key));
+    for (const entry of imageNameEntries(outsideText, assets)) {
+      const asset = bestAsset(entry.requested, "image", assets);
+      if (!asset || claimedImages.has(asset.key)) continue;
+      claimedImages.add(asset.key);
+      outsideMatches.push({ ...entry, kind: "image", role: "outside", heading: "__outside_image__", noAutoMention: true, asset });
+    }
+  }
   for (const { rule, range } of ranges) {
     const sectionMatches = matches.filter((match) => match.heading === rule.heading);
     const content = annotateContent(range.content, sectionMatches, rule.role);
@@ -277,14 +281,19 @@ export function planProjectReferences(prompt, assets) {
     const alias = fileStem(assetFileName(voice.asset));
     annotatedPrompt = annotatedPrompt.replace(voice.token, `（@${alias}=${voice.requested}）`);
   }
-  return { annotatedPrompt, matches, missing };
+  return { annotatedPrompt, matches, missing, outsideMatches };
 }
 
 export function imageReferenceIssues(prompt, assets, references) {
-  const plan = planProjectReferences(prompt, assets || []);
+  prompt = internalizeProjectAliases(prompt, references || []);
   const attached = (references || []).filter((reference) => reference.kind === "image" || (!reference.kind && reference.projectAssetKey?.startsWith("image:")));
-  const hasAttachedName = (requested) => attached.some((reference) =>
-    cleanMatchValue(reference.name) === requested || fileStem(reference.name) === requested);
+  const validationAssets = [...(assets || []), ...attached.filter((reference) => !(assets || []).some((asset) => asset.kind === "image" && assetFileName(asset) === cleanMatchValue(reference.name)))
+    .map((reference) => ({ kind: "image", name: reference.name, key: reference.projectAssetKey }))];
+  const plan = planProjectReferences(prompt, validationAssets, false);
+  const hasAttachedName = (requested) => {
+    const name = withoutParenthesizedDescription(cleanMatchValue(requested));
+    return attached.some((reference) => cleanMatchValue(reference.name) === name || fileStem(reference.name) === name);
+  };
   const issues = plan.missing
     .filter((item) => item.kind === "image" && !hasAttachedName(item.requested))
     .map((item) => item.requested);
@@ -293,9 +302,15 @@ export function imageReferenceIssues(prompt, assets, references) {
       issues.push(assetFileName(match.asset));
     }
   }
-  for (const token of String(prompt).matchAll(/(?:角色图|场景图|\d{3})[_＿-][^\s、，,；;。．!！?？【】=]+?\.(?:png|jpe?g|webp)/giu)) {
+  // 有人物/场景模块时，文件名只按模块校验；其他正文提及的道具或旧衣态不是必传图片。
+  // 没有这些模块的旧提示词仍保留全文文件名兜底，原生 @Image 编号始终校验全文。
+  const filenameFallback = SECTION_RULES.some((rule) => rule.kind === "image" && sectionRange(prompt, rule.heading)) ? "" : prompt;
+  for (const token of String(filenameFallback).matchAll(/(?:角色图|场景图)[_＿][0-9０-９]{3}[_＿][^\s、，,；;。．!！?？【】=]+?\.(?:png|jpe?g|webp)/giu)) {
     const requested = cleanMatchValue(token[0]);
     if (!hasAttachedName(requested)) issues.push(requested);
+  }
+  for (const token of String(prompt).matchAll(/@(?:Image|图片|图)(\d+)([^\s=、，,；;。．!！?？【】→⇒]*)/gi)) {
+    if (token[2] || !attached.some((reference) => reference.tag?.match(/^@(?:Image|图片|图)([1-9]\d*)$/i)?.[1] === token[1])) issues.push(token[0]);
   }
   return [...new Set(issues)];
 }
@@ -304,6 +319,7 @@ export function planProjectAudioReferences(prompt, assets) {
   const plan = planProjectReferences(
     prompt,
     (assets || []).filter((asset) => asset.kind === "audio"),
+    false,
   );
   return {
     annotatedPrompt: plan.annotatedPrompt,
@@ -316,6 +332,37 @@ function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+export function normalizeImageReferenceBindings(prompt, references) {
+  const images = new Map();
+  for (const reference of references || []) {
+    if (reference.kind !== "image" || !/\.(?:png|jpe?g|webp)$/i.test(reference.name || "")) continue;
+    const number = String(reference.tag || "").match(/^@(?:Image|图片|图)([1-9]\d*)$/i)?.[1];
+    if (number) images.set(number, reference.name);
+  }
+  const replacements = new Map();
+  const isNamedAlias = (declaration, name) => (references || []).some((reference) =>
+    reference.kind === "image" && reference.alias === declaration.match(/^@([^\s=]+)/)?.[1] && reference.name === name);
+  const binding = /(@(?:Image|图片|图)(\d+)\s*=\s*)([^@\r\n、，,；;【】=→⇒]+?\.(?:png|jpe?g|webp))(?=$|[\s（(）)、，,；;。．!！?？【】→⇒])/gi;
+  const next = String(prompt).replace(
+    binding,
+    (token, declaration, number, oldName) => {
+      const name = images.get(number);
+      if (!name || isNamedAlias(declaration, oldName)) return token;
+      if (!replacements.has(oldName)) replacements.set(oldName, new Set());
+      replacements.get(oldName).add(name);
+      return `${declaration}${name}`;
+    },
+  );
+  // 仅同步由明确编号建立的精确文件名映射；冲突映射留给缺图检查，不猜人物变体。
+  const names = [...replacements].filter(([oldName, actual]) => actual.size === 1 && !actual.has(oldName));
+  if (!names.length) return next;
+  const mapping = new Map(names.map(([oldName, actual]) => [oldName, [...actual][0]]));
+  const filenames = names.map(([name]) => escapeRegExp(name)).sort((a, b) => b.length - a.length).join("|");
+  const pattern = new RegExp(`${binding.source}|(?:(?<![\\p{L}\\p{N}_./-])|(?<=只使用))(?:${filenames})(?=$|[\\s（(）)、，,；;。．!！?？【】→⇒])`, "giu");
+  return String(prompt).replace(pattern, (token, declaration, number, oldName) =>
+    declaration ? (images.has(number) && !isNamedAlias(declaration, oldName) ? `${declaration}${images.get(number)}` : token) : (mapping.get(token) || token));
+}
+
 export function internalizeProjectAliases(prompt, references) {
   let next = prompt;
   const ranges = SECTION_RULES
@@ -324,12 +371,18 @@ export function internalizeProjectAliases(prompt, references) {
     .sort((a, b) => b.range.contentStart - a.range.contentStart);
 
   for (const { rule, range } of ranges) {
-    let content = range.content;
-    for (const reference of references.filter((item) => item.kind === rule.kind && item.alias)) {
-      const alias = escapeRegExp(reference.alias);
-      content = content.replace(new RegExp(`@${alias}(?==|\\s|$)`, "g"), reference.tag);
-    }
+    const aliases = new Map(references.filter((item) => item.kind === rule.kind && item.alias).map((reference) => [reference.alias, reference]));
+    if (!aliases.size) continue;
+    const pattern = new RegExp(`@(${[...aliases.keys()].sort((a, b) => b.length - a.length).map(escapeRegExp).join("|")})(?==|\\s|$)`, "g");
+    const content = range.content.replace(pattern, (token, alias, offset, text) => {
+      const reference = aliases.get(alias);
+      if (/^(?:Image|Audio|Video|图片|图|音频|声音|视频)\d+$/i.test(alias)) {
+        const filename = reference.name || "";
+        if (!filename || !new RegExp(`^\\s*=\\s*${escapeRegExp(filename)}(?=$|[\\s（(）)、，,；;。．!！?？【】→⇒])`).test(text.slice(offset + token.length))) return token;
+      }
+      return reference.tag;
+    });
     next = `${next.slice(0, range.contentStart)}${content}${next.slice(range.end)}`;
   }
-  return next;
+  return normalizeImageReferenceBindings(next, references);
 }

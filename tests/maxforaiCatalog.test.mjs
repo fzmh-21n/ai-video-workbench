@@ -184,6 +184,36 @@ test("tries YB-sd-2.5满血 through the existing MaxForAI SD2.5 request schema",
   assert.equal(modelForSdVersion({ adapter: "maxforai", model }, "sd25", MAXFORAI_VIDEO_MODELS), model);
 });
 
+test("keeps KL-2.5满参 as an offline fallback without injecting it into an explicit live list", () => {
+  const model = "KL-2.5满参";
+  assert.ok(MAXFORAI_VIDEO_MODELS.includes(model));
+  assert.ok(FALLBACK_MODELS.maxforai.includes(model));
+  assert.ok(maxforaiModels().includes(model));
+  assert.deepEqual(maxforaiModels([]), []);
+  assert.equal(maxforaiModels([model, model]).filter(value => value === model).length, 1);
+  assert.match(FALLBACK_MODEL_LABELS.maxforai[model], /试接入.*待中转验证/);
+  assert.equal(modelForSdVersion({ adapter: "maxforai", model }, "sd25", MAXFORAI_VIDEO_MODELS), model);
+});
+
+test("KL-2.5满参 reuses the YB SD2.5 schema and provisional capability, changing only the model name", () => {
+  const model = "KL-2.5满参";
+  const input = {
+    prompt: "参考 @image1、@video1、@audio1", duration: 30, aspectRatio: "9:16", resolution: "720p",
+    materials: [
+      { kind: "image", url: "https://maxforai.top/v1/assets/image-1?expires=123&signature=keep" },
+      { kind: "video", url: "https://maxforai.top/v1/assets/video-1?expires=123&signature=keep" },
+      { kind: "audio", url: "https://maxforai.top/v1/assets/audio-1?expires=123&signature=keep" },
+    ],
+  };
+  assert.deepEqual(maxforaiVideoPayload(model, input), {
+    ...maxforaiVideoPayload("YB-sd-2.5满血", input), model,
+  });
+  assert.deepEqual(capabilityFor({ adapter: "maxforai", model }), capabilityFor({ adapter: "maxforai", model: "YB-sd-2.5满血" }));
+  assert.deepEqual(maxforaiVideoPayload(model, { ...input, duration: 4, materials: [] }), {
+    model, prompt: input.prompt, duration: 4, ratio: "9:16", resolution: "720p",
+  });
+});
+
 test("top model switch selects the documented MaxForAI SD2.5 route", () => {
   const profile = DEFAULT_PROFILES.find((item) => item.id === "maxforai");
   assert.equal(modelForSdVersion(profile, "sd25", MAXFORAI_VIDEO_MODELS), "mg-seedance-2.5");

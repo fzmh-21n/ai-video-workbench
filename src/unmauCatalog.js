@@ -2,6 +2,7 @@ export const UNMAU_BASE_URL = "https://newapis.unmau.com";
 export const UNMAU_FALLBACK_MODELS = ["ad-seedance-2.0-720p", "ad-seedance-2.5-720p"];
 
 function rowsFrom(body) {
+  if (Array.isArray(body)) return body;
   if (Array.isArray(body?.data)) return body.data;
   if (Array.isArray(body?.models)) return body.models;
   return [];
@@ -13,7 +14,9 @@ function modelId(row) {
 
 function isVideoModel(row) {
   const types = Array.isArray(row?.supported_endpoint_types) ? row.supported_endpoint_types : [];
-  return types.includes("openai-video");
+  if (types.length) return types.some((type) => /video/i.test(String(type)));
+  const type = String(row?.type || "").toLowerCase();
+  return !type || type === "model" || /video/.test(type);
 }
 
 function integerRange(minimum, maximum, values) {
@@ -69,21 +72,23 @@ function capabilityLabel(row, capability) {
 
 export function unmauCatalog(pricingBody, authorizedBody) {
   const authorizedRows = rowsFrom(authorizedBody);
-  const authorizedIds = new Set(authorizedRows.map(modelId).filter(Boolean));
-  const pricingRows = rowsFrom(pricingBody).filter(isVideoModel);
-  const rows = authorizedIds.size
-    ? pricingRows.filter((row) => authorizedIds.has(modelId(row)))
-    : pricingRows;
+  const hasAuthorizedList = Array.isArray(authorizedBody) || Array.isArray(authorizedBody?.data) || Array.isArray(authorizedBody?.models);
+  const pricingRows = rowsFrom(pricingBody);
+  const prices = new Map(pricingRows.map((row) => [modelId(row), row]));
+  const rows = hasAuthorizedList
+    ? authorizedRows.map((row) => ({ ...prices.get(modelId(row)), ...(typeof row === "string" ? { id: row } : row) })).filter(isVideoModel)
+    : pricingRows.filter(isVideoModel);
   const models = [];
   const capabilities = {};
   const labels = {};
   for (const row of rows) {
     const id = modelId(row);
     if (!id || capabilities[id]) continue;
-    const capability = capabilityFrom(row);
+    const hasLiveCapability = Boolean(row.video_capabilities || row.playground_config);
+    const capability = hasLiveCapability ? capabilityFrom(row) : { ...unmauCapability(id), _capabilityUnverified: true };
     models.push(id);
     capabilities[id] = capability;
-    labels[id] = capabilityLabel(row, capability);
+    labels[id] = hasLiveCapability ? capabilityLabel(row, capability) : `${id} · 参数能力待上游确认`;
   }
   return { models, capabilities, labels };
 }

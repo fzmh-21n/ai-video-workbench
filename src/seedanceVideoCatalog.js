@@ -1,4 +1,18 @@
 export const SEEDANCE_VIDEO_BASE_URL = "https://772808.xyz";
+export const PANDA626_BASE_URL = "https://panda626.com";
+
+export function seedanceVideoBaseUrl(value) {
+  try {
+    if (["panda626.com", "www.panda626.com"].includes(new URL(value).hostname.toLowerCase())) return PANDA626_BASE_URL;
+  } catch {}
+  return SEEDANCE_VIDEO_BASE_URL;
+}
+
+export function seedanceVideoRetryDelay(value, fallback = 3000) {
+  const raw = String(value || "").trim();
+  const delay = /^\d+(?:\.\d+)?$/.test(raw) ? Number(raw) * 1000 : Date.parse(raw) - Date.now();
+  return delay > 0 ? Math.max(1000, delay) : fallback;
+}
 
 const RATIOS = ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"];
 

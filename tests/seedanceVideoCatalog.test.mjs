@@ -5,6 +5,7 @@ import {
   SEEDANCE_VIDEO_BASE_URL,
   seedanceVideoModels,
   seedanceVideoPayload,
+  seedanceVideoRetryDelay,
 } from "../src/seedanceVideoCatalog.js";
 import {
   DEFAULT_PROFILES,
@@ -13,7 +14,7 @@ import {
   migrateSavedProfile,
 } from "../src/providerCatalog.js";
 import { directTaskContentPaths } from "../src/taskContent.js";
-import { mediaUploadMode } from "../src/uploadPolicy.js";
+import { mediaUploadMode, requiresProviderAssetUpload } from "../src/uploadPolicy.js";
 
 test("adds the documented Seedance video provider without guessing a model", () => {
   const profile = DEFAULT_PROFILES.find((item) => item.id === "seedancevideo");
@@ -90,4 +91,27 @@ test("uses provider image upload only for images and its public content route", 
   assert.equal(mediaUploadMode(config, "audio/wav"), "temporary");
   assert.equal(mediaUploadMode(config, "video/mp4"), "temporary");
   assert.deepEqual(directTaskContentPaths("seedancevideo", "task/id"), ["/v1/videos/task%2Fid/content"]);
+});
+
+test("uses Panda626's native image upload without sending audio or video to its image-only route", () => {
+  const config = { adapter: "seedancevideo", mediaUploadUrl: "https://panda626.com/v1/uploads/images" };
+  assert.equal(requiresProviderAssetUpload(config.adapter), true);
+  assert.equal(mediaUploadMode(config, "image/webp"), "configured");
+  assert.equal(mediaUploadMode(config, "audio/wav"), "temporary");
+  assert.equal(mediaUploadMode(config, "video/mp4"), "temporary");
+});
+
+test("preserves Retry-After seconds and dates without shortening the provider wait", () => {
+  assert.equal(seedanceVideoRetryDelay("90"), 90_000);
+  assert.equal(seedanceVideoRetryDelay("0.5"), 1000);
+  assert.equal(seedanceVideoRetryDelay(""), 3000);
+  assert.equal(seedanceVideoRetryDelay("invalid", 15000), 15000);
+  assert.equal(seedanceVideoRetryDelay("0", 20000), 20000);
+  const originalNow = Date.now;
+  try {
+    Date.now = () => Date.parse("2026-10-09T00:00:00Z");
+    assert.equal(seedanceVideoRetryDelay("Fri, 09 Oct 2026 00:01:30 GMT"), 90_000);
+  } finally {
+    Date.now = originalNow;
+  }
 });

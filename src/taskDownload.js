@@ -5,9 +5,9 @@ function numeric(value, fallback = Number.MAX_SAFE_INTEGER) {
 
 function chapterNumber(task) {
   const source = String(task?.batchTitle || task?.sourceName || "");
-  const arabic = source.match(/(?:第\s*)?(\d+)\s*章/i) || source.match(/^\s*(\d+)\s*[_-]/);
+  const arabic = source.match(/(?:第\s*)?(\d+)\s*[章集]/i) || source.match(/^\s*(\d+)\s*[_-]/);
   if (arabic) return Number(arabic[1]);
-  const chinese = source.match(/第\s*([零〇一二两三四五六七八九十百]+)\s*章/);
+  const chinese = source.match(/第\s*([零〇一二两三四五六七八九十百]+)\s*[章集]/);
   if (!chinese) return Number.MAX_SAFE_INTEGER;
   const digits = { 零: 0, 〇: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
   let total = 0;
@@ -28,7 +28,7 @@ function chapterNumber(task) {
 
 function sectionNumber(task) {
   const direct = Number(task?.batchSection);
-  if (Number.isFinite(direct)) return direct;
+  if (Number.isInteger(direct) && direct > 0) return direct;
   const match = String(task?.title || "").match(/^第\s*(\d+)\s*节/);
   return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
 }
@@ -36,7 +36,7 @@ function sectionNumber(task) {
 export function orderedDownloadTasks(tasks) {
   return [...(tasks || [])].sort((left, right) => (
     chapterNumber(left) - chapterNumber(right)
-    || numeric(left?.batchSection) - numeric(right?.batchSection)
+    || sectionNumber(left) - sectionNumber(right)
     || numeric(left?.batchOrder) - numeric(right?.batchOrder)
     || numeric(left?.submissionSequence) - numeric(right?.submissionSequence)
     || numeric(left?.createdAtMs) - numeric(right?.createdAtMs)
@@ -73,11 +73,21 @@ function referenceSignature(references) {
     .join("|");
 }
 
-export function batchItemTasks(item, storedTasks) {
-  const byId = new Map((storedTasks || []).map((task) => [task.id, task]));
-  const requestedTaskIds = (item?.taskIds || []).filter(Boolean);
+export function createBatchTaskLookup(storedTasks = []) {
+  const byId = new Map();
+  const bySection = new Map();
   const batchTitleCounts = new Map();
+  const metadata = new Map();
   for (const task of storedTasks || []) {
+    byId.set(task.id, task);
+    const section = numeric(task?.batchSection);
+    if (!bySection.has(section)) bySection.set(section, []);
+    bySection.get(section).push(task);
+    metadata.set(task, {
+      prompt: normalizedSourcePrompt(task?.prompt),
+      snapshotPrompt: normalizedSourcePrompt(task?.reuseSnapshot?.prompt),
+      references: referenceSignature(task?.reuseSnapshot?.references),
+    });
     const batchId = String(task?.batchId || "");
     const batchTitle = normalizedBatchTitle(task?.batchTitle);
     if (!batchId || !batchTitle || batchId.startsWith("batch-recovered-")) continue;
@@ -85,6 +95,13 @@ export function batchItemTasks(item, storedTasks) {
     const counts = batchTitleCounts.get(batchId);
     counts.set(batchTitle, (counts.get(batchTitle) || 0) + 1);
   }
+  return { byId, bySection, batchTitleCounts, metadata };
+}
+
+export function batchItemTasks(item, storedTasks) {
+  const lookup = Array.isArray(storedTasks) || !storedTasks ? createBatchTaskLookup(storedTasks) : storedTasks;
+  const { byId, bySection, batchTitleCounts, metadata } = lookup;
+  const requestedTaskIds = (item?.taskIds || []).filter(Boolean);
   const batchIdentityMatches = (task) => {
     const counts = batchTitleCounts.get(String(task?.batchId || ""));
     if (!counts || counts.size < 2) return true;
@@ -100,13 +117,12 @@ export function batchItemTasks(item, storedTasks) {
   const itemPrompt = normalizedSourcePrompt(item?.prompt);
   const itemReferences = referenceSignature(item?.references);
   const taskReferencesMatch = (task) => {
-    const taskReferences = referenceSignature(task?.reuseSnapshot?.references);
+    const taskReferences = metadata.get(task).references;
     return !itemReferences || !taskReferences || taskReferences === itemReferences;
   };
   const taskPromptMatches = (task) => {
     if (!itemPrompt) return false;
-    const snapshotPrompt = normalizedSourcePrompt(task?.reuseSnapshot?.prompt);
-    const submittedPrompt = normalizedSourcePrompt(task?.prompt);
+    const { snapshotPrompt, prompt: submittedPrompt } = metadata.get(task);
     return snapshotPrompt ? snapshotPrompt === itemPrompt : Boolean(submittedPrompt && submittedPrompt.endsWith(itemPrompt));
   };
   const formalTracked = rawTracked.filter((task) => (
@@ -117,9 +133,9 @@ export function batchItemTasks(item, storedTasks) {
   if (formalTracked.length) {
     return formalTracked.sort((left, right) => numeric(right?.createdAtMs, 0) - numeric(left?.createdAtMs, 0));
   }
-  const promptMatches = (storedTasks || []).filter((task) => (
-    numeric(task?.batchSection) === section
-    && (!projectName || String(task?.projectName || "") === projectName)
+  const sectionTasks = bySection.get(section) || [];
+  const promptMatches = sectionTasks.filter((task) => (
+    (!projectName || String(task?.projectName || "") === projectName)
     && taskPromptMatches(task)
     && taskReferencesMatch(task)
   ));
@@ -129,8 +145,7 @@ export function batchItemTasks(item, storedTasks) {
       .sort((left, right) => numeric(right?.createdAtMs, 0) - numeric(left?.createdAtMs, 0));
   }
   const matchesItem = (task) => {
-    const snapshotPrompt = normalizedSourcePrompt(task?.reuseSnapshot?.prompt);
-    const submittedPrompt = normalizedSourcePrompt(task?.prompt);
+    const { snapshotPrompt, prompt: submittedPrompt } = metadata.get(task);
     const sourcePromptMatches = !itemPrompt
       || (snapshotPrompt ? snapshotPrompt === itemPrompt : !submittedPrompt || submittedPrompt.endsWith(itemPrompt));
     return numeric(task?.batchSection) === section
@@ -144,7 +159,7 @@ export function batchItemTasks(item, storedTasks) {
   if (rawTracked.some((task) => !String(task?.batchId || "").startsWith("batch-recovered-"))) {
     return tracked.sort((left, right) => numeric(right?.createdAtMs, 0) - numeric(left?.createdAtMs, 0));
   }
-  const matching = (storedTasks || []).filter((task) => (
+  const matching = sectionTasks.filter((task) => (
     matchesItem(task)
   ));
   const unique = [...new Map(matching
@@ -182,8 +197,9 @@ export function batchItemDownloadCandidates(item, storedTasks) {
 }
 
 export function preferredBatchDownloadTasks(items, storedTasks) {
+  const lookup = Array.isArray(storedTasks) || !storedTasks ? createBatchTaskLookup(storedTasks) : storedTasks;
   return (items || []).flatMap((item) => {
-    const candidates = batchItemDownloadCandidates(item, storedTasks);
+    const candidates = batchItemDownloadCandidates(item, lookup);
     if (!candidates.length) return [];
     return [{ ...candidates[0], downloadAlternatives: candidates.slice(1) }];
   });
@@ -195,11 +211,12 @@ export function orderedDownloadFilename(task, index, total) {
   const rawTitle = String(task?.title || `视频-${order}`).replace(/\.mp4$/i, "");
   const chapter = chapterNumber(task);
   if (Number.isFinite(chapter) && chapter !== Number.MAX_SAFE_INTEGER) {
-    const chapterLabel = `${String(chapter).padStart(2, "0")}章`;
+    const isEpisode = /(?:第\s*)?(?:\d+|[零〇一二两三四五六七八九十百]+)\s*集/.test(String(task?.batchTitle || task?.sourceName || ""));
+    const chapterLabel = isEpisode ? String(chapter).padStart(3, "0") : `${String(chapter).padStart(2, "0")}章`;
     const section = sectionNumber(task);
     const suffix = rawTitle.replace(/^第\s*\d+\s*节[-_\s]*/, "");
     const chapterTitle = Number.isFinite(section) && section !== Number.MAX_SAFE_INTEGER
-      ? `第${String(section).padStart(2, "0")}节${suffix ? `-${suffix}` : ""}`
+      ? `第${String(section).padStart(isEpisode ? 3 : 2, "0")}节${suffix ? `-${suffix}` : ""}`
       : rawTitle;
     return `${chapterLabel}-${chapterTitle.replace(/[\\/:*?"<>|]/g, "_")}.mp4`;
   }

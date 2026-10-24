@@ -12,6 +12,7 @@ test("adds Bailing without treating the example model as a fixed model name", ()
   const capability = capabilityFor({ adapter: "bailing", model: "another-model" });
   assert.deepEqual(capability.resolutions, ["720p", "480p"]);
   assert.deepEqual(capability.ratios, ["16:9", "9:16", "1:1", "4:3", "3:4"]);
+  assert.equal(Math.max(...capability.durations), 30);
   assert.equal(preferredDurationForVersion(capability, "sd20"), 5);
 });
 

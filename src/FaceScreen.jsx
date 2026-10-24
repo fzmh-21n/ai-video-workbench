@@ -52,7 +52,7 @@ async function sampleVideo(file, onProgress) {
   }
 }
 
-export default function FaceScreen({ onVideoMode, onImageMode, onLogout }) {
+export default function FaceScreen({ onVideoMode, onImageMode, onTextMode, onLogout }) {
   const [references, setReferences] = useState([]);
   const [referenceSearch, setReferenceSearch] = useState("");
   const [name, setName] = useState("");
@@ -137,6 +137,7 @@ export default function FaceScreen({ onVideoMode, onImageMode, onLogout }) {
       <div className="provider-switcher">
         <button className="secondary-button" onClick={onVideoMode}>视频生成</button>
         <button className="secondary-button" onClick={onImageMode}>图片生成</button>
+        <button className="secondary-button" onClick={onTextMode}>文本推理</button>
         <button className="logout-button" onClick={onLogout}>退出登录</button>
       </div>
     </header>

@@ -7,6 +7,7 @@ export function reusableReferenceSnapshot(references = []) {
     durationSeconds: reference.durationSeconds || null,
     projectAssetKey: reference.projectAssetKey || "",
     url: reference.url || "",
+    ...(reference.noAutoMention ? { noAutoMention: true } : {}),
   }));
 }
 

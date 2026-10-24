@@ -58,7 +58,7 @@ async function mapWithConcurrency(items, concurrency, mapper) {
   return results;
 }
 
-export default function ImageWorkbench({ onVideoMode, onFaceMode, onLogout }) {
+export default function ImageWorkbench({ onVideoMode, onFaceMode, onTextMode, onLogout }) {
   const [activeId, setActiveId] = useState(() => localStorage.getItem(ACTIVE_PROVIDER_KEY) || IMAGE_PROVIDER_PROFILES[0].id);
   const [models, setModels] = useState(() => loadJson(MODELS_KEY, {}));
   const activeProfile = IMAGE_PROVIDER_PROFILES.find((profile) => profile.id === activeId) || IMAGE_PROVIDER_PROFILES[0];
@@ -79,6 +79,8 @@ export default function ImageWorkbench({ onVideoMode, onFaceMode, onLogout }) {
   const deletedTaskIdsRef = useRef(new Set(loadDeletedIds(IMAGE_DELETED_TASK_IDS_KEY)));
   const [tasks, setTasks] = useState(() => withoutDeletedIds(loadJson(TASKS_KEY, []), [...deletedTaskIdsRef.current]));
   const tasksRef = useRef(tasks);
+  const imagePollingRef = useRef(false);
+  const imagePollCursorRef = useRef(0);
   const [submitting, setSubmitting] = useState(false);
   const [downloadingBatchId, setDownloadingBatchId] = useState(null);
   const [notice, setNotice] = useState("");
@@ -162,28 +164,40 @@ export default function ImageWorkbench({ onVideoMode, onFaceMode, onLogout }) {
   useEffect(() => {
     let cancelled = false;
     async function pollTasks() {
-      const activeTasks = tasksRef.current.filter((task) => ["queued", "processing"].includes(task.status));
-      if (!activeTasks.length) return;
-      const updates = await Promise.all(activeTasks.map(async (task) => {
-        const profile = IMAGE_PROVIDER_PROFILES.find((item) => item.id === task.providerId);
-        const key = profile ? readCredentials(profile.id).apiKey : "";
-        if (!profile || !key) return null;
-        try {
-          const response = await fetch(`/api/image-tasks/${encodeURIComponent(task.id)}`, {
-            headers: profileHeaders(profile, key, task.model),
-          });
-          const body = await response.json().catch(() => ({}));
-          if (!response.ok) throw new Error(body.message || "查询图片任务失败");
-          return { id: task.id, ...body };
-        } catch (error) {
-          return { id: task.id, pollError: error.message || "查询图片任务失败" };
-        }
-      }));
-      if (cancelled) return;
-      setTasks((current) => current.map((task) => {
-        const update = updates.find((item) => item?.id === task.id);
-        return update ? { ...task, ...update } : task;
-      }));
+      if (imagePollingRef.current) return;
+      imagePollingRef.current = true;
+      try {
+        const activeTasks = tasksRef.current.filter((task) => ["queued", "processing"].includes(task.status));
+        if (!activeTasks.length) return;
+        const start = imagePollCursorRef.current % activeTasks.length;
+        const pending = Array.from({ length: Math.min(10, activeTasks.length) }, (_, index) => activeTasks[(start + index) % activeTasks.length]);
+        imagePollCursorRef.current = (start + pending.length) % activeTasks.length;
+        const updates = await Promise.all(pending.map(async (task) => {
+          const profile = IMAGE_PROVIDER_PROFILES.find((item) => item.id === task.providerId);
+          const key = profile ? readCredentials(profile.id).apiKey : "";
+          if (!profile || !key) return null;
+          try {
+            const response = await fetch(`/api/image-tasks/${encodeURIComponent(task.id)}`, {
+              signal: AbortSignal.timeout(60_000),
+              headers: profileHeaders(profile, key, task.model),
+            });
+            const body = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(body.message || "查询图片任务失败");
+            return { id: task.id, ...body };
+          } catch (error) {
+            return { id: task.id, pollError: error.message || "查询图片任务失败" };
+          }
+        }));
+        if (cancelled) return;
+        const updatesById = new Map(updates.filter(Boolean).map((update) => [update.id, update]));
+        if (!updatesById.size) return;
+        setTasks((current) => current.map((task) => {
+          const update = updatesById.get(task.id);
+          return update ? { ...task, ...update } : task;
+        }));
+      } finally {
+        imagePollingRef.current = false;
+      }
     }
     pollTasks();
     const timer = window.setInterval(pollTasks, 4000);
@@ -463,6 +477,7 @@ export default function ImageWorkbench({ onVideoMode, onFaceMode, onLogout }) {
         </div>
         <div className="provider-switcher">
           <button className="secondary-button" onClick={onVideoMode}>视频生成</button>
+          <button className="secondary-button" onClick={onTextMode}>文本推理</button>
           <button className="secondary-button" onClick={onFaceMode}>明星脸初筛</button>
           <label><span>当前中转站</span><select value={activeProfile.id} onChange={(event) => setActiveId(event.target.value)}>{IMAGE_PROVIDER_PROFILES.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label>
           <span className={`connection-pill ${apiKey ? "ready" : ""}`}>{apiKey ? model : "等待图片 API 配置"}</span>

@@ -88,3 +88,28 @@ test("builds the exact documented Unmau request and only sends audio_track for s
   });
   assert.equal(official.audio_track, false);
 });
+
+test("Unmau keeps newly authorized IDs before their pricing rows have synchronized", () => {
+  const catalog = unmauCatalog(pricing, { data: ["brand-new-route", { id: "provider/new-model", object: "model" }, { id: "ad-seedance-2.0-720p" }] });
+  assert.deepEqual(catalog.models, ["brand-new-route", "provider/new-model", "ad-seedance-2.0-720p"]);
+  assert.equal(catalog.capabilities["brand-new-route"]._capabilityUnverified, true);
+  assert.match(catalog.labels["brand-new-route"], /待上游确认/);
+  assert.match(catalog.labels["ad-seedance-2.0-720p"], /0.65元\/秒/);
+  assert.equal(catalog.capabilities["ad-seedance-2.0-720p"].images, 9);
+});
+
+test("Unmau does not replace an explicitly empty authorized list with the pricing catalog", () => {
+  assert.deepEqual(unmauCatalog(pricing, { data: [] }).models, []);
+  assert.deepEqual(unmauCatalog(pricing, { models: [] }).models, []);
+  assert.deepEqual(unmauCatalog(pricing).models, ["ad-seedance-2.0-720p", "官方-seedance-2-5-720p"]);
+});
+
+test("Unmau excludes explicit non-video entries without requiring known video names", () => {
+  const catalog = unmauCatalog(pricing, { data: [
+    { id: "gpt-5.6-sol" },
+    { id: "new-image", type: "image_generation" },
+    { id: "unlisted-chat", supported_endpoint_types: ["openai"] },
+    { id: "never-seen-before", type: "video_generation" },
+  ] });
+  assert.deepEqual(catalog.models, ["never-seen-before"]);
+});

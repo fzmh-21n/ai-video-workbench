@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head><meta charset="UTF-8" /><title>模型提交台账验收（测试数据）</title></head>
+  <body>
+    <p style="position:fixed;top:0;left:0;right:0;z-index:1000;margin:0;padding:6px;text-align:center;background:#fff3d8;color:#7a5520">隔离验收页：仅测试数据，不是真实任务或扣费记录，不连接任何中转 API</p>
+    <div id="root"></div>
+    <script type="module">
+      import React from "react";
+      import { createRoot } from "react-dom/client";
+      import CostDashboard from "/src/CostDashboard.jsx";
+      import { putTasks } from "/src/taskStore.js";
+      import "/src/styles.css";
+      import "/src/workbenchUi.css";
+      import "/src/batchUi.css";
+      import "/src/dialogUi.css";
+
+      const start = new Date(2026, 9, 23, 12).getTime();
+      const signed = (taskId, route) => btoa(JSON.stringify({ adapter: "seedancevideo", baseUrl: "https://example.invalid", taskId, model: "wanzhou-seedance-2.0", route })).replace(/=/g, "") + ".test";
+      const row = (id, section, status, patch = {}) => ({ id, status, profileId: "fixture", providerName: "小熊猫（测试）", model: "wanzhou-seedance-2.0", projectName: "验收测试项目", batchTitle: "第01集", batchSection: section, createdAtMs: start + section * 1000, ...patch });
+      await putTasks([
+        row(signed("test-accepted-001", "old"), 1, "completed"),
+        row(signed("test-accepted-001", "recovered"), 1, "completed"),
+        row("test-accepted-002", 2, "failed"), row("test-accepted-003", 2, "completed"),
+        row("test-accepted-004", 3, "processing"), row("test-accepted-005", 4, "failed", { cancelledByUser: true }),
+      ]);
+      createRoot(document.getElementById("root")).render(React.createElement(CostDashboard, {
+        activeProfileId: "fixture", profiles: [{ id: "fixture", name: "小熊猫（测试）", model: "wanzhou-seedance-2.0", routeLabels: { "wanzhou-seedance-2.0": "F6 Seedance 2.0 · 测试标签" } }],
+        modelOptions: {}, onClose: () => {}, onSelectModel: () => {},
+      }));
+    </script>
+  </body>
+</html>

@@ -5,6 +5,7 @@ export const MAXFORAI_VIDEO_MODELS = [
   MAXFORAI_FT_933_MODEL,
   "wan3.0th",
   "YB-sd-2.5满血",
+  "KL-2.5满参",
   "cc-2.0-933",
   "mg-sd431-fast", "mg-sd431-mini", "mg-sd431-Pro", "mg-seedance-2.5",
   "zy-特价豆包900", "zy-SD满血933",
@@ -17,11 +18,9 @@ export const MAXFORAI_VIDEO_MODELS = [
   "X-miniMAX-H3",
 ];
 
-export function maxforaiModels(liveModels = []) {
-  return [...new Set([
-    ...liveModels.map((model) => String(model || "").trim()).filter(Boolean),
-    ...MAXFORAI_VIDEO_MODELS,
-  ])];
+export function maxforaiModels(liveModels) {
+  const models = Array.isArray(liveModels) ? liveModels : MAXFORAI_VIDEO_MODELS;
+  return [...new Set(models.map((model) => String(model || "").trim()).filter(Boolean))];
 }
 
 function escapedReference(value) {
@@ -42,7 +41,7 @@ export function maxforaiReferencePrompt(prompt, materials = []) {
       .filter(Boolean)
       .sort((left, right) => right.length - left.length);
     for (const alias of aliases) normalized = normalized.replace(new RegExp(escapedReference(alias), "gi"), reference);
-    mappings.push(`${reference} 是 ${name}`);
+    if (item.noAutoMention !== true) mappings.push(`${reference} 是 ${name}`);
   }
   return mappings.length ? `${normalized}\n\n参考素材对应关系：\n${mappings.join("；\n")}。` : normalized;
 }

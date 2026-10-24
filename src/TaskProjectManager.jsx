@@ -32,7 +32,7 @@ function formatCreatedAt(value, projectName) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
-export default function TaskProjectManager({ activeProject, onClose, onCreate, onDelete, onSelect, onTasksChanged, projectCreatedAtByName, projects }) {
+export default function TaskProjectManager({ activeProject, mutationBusy = false, onClose, onCreate, onDelete, onRename, onSelect, onTasksChanged, projectCreatedAtByName, projects }) {
   const [tasks, setTasks] = useState([]);
   const [name, setName] = useState("");
   const [error, setError] = useState("");
@@ -41,6 +41,7 @@ export default function TaskProjectManager({ activeProject, onClose, onCreate, o
   const [historyProject, setHistoryProject] = useState(activeProject);
   const [movingHistory, setMovingHistory] = useState(false);
   const [deletingProject, setDeletingProject] = useState("");
+  const [renamingProject, setRenamingProject] = useState("");
   const [settings, setSettings] = useState(loadCostSettings);
   const [expandedModels, setExpandedModels] = useState([]);
 
@@ -64,6 +65,7 @@ export default function TaskProjectManager({ activeProject, onClose, onCreate, o
 
   function createProject(event) {
     event.preventDefault();
+    if (renamingProject) return;
     try {
       onCreate(name);
       setName("");
@@ -74,6 +76,7 @@ export default function TaskProjectManager({ activeProject, onClose, onCreate, o
   }
 
   async function moveHistory() {
+    if (renamingProject) return;
     if (!historyDate) return setError("请选择开始日期");
     if (!historyProject) return setError("请选择目标项目");
     if (!historyChanges.length) return setError("这个日期范围内没有需要移动的任务");
@@ -95,6 +98,7 @@ export default function TaskProjectManager({ activeProject, onClose, onCreate, o
   }
 
   async function deleteProject(projectName) {
+    if (renamingProject) return;
     const count = tasks.filter((task) => (task.projectName || UNCLASSIFIED_PROJECT) === projectName).length;
     if (!window.confirm(`确定删除项目“${projectName}”吗？\n\n其中 ${count} 条任务会移到“未归类”；任务、视频记录和计费数据都会保留。`)) return;
     setDeletingProject(projectName);
@@ -108,6 +112,29 @@ export default function TaskProjectManager({ activeProject, onClose, onCreate, o
       setError(deleteError.message || "删除项目失败");
     } finally {
       setDeletingProject("");
+    }
+  }
+
+  async function renameProject(projectName) {
+    if (renamingProject || movingHistory || deletingProject || mutationBusy || projectName === UNCLASSIFIED_PROJECT || !onRename) return;
+    const enteredName = window.prompt("输入新的项目名称", projectName);
+    if (enteredName === null) return;
+    const nextName = enteredName.trim();
+    if (nextName === projectName) return;
+    if (!nextName) return setError("请输入项目名称");
+    setRenamingProject(projectName);
+    setError("");
+    try {
+      await onRename(projectName, nextName);
+      setTasks((current) => current.map((task) => (task.projectName || UNCLASSIFIED_PROJECT) === projectName
+        ? { ...task, projectName: nextName }
+        : task));
+      setHistoryProject((current) => current === projectName ? nextName : current);
+      setExpandedModels((current) => current.map((item) => item === projectName ? nextName : item));
+    } catch (renameError) {
+      setError(renameError.message || "重命名项目失败");
+    } finally {
+      setRenamingProject("");
     }
   }
 
@@ -130,17 +157,17 @@ export default function TaskProjectManager({ activeProject, onClose, onCreate, o
     <div className="modal-backdrop" onMouseDown={onClose}>
       <section className="task-project-dialog" role="dialog" aria-label="任务项目管理" onMouseDown={(event) => event.stopPropagation()}>
         <div className="dialog-heading"><div><span>PROJECTS</span><h2>任务项目管理</h2></div><button onClick={onClose}>×</button></div>
-        <p className="task-project-intro">新建或切换项目后，之后的单条和批量视频任务都会归入当前项目。素材文件夹不会因此改变。</p>
+        <p className="task-project-intro">切换项目会恢复对应的素材文件夹、比例和固定内容。重命名保留任务、下载标记和计费记录，不会修改本地文件夹名称。</p>
         <form className="task-project-create" onSubmit={createProject}>
-          <input value={name} onChange={(event) => setName(event.target.value)} placeholder="输入新剧本或项目名称" autoFocus />
-          <button className="primary-button" type="submit">＋ 新建并使用</button>
+          <input value={name} onChange={(event) => setName(event.target.value)} placeholder="输入新剧本或项目名称" disabled={!!renamingProject} autoFocus />
+          <button className="primary-button" type="submit" disabled={!!renamingProject}>＋ 新建并使用</button>
         </form>
         {error && <p className="task-project-error">{error}</p>}
         <section className="task-project-history">
           <div><strong>按日期整理历史任务</strong><span>包含所选日期当天，从零点开始计算</span></div>
-          <input aria-label="历史任务开始日期" type="date" value={historyDate} onChange={(event) => setHistoryDate(event.target.value)} />
-          <select aria-label="历史任务目标项目" value={historyProject} onChange={(event) => setHistoryProject(event.target.value)}>{names.map((projectName) => <option key={projectName} value={projectName}>{projectName}</option>)}</select>
-          <button className="secondary-button" disabled={!historyDate || !historyChanges.length || movingHistory} onClick={moveHistory}>{movingHistory ? "整理中…" : "归入目标项目"}</button>
+          <input aria-label="历史任务开始日期" type="date" value={historyDate} onChange={(event) => setHistoryDate(event.target.value)} disabled={!!renamingProject} />
+          <select aria-label="历史任务目标项目" value={historyProject} onChange={(event) => setHistoryProject(event.target.value)} disabled={!!renamingProject}>{names.map((projectName) => <option key={projectName} value={projectName}>{projectName}</option>)}</select>
+          <button className="secondary-button" disabled={!historyDate || !historyChanges.length || movingHistory || !!renamingProject} onClick={moveHistory}>{movingHistory ? "整理中…" : "归入目标项目"}</button>
           {historyDate && <p>日期范围内共 {historyMatches.length} 条，其中 {historyChanges.length} 条需要从原项目移动。</p>}
         </section>
         {loading ? <div className="cost-loading">正在读取项目任务…</div> : (
@@ -158,8 +185,9 @@ export default function TaskProjectManager({ activeProject, onClose, onCreate, o
                   <b>预计成本 {money(summary.cost)}</b>
                   <div className="task-project-actions">
                     <button className="secondary-button" onClick={() => toggleModels(projectName)}>{expanded ? "收起模型明细" : `成功模型（${models.length}）`}</button>
-                    <button className={active ? "secondary-button" : "primary-button"} disabled={active} onClick={() => onSelect(projectName)}>{active ? "正在使用" : "切换到此项目"}</button>
-                    {projectName !== UNCLASSIFIED_PROJECT && <button className="danger-button" disabled={!!deletingProject} onClick={() => deleteProject(projectName)}>{deletingProject === projectName ? "删除中…" : "删除项目"}</button>}
+                    <button className={active ? "secondary-button" : "primary-button"} disabled={active || !!renamingProject} onClick={() => onSelect(projectName)}>{active ? "正在使用" : "切换到此项目"}</button>
+                    {projectName !== UNCLASSIFIED_PROJECT && <button className="secondary-button" disabled={!onRename || mutationBusy || movingHistory || !!deletingProject || !!renamingProject} title={mutationBusy ? "任务正在提交、下载或自动重试，请完成后再重命名" : undefined} onClick={() => renameProject(projectName)}>{renamingProject === projectName ? "重命名中…" : "重命名"}</button>}
+                    {projectName !== UNCLASSIFIED_PROJECT && <button className="danger-button" disabled={!!deletingProject || !!renamingProject} onClick={() => deleteProject(projectName)}>{deletingProject === projectName ? "删除中…" : "删除项目"}</button>}
                   </div>
                   {expanded && <div className="task-project-models">
                     {models.length ? models.map((item) => (

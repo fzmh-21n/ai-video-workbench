@@ -46,7 +46,7 @@ export function splitBatchPrompts(text) {
 export function batchSerializable(items) {
   return (items || []).map((item) => ({
     ...item,
-    references: (item.references || []).filter((reference) => !reference.file).map((reference) => ({
+    references: (item.references || []).map((reference) => ({
       ...reference,
       file: undefined,
       preview: undefined,
@@ -117,7 +117,7 @@ export function overnightRetryableItems(items, plan) {
   const ids = new Set(plan?.itemIds || []);
   const seen = new Set();
   return (items || []).filter((item) => {
-    if (!ids.has(item?.id) || seen.has(item.id) || !OVERNIGHT_RETRYABLE_STATUSES.has(item.status)) return false;
+    if (item?.deferred || item?.autoRetryBlocked || !ids.has(item?.id) || seen.has(item.id) || !OVERNIGHT_RETRYABLE_STATUSES.has(item.status)) return false;
     seen.add(item.id);
     return true;
   });
@@ -126,15 +126,27 @@ export function overnightRetryableItems(items, plan) {
 const BUSY_OR_DONE = new Set(["submitting", "submitted", "generating", "generated", "submission_unknown"]);
 
 export function canBatchMatch(item) {
-  return !BUSY_OR_DONE.has(item?.status);
+  return !item?.deferred && !BUSY_OR_DONE.has(item?.status);
 }
 
 export function canBatchSubmit(item) {
-  return ["matched", "failed", "generation_failed", "not_submitted"].includes(item?.status);
+  return !item?.deferred && ["matched", "failed", "generation_failed", "not_submitted"].includes(item?.status);
 }
 
 export function canBatchResubmit(item) {
-  return item?.status === "generated";
+  return !item?.deferred && item?.status === "generated";
+}
+
+export function canBatchDefer(item) {
+  return !!item && !item.deferred && !["submitting", "submitted", "generating", "generated"].includes(item.status);
+}
+
+export function setBatchItemsDeferred(items, itemIds, deferred = true) {
+  const ids = new Set(itemIds || []);
+  return (items || []).map((item) => {
+    if (!ids.has(item.id) || (deferred ? !canBatchDefer(item) : !item.deferred)) return item;
+    return { ...item, deferred };
+  });
 }
 
 export function beginBatchSubmission(item, profile, attemptedAt = Date.now(), batchId = "") {
@@ -142,6 +154,8 @@ export function beginBatchSubmission(item, profile, attemptedAt = Date.now(), ba
     ...item,
     status: "submitting",
     error: "",
+    autoRetryBlocked: false,
+    recoveryNote: "",
     taskIds: [],
     downloaded: false,
     downloadedCount: 0,
@@ -167,6 +181,7 @@ export function failBatchSubmission(item, error, profile, failedAt = Date.now())
     failedAt,
     statusCode: Number(error?.status || 0),
     taskCreated: false,
+    ...(error?.idempotencyKey ? { idempotencyKey: error.idempotencyKey } : {}),
   };
   return {
     ...item,
@@ -182,6 +197,11 @@ export function recoverInterruptedBatchItems(items = []) {
   return items.map((item) => {
     if (item?.status !== "submitting") return item;
     if (item.taskIds?.length) return { ...item, status: "generating" };
+    if (item.lastSubmission?.idempotencyKey && item.lastSubmission?.requestStartedAt) return {
+      ...item, status: "submission_unknown", progress: 0,
+      error: "上次提交在取得任务 ID 前中断，正在自动核对后台原任务；不会重新提交生成",
+      expanded: true,
+    };
     return {
       ...item,
       status: "not_submitted",
@@ -194,6 +214,8 @@ export function recoverInterruptedBatchItems(items = []) {
 
 export function reconciledBatchTerminalState(item, relatedTasks = [], hasDownloadCandidate = false) {
   if (item?.manuallyMarkedGenerated) return { status: "generated", progress: 100, error: "" };
+  // 重新匹配只准备下一次提交，保留的历史任务不能覆盖当前准备状态。
+  if (["unmatched", "matched"].includes(item?.status)) return null;
   if (hasDownloadCandidate) return { status: "generated", progress: 100, error: "" };
   const failed = relatedTasks.find((task) => task.status === "failed");
   const unusable = relatedTasks.find((task) => task.status === "completed" && task.reviewStatus === "dissatisfied");
@@ -212,6 +234,7 @@ export function reconciledBatchTerminalState(item, relatedTasks = [], hasDownloa
       status: "generation_failed",
       progress: 100,
       error: failed?.error || failed?.message || "中转站返回生成失败",
+      ...(relatedTasks.some((task) => task.autoRetryBlocked) ? { autoRetryBlocked: true } : {}),
     };
   }
   if (!item.taskIds?.length || relatedTasks.length) return null;
@@ -282,7 +305,7 @@ export function clearManualBatchCompletion(item) {
 }
 
 export function batchStatusGroup(status) {
-  if (["submitting", "submitted", "generating"].includes(status)) return "generating";
+  if (["submitted", "generating"].includes(status)) return "generating";
   if (["failed", "generation_failed", "submission_unknown"].includes(status)) return "failed";
   if (["pending", "not_submitted"].includes(status) || !status) return "pending";
   return status;
@@ -290,7 +313,12 @@ export function batchStatusGroup(status) {
 
 export function filterBatchItems(items, filter) {
   if (!filter || filter === "all") return [...(items || [])];
-  return (items || []).filter((item) => batchStatusGroup(item?.status) === filter);
+  if (filter === "deferred") return (items || []).filter((item) => item?.deferred);
+  const activeItems = (items || []).filter((item) => !item?.deferred);
+  if (filter === "undownloaded") return activeItems.filter((item) => (
+    item?.status === "generated" && !item.downloaded && !item.manuallyMarkedDownloaded
+  ));
+  return activeItems.filter((item) => batchStatusGroup(item?.status) === filter);
 }
 
 export function batchSubmissionPlan(mode, concurrency) {
@@ -357,10 +385,10 @@ export function batchSourceNames(values, fallback = "") {
 
 export function batchItemChapterLabel(sourceName) {
   const source = String(sourceName || "");
-  const arabic = source.match(/第\s*0*(\d+)\s*章/i) || source.match(/^\s*0*(\d+)\s*[_-]/);
-  if (arabic) return `第${Number(arabic[1])}章`;
-  const chinese = source.match(/第\s*([零〇一二两三四五六七八九十百]+)\s*章/);
-  return chinese ? `第${chinese[1]}章` : "";
+  const arabic = source.match(/第\s*0*(\d+)\s*([章集])/i) || source.match(/^\s*0*(\d+)\s*[_-]/);
+  if (arabic) return `第${Number(arabic[1])}${arabic[2] || "章"}`;
+  const chinese = source.match(/第\s*([零〇一二两三四五六七八九十百]+)\s*([章集])/);
+  return chinese ? `第${chinese[1]}${chinese[2]}` : "";
 }
 
 export function batchItemsForSource(items, sourceName) {

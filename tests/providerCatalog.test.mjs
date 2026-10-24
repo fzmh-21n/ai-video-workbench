@@ -103,7 +103,7 @@ test("includes LWAIGC as a built-in OpenAI-compatible provider", () => {
     mediaUploadUrl: "https://ai.lwaigc.cn/v1/assets",
   });
   assert.equal(inferAdapter(profile.baseUrl), "lwaigc");
-  assert.equal(LWAIGC_VIDEO_MODELS.length, 51);
+  assert.equal(LWAIGC_VIDEO_MODELS.length, 52);
 });
 
 test("defines the documented LWAIGC WF and FT Seedance 2.0 models", () => {
@@ -462,8 +462,8 @@ test("serializes new LWAIGC Seedance 2.5 resolution rules exactly", () => {
   assert.match(lwaigcLimitIssue("wf-sd2.5-v5", materials(30, 10, 1), 30), /视频参考最多 0 个/);
 });
 
-test("defines sane capabilities for all 51 supported LWAIGC video models including legacy channels", () => {
-  assert.equal(new Set(LWAIGC_VIDEO_MODELS).size, 51);
+test("defines sane capabilities for all 52 supported LWAIGC video models including legacy channels", () => {
+  assert.equal(new Set(LWAIGC_VIDEO_MODELS).size, 52);
   for (const model of LWAIGC_VIDEO_MODELS) {
     const capability = lwaigcCapability(model);
     assert.ok(capability.images >= 1 && capability.images <= 30, `${model} 图片上限无效`);
@@ -499,8 +499,9 @@ test("maps the SD version switch for both supported relay adapters", () => {
   assert.equal(preferredModelForSdVersion("fmgo", "sd25"), "feimiao-v2.5");
 });
 
-test("rejects unknown LWAIGC models before any upstream request", () => {
-  assert.equal(lwaigcLimitIssue("unknown-video-model", [], 10), "请选择 LWAIGC 视频模型");
+test("permits a newly returned LWAIGC model name while still requiring a selection", () => {
+  assert.equal(lwaigcLimitIssue("unknown-video-model", [], 10), "");
+  assert.equal(lwaigcLimitIssue("", [], 10), "请选择 LWAIGC 视频模型");
 });
 
 test("migrates an older custom LWAIGC profile and restores audio capability", () => {

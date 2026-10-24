@@ -28,11 +28,12 @@ import {
   AIYRX_VIDEO_MODELS,
   aiyrxCapability,
 } from "./aiyrxCatalog.js";
-import { SEEDANCE_VIDEO_BASE_URL } from "./seedanceVideoCatalog.js";
+import { PANDA626_BASE_URL, SEEDANCE_VIDEO_BASE_URL, seedanceVideoBaseUrl } from "./seedanceVideoCatalog.js";
 import { UNMAU_BASE_URL, UNMAU_FALLBACK_MODELS, unmauCapability } from "./unmauCatalog.js";
 import { SUANLIAI_BASE_URL, SUANLIAI_VIDEO_MODELS, suanliaiCapability } from "./suanliaiCatalog.js";
 import { BAILING_BASE_URL, BAILING_EXAMPLE_MODEL } from "./bailingCatalog.js";
 import { HUAJING_BASE_URL, HUAJING_MODELS, huajingCapability } from "./huajingCatalog.js";
+import { BAOJU_BASE_URL, baojuCapability } from "./baojuCatalog.js";
 
 export const DEFAULT_PROFILES = [
   {
@@ -148,6 +149,14 @@ export const DEFAULT_PROFILES = [
     mediaUploadUrl: `${SEEDANCE_VIDEO_BASE_URL}/v1/uploads/images`,
   },
   {
+    id: "panda626",
+    name: "Panda626",
+    baseUrl: PANDA626_BASE_URL,
+    adapter: "seedancevideo",
+    model: "",
+    mediaUploadUrl: `${PANDA626_BASE_URL}/v1/uploads/images`,
+  },
+  {
     id: "suanliai",
     name: "算力AI",
     baseUrl: SUANLIAI_BASE_URL,
@@ -164,6 +173,7 @@ export const DEFAULT_PROFILES = [
     mediaUploadUrl: "",
   },
   { id: "huajing", name: "华镜 / Huajing", baseUrl: HUAJING_BASE_URL, adapter: "huajing", model: HUAJING_MODELS[0], mediaUploadUrl: "" },
+  { id: "baoju", name: "Baoju / aimjbbb", baseUrl: BAOJU_BASE_URL, adapter: "baoju", model: "", mediaUploadUrl: "" },
 ];
 
 export const FALLBACK_MODELS = {
@@ -238,6 +248,7 @@ export const FALLBACK_MODELS = {
   suanliai: SUANLIAI_VIDEO_MODELS,
   bailing: [BAILING_EXAMPLE_MODEL],
   huajing: HUAJING_MODELS,
+  baoju: [],
 };
 
 export const FALLBACK_MODEL_LABELS = {
@@ -247,6 +258,7 @@ export const FALLBACK_MODEL_LABELS = {
   },
   maxforai: {
     "YB-sd-2.5满血": "YB-sd-2.5满血 · 试接入（按现有 SD2.5 规格，待中转验证）",
+    "KL-2.5满参": "KL-2.5满参 · 试接入（按现有 SD2.5 规格，待中转验证）",
     [MAXFORAI_FT_933_MODEL]: "FT-Seedance 2.0 · 720P · 933全参 · 4–15秒 · 9图/3视频/3音频",
     "wan3.0th": "WAN 3.0 TH · 720P · 4–30秒 · 10图/5视频/5音频",
     "特价ft-sd2.0满血": "FT-Seedance 2.0 · 720P · 933全参",
@@ -267,6 +279,7 @@ export const FALLBACK_MODEL_LABELS = {
     "hn-sd2.5-v2": "HN Seedance 2.5 V2 · 内置过脸 · 720P · 固定30秒 · 30图/无视频音频",
     "wf-sd2.5-v4": "WF Seedance 2.5 V4 · 原生不卡脸 · 按秒 · 720P · 4–30秒 · 30图/10视频/10音频",
     "dbb-sd2.5-v1": "DBB Seedance 2.5 V1 · 原生不卡脸 · 固定720P · 4–30秒 · 30图/10视频/10音频",
+    "qi-sd2.5-v1": "QI Seedance 2.5 V1 · 原生不卡脸 · 固定720P · 4–30秒 · 30图/10视频/10音频",
     "dbb-sd2.5-v2": "DBB Seedance 2.5 V2 · 原生不卡脸 · 480P/720P · 4–30秒 · 30图/10视频/10音频",
     "ld-sd2.5-v1": "LD Seedance 2.5 V1 · 原生不卡脸 · 480P/720P/1080P · 4–30秒 · 30图/10视频/10音频",
     "ld-sd2.5-v2": "LD Seedance 2.5 V2 · 内置插件过脸 · 固定720P/30秒 · 9图/无视频音频",
@@ -349,7 +362,9 @@ export function preferredModelForSdVersion(adapter, version) {
 }
 
 export function pollDelayForAdapter(adapter) {
+  if (adapter === "baoju") return 5_000;
   if (adapter === "huajing") return 5_000;
+  if (adapter === "seedancevideo") return 15_000;
   return adapter === "clmm" ? 3_000 : adapter === "meaicc" || adapter === "globalaiopc" ? 21_000 : 10_000;
 }
 
@@ -605,6 +620,7 @@ function rawCapabilityFor(profile) {
 
   if (adapter === "lwaigc") return lwaigcCapability(profile?.model);
   if (adapter === "huajing") return profile?.routeCapabilities?.[profile?.model] || huajingCapability();
+  if (adapter === "baoju") return profile?.routeCapabilities?.[profile?.model] || baojuCapability();
   if (adapter === "meaicc") return meaiccCapability(profile?.model);
   if (adapter === "ziyuai") {
     const live = profile?.routeCapabilities?.[profile?.model];
@@ -646,7 +662,7 @@ function rawCapabilityFor(profile) {
       images: 50,
       videos: 50,
       audios: 50,
-      durations: Array.from({ length: 60 }, (_, index) => index + 1),
+      durations: Array.from({ length: 30 }, (_, index) => index + 1),
       defaultDuration: 5,
       resolutions: ["720p", "480p"],
       ratios: ["16:9", "9:16", "1:1", "4:3", "3:4"],
@@ -660,7 +676,27 @@ function rawCapabilityFor(profile) {
 }
 
 export function capabilityFor(profile) {
-  const capability = rawCapabilityFor(profile);
+  const unifiedDefaults = ["fmgo", "pidoi", "globalaiopc", "maxforai"].includes(profile?.adapter);
+  const detected = rawCapabilityFor(profile);
+  const live = profile?.routeCapabilities?.[profile?.model];
+  const raw = unifiedDefaults && live ? { ...detected, ...live, _preserveLimits: true } : detected;
+  const knownFmgoFamily = profile?.adapter === "fmgo" && (
+    isFmgoK20FastModel(profile.model) || isFmgoV25Model(profile.model)
+    || /-(480p|720p|1080p)-(\d+)s$/i.test(profile.model || "")
+  );
+  const unverified = raw._capabilityUnverified || profile?.model && !knownFmgoFamily && !profile?.routeCapabilities?.[profile.model]
+    && !(FALLBACK_MODELS[profile.adapter] || []).includes(profile.model);
+  // 未核实的统一接口模型只使用工作台边界，不把旧模型的猜测值当成硬限制。
+  const genericLimits = unverified && unifiedDefaults;
+  const capability = unverified ? {
+    ...raw,
+    ...(genericLimits ? {
+      images: 50, videos: 50, audios: 50,
+      durations: Array.from({ length: 30 }, (_, index) => index + 1),
+      _preserveLimits: true,
+    } : {}),
+    _capabilityUnverified: true,
+  } : raw;
   const version = profile?.adapter === "canseedream"
     ? (
         capability.images > 9 || capability.videos > 3 || capability.audios > 3 ||
@@ -686,6 +722,7 @@ export function preferredDurationForVersion(capability, version) {
 
 export function capabilityLimitIssue(profile, materials, duration) {
   const capability = capabilityFor(profile);
+  if (capability._capabilityUnverified && (materials || []).length > 50) return "工作台单次参考素材最多 50 个";
   const counts = (materials || []).reduce((result, item) => {
     const kind = ["image", "audio", "video"].includes(item?.kind) ? item.kind : "image";
     result[kind] += 1;
@@ -717,7 +754,7 @@ export function sdVersionForProfile(profile) {
       (numericDurations.length > 0 && Math.max(...numericDurations) > 15);
     return exceedsSd20Limits ? "sd25" : "sd20";
   }
-  if (profile?.adapter === "ziyuai" || profile?.adapter === "seedancevideo" || profile?.adapter === "suanliai") {
+  if (profile?.adapter === "ziyuai" || profile?.adapter === "seedancevideo" || profile?.adapter === "suanliai" || profile?.adapter === "maxforai" || profile?.adapter === "baoju") {
     return rawCapabilityFor(profile)._sdVersion || "sd20";
   }
   if (profile?.adapter === "lwaigc") {
@@ -728,15 +765,16 @@ export function sdVersionForProfile(profile) {
 
 export function modelForSdVersion(profile, version, availableModels) {
   const currentModel = String(profile?.model || "").trim();
-  if (currentModel && sdVersionForProfile(profile) === version) return currentModel;
+  const hasLiveModels = Array.isArray(availableModels);
+  if (currentModel && (!hasLiveModels || availableModels.includes(currentModel)) && sdVersionForProfile(profile) === version) return currentModel;
 
   const preferred = preferredModelForSdVersion(profile?.adapter, version);
-  const dynamicAdapters = new Set(["canseedream", "ziyuai", "maxforai", "clmm", "aiyrx", "seedancevideo", "unmau", "suanliai", "huajing"]);
-  if (!dynamicAdapters.has(profile?.adapter)) return preferred;
-  const candidates = Array.isArray(availableModels) && availableModels.length
+  const dynamicAdapters = new Set(["canseedream", "ziyuai", "maxforai", "clmm", "aiyrx", "seedancevideo", "unmau", "suanliai", "huajing", "baoju"]);
+  if (!hasLiveModels && !dynamicAdapters.has(profile?.adapter)) return preferred;
+  const candidates = hasLiveModels
     ? availableModels
     : FALLBACK_MODELS[profile?.adapter] || [];
-  if (preferred && candidates.includes(preferred)) return preferred;
+  if (preferred && candidates.includes(preferred) && sdVersionForProfile({ ...profile, model: preferred }) === version) return preferred;
   return candidates.find((model) => (
     sdVersionForProfile({ ...profile, model }) === version
   )) || "";
@@ -757,11 +795,12 @@ export function inferAdapter(baseUrl) {
     if (host === "clmm-mall.top" || host === "www.clmm-mall.top") return "clmm";
     if (host === "pidoi.com" || host === "www.pidoi.com") return "pidoi";
     if (host === "api.aiyrx.xyz") return "aiyrx";
-    if (host === "772808.xyz") return "seedancevideo";
+    if (host === "772808.xyz" || host === "panda626.com" || host === "www.panda626.com") return "seedancevideo";
     if (host === "newapis.unmau.com") return "unmau";
     if (host === "suanliai.top" || host === "www.suanliai.top") return "suanliai";
     if (host === "bailingapi.top" || host === "www.bailingapi.top") return "bailing";
     if (host === "video.huajings.online") return "huajing";
+    if (host === "aimjbbb.cn") return "baoju";
   } catch {}
   return "newapi";
 }
@@ -769,6 +808,9 @@ export function inferAdapter(baseUrl) {
 export function migrateSavedProfile(profile) {
   if (!profile || typeof profile !== "object") return profile;
   const inferredAdapter = inferAdapter(profile.baseUrl);
+  if (profile.id === "baoju" || inferredAdapter === "baoju" || profile.adapter === "baoju") {
+    return { ...profile, baseUrl: BAOJU_BASE_URL, adapter: "baoju", mediaUploadUrl: "" };
+  }
   if (profile.id === "suanliai" || inferredAdapter === "suanliai" || profile.adapter === "suanliai") {
     return {
       ...profile,
@@ -788,11 +830,12 @@ export function migrateSavedProfile(profile) {
     };
   }
   if (profile.id === "seedancevideo" || inferredAdapter === "seedancevideo" || profile.adapter === "seedancevideo") {
+    const baseUrl = seedanceVideoBaseUrl(profile.baseUrl);
     return {
       ...profile,
-      baseUrl: SEEDANCE_VIDEO_BASE_URL,
+      baseUrl,
       adapter: "seedancevideo",
-      mediaUploadUrl: `${SEEDANCE_VIDEO_BASE_URL}/v1/uploads/images`,
+      mediaUploadUrl: `${baseUrl}/v1/uploads/images`,
     };
   }
   if (profile.id === "clmm" || inferredAdapter === "clmm" || profile.adapter === "clmm") {
@@ -803,7 +846,7 @@ export function migrateSavedProfile(profile) {
       ...profile,
       baseUrl: PIDOI_BASE_URL,
       adapter: "pidoi",
-      model: PIDOI_MODELS.includes(profile.model) ? profile.model : "tejiasd",
+      model: String(profile.model || "").trim() || "tejiasd",
       // Pidoi 的公开文档没有提供素材上传端点。清除旧版本曾写入的
       // 推测地址，留空时由本地服务自动把素材转成临时公网 URL。
       mediaUploadUrl: profile.mediaUploadUrl === `${PIDOI_BASE_URL}/v1/media/uploads`
@@ -817,7 +860,7 @@ export function migrateSavedProfile(profile) {
       ...profile,
       baseUrl: officialAiyrx ? AIYRX_BASE_URL : profile.baseUrl,
       adapter: "aiyrx",
-      model: AIYRX_VIDEO_MODELS.includes(profile.model) ? profile.model : AIYRX_VIDEO_MODELS[0],
+      model: String(profile.model || "").trim() || AIYRX_VIDEO_MODELS[0],
       mediaUploadUrl: `${officialAiyrx ? AIYRX_BASE_URL : profile.baseUrl}/v1/assets`,
     };
   }
@@ -837,9 +880,7 @@ export function migrateSavedProfile(profile) {
       ...profile,
       baseUrl: officialLwaigc ? "https://ai.lwaigc.cn" : profile.baseUrl,
       adapter: "lwaigc",
-      model: LWAIGC_VIDEO_MODELS.includes(profile.model)
-        ? profile.model
-        : "firefly-seedance2-720p",
+      model: String(profile.model || "").trim() || "firefly-seedance2-720p",
       mediaUploadUrl: officialLwaigc
         ? "https://ai.lwaigc.cn/v1/assets"
         : profile.mediaUploadUrl || "",
@@ -870,9 +911,7 @@ export function migrateSavedProfile(profile) {
       ...profile,
       baseUrl: officialGlobalAiOpc ? GLOBAL_AIOPC_BASE_URL : profile.baseUrl,
       adapter: "globalaiopc",
-      model: GLOBAL_AIOPC_MODELS.includes(profile.model)
-        ? profile.model
-        : "sd_2.0_fast_discount_720p",
+      model: String(profile.model || "").trim() || "sd_2.0_fast_discount_720p",
       mediaUploadUrl: "",
     };
   }

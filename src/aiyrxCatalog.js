@@ -89,13 +89,17 @@ export const AIYRX_MODEL_LABELS = Object.fromEntries(AIYRX_VIDEO_MODELS.map((mod
 }));
 
 export function aiyrxModels(body) {
-  const rows = Array.isArray(body?.data) ? body.data : [];
+  const rows = Array.isArray(body?.data) ? body.data : Array.isArray(body?.models) ? body.models : [];
   const models = [];
   const capabilities = {};
   const labels = {};
   for (const row of rows) {
-    const id = String(row?.id || row?.name || "").trim();
-    if (!id) continue;
+    const id = String(typeof row === "string" ? row : row?.id || row?.name || "").trim();
+    if (!id || capabilities[id]) continue;
+    const type = String(row?.type || "").toLowerCase();
+    const endpointTypes = Array.isArray(row?.supported_endpoint_types) ? row.supported_endpoint_types : [];
+    if (type && type !== "model" && !/video/.test(type)) continue;
+    if (endpointTypes.length && !endpointTypes.some((value) => /video/i.test(String(value)))) continue;
     const capability = aiyrxCapability(id, row);
     models.push(id);
     capabilities[id] = capability;

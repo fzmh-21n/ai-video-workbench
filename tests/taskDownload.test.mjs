@@ -73,6 +73,58 @@ test("uses chapter and section names for leading-number and Chinese chapter file
   );
 });
 
+test("episode filenames use the source episode instead of the position in this download", () => {
+  const task = {
+    id: "episode-1-section-6",
+    title: "第06节-seedance-2.5",
+    batchTitle: "第01集_仙人跳跳到了剑修头上_30秒视频提示词_剧情002-006合集",
+    batchSection: 6,
+  };
+  for (const [index, total] of [[0, 1], [1, 5], [5, 11], [1000, 1001]]) {
+    assert.equal(orderedDownloadFilename(task, index, total), "001-第006节-seedance-2.5.mp4");
+  }
+  assert.equal(orderedDownloadFilename({ ...task, batchTitle: "第一集_剧情002-006合集" }, 1, 5), "001-第006节-seedance-2.5.mp4");
+  assert.equal(orderedDownloadFilename({ ...task, batchTitle: "第十二集_剧情001", batchSection: 1, title: "第01节-model" }, 0, 1), "012-第001节-model.mp4");
+});
+
+test("episode downloads sort by episode and section across split source files", () => {
+  const tasks = [
+    { id: "e2-s1", title: "第01节-seedance-2.5", batchTitle: "第02集_剧情001-005合集", batchSection: 1, createdAtMs: 1 },
+    { id: "e1-s6", title: "第06节-seedance-2.5", batchTitle: "第01集_剧情002-006合集", batchSection: 6, createdAtMs: 2 },
+    { id: "e1-s1", title: "第01节-seedance-2.5", batchTitle: "第01集_剧情001", batchSection: 1, createdAtMs: 3 },
+    { id: "e1-s2", title: "第02节-seedance-2.5", batchTitle: "第01集_剧情002-006合集", batchSection: 2, createdAtMs: 4 },
+  ];
+  const ordered = orderedDownloadTasks(tasks);
+  assert.deepEqual(ordered.map((task) => task.id), ["e1-s1", "e1-s2", "e1-s6", "e2-s1"]);
+  assert.deepEqual(ordered.map((task, index) => orderedDownloadFilename(task, index, ordered.length)), [
+    "001-第001节-seedance-2.5.mp4",
+    "001-第002节-seedance-2.5.mp4",
+    "001-第006节-seedance-2.5.mp4",
+    "002-第001节-seedance-2.5.mp4",
+  ]);
+});
+
+test("old episode records can use sourceName and the title section without treating null as section zero", () => {
+  const task = { title: "第06节-model", sourceName: "第01集_剧情002-006合集.txt", batchSection: null };
+  assert.equal(orderedDownloadFilename(task, 1, 5), "001-第006节-model.mp4");
+  const ordered = orderedDownloadTasks([
+    { ...task, id: "s6", createdAtMs: 1 },
+    { ...task, id: "s2", title: "第02节-model", createdAtMs: 2 },
+  ]);
+  assert.deepEqual(ordered.map((value) => value.id), ["s2", "s6"]);
+});
+
+test("downloading newly completed episodes preserves their source labels after skipping older downloads", () => {
+  const result = downloadTaskBuckets([
+    { id: "done", title: "第01节-model", batchTitle: "第01集_剧情001", batchSection: 1, status: "completed", downloadedAtMs: 10 },
+    { id: "new-2", title: "第01节-model", batchTitle: "第02集_剧情001-005合集", batchSection: 1, status: "completed" },
+    { id: "new-1", title: "第06节-model", batchTitle: "第01集_剧情002-006合集", batchSection: 6, status: "completed" },
+  ]);
+  assert.deepEqual(result.pending.map((task, index) => orderedDownloadFilename(task, index, result.pending.length)), [
+    "001-第006节-model.mp4", "002-第001节-model.mp4",
+  ]);
+});
+
 test("skips videos that were already downloaded and keeps newly completed videos", () => {
   const result = downloadTaskBuckets([
     { id: "new", status: "completed", videoUrl: "/video/new", batchSection: 2 },

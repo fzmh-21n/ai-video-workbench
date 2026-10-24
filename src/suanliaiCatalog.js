@@ -134,7 +134,6 @@ export const SUANLIAI_VIDEO_MODELS = [...new Set([
   ...SUANLIAI_OFFICIAL_MODELS,
 ])];
 
-const documentedModels = new Set(SUANLIAI_VIDEO_MODELS);
 const allModels = new Set(SUANLIAI_ALL_MODELS);
 const dealModels = new Set(SUANLIAI_DEAL_MODELS);
 
@@ -246,14 +245,15 @@ export function suanliaiReferencePrompt(modelName, prompt, materials, enabled) {
   const lines = materials.map((item) => {
     counters[item.kind] = (counters[item.kind] || 0) + 1;
     const index = counters[item.kind];
+    if (item.noAutoMention === true) return "";
     const label = item.kind === "image" ? "图" : item.kind === "video" ? "视频" : "音频";
     return series === "004"
       ? `${item.kind === "image" ? "Image" : item.kind === "video" ? "Video" : "Audio"} ${index} = ${item.name || "参考素材"}`
       : series === "002"
         ? `@${label}${index}=${item.name || "参考素材"}`
         : `@${item.kind === "image" ? "Image" : item.kind === "video" ? "Video" : "Audio"}${index}=${item.name || "参考素材"}`;
-  });
-  return `${normalized}\n\n参考素材映射：\n${lines.join("\n")}`;
+  }).filter(Boolean);
+  return lines.length ? `${normalized}\n\n参考素材映射：\n${lines.join("\n")}` : normalized;
 }
 
 function resolutionFromName(model) {
@@ -352,12 +352,12 @@ function modelItems(body) {
 }
 
 function isVideoItem(item) {
-  if (typeof item === "string") return documentedModels.has(item) || /(?:video|seedance|sd2|wan3|minimax|h3|grok|全能|官转|rd2|sp2|quanneng|hailuo|快乐马)/i.test(item);
-  const type = String(item?.type || item?.object || "").toLowerCase();
-  const endpointTypes = Array.isArray(item?.supported_endpoint_types) ? item.supported_endpoint_types.join(" ").toLowerCase() : "";
-  const taskKinds = Array.isArray(item?.tasks) ? item.tasks.map((task) => task?.taskKind).join(" ").toLowerCase() : "";
-  if (type || endpointTypes || taskKinds) return /video/.test(`${type} ${endpointTypes} ${taskKinds}`);
-  return isVideoItem(String(item?.id || item?.name || ""));
+  if (typeof item === "string") return Boolean(item.trim());
+  const type = String(item?.type || "").toLowerCase();
+  const endpointTypes = Array.isArray(item?.supported_endpoint_types) ? item.supported_endpoint_types : [];
+  const taskKinds = Array.isArray(item?.tasks) ? item.tasks.map((task) => task?.taskKind).filter(Boolean) : [];
+  const kinds = [type === "model" ? "" : type, ...endpointTypes, ...taskKinds].filter(Boolean).join(" ").toLowerCase();
+  return !kinds || /video/.test(kinds);
 }
 
 export function suanliaiCatalog(...bodies) {

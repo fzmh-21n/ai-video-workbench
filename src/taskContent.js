@@ -12,6 +12,7 @@ export function directTaskContentPaths(adapter, taskId) {
   const encodedTaskId = encodeURIComponent(String(taskId || ""));
   if (!encodedTaskId) return [];
   if (adapter === "huajing") return [`/v1/tasks/${encodedTaskId}/video`];
+  if (adapter === "baoju") return [`/api/v1/videos/${encodedTaskId}/content?index=0`];
   if (adapter === "fmgo") {
     return [
       `/v1/tasks/${encodedTaskId}/file`,
@@ -23,7 +24,7 @@ export function directTaskContentPaths(adapter, taskId) {
 }
 
 export function requiresOriginalTaskKey(adapter) {
-  return adapter !== "fmgo";
+  return adapter !== "fmgo" && adapter !== "baoju";
 }
 
 export function taskContentRequestUrl(task) {

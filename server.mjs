@@ -3,7 +3,7 @@ import multer from "multer";
 import COS from "cos-nodejs-sdk-v5";
 import path from "node:path";
 import crypto from "node:crypto";
-import { Readable } from "node:stream";
+import { Readable, pipeline } from "node:stream";
 import {
   appendFileSync,
   existsSync,
@@ -46,6 +46,7 @@ import {
   tmpfilesDirectUrl,
 } from "./src/uploadPolicy.js";
 import { normalizeApiKey } from "./src/apiKey.js";
+import { matchSeedanceSubmission, seedanceReplayAllowed, seedanceSubmissionJournal, seedanceTaskHistory } from "./src/seedanceSubmissionRecovery.js";
 import { ziyuJobFrom, ziyuJobPayload, ziyuModels, ziyuTaskId } from "./src/ziyuCatalog.js";
 import {
   GLOBAL_AIOPC_BASE_URL,
@@ -91,7 +92,9 @@ import {
   aiyrxVideoPayload,
 } from "./src/aiyrxCatalog.js";
 import {
-  SEEDANCE_VIDEO_BASE_URL,
+  PANDA626_BASE_URL,
+  seedanceVideoBaseUrl,
+  seedanceVideoRetryDelay,
   seedanceVideoModels,
   seedanceVideoPayload,
 } from "./src/seedanceVideoCatalog.js";
@@ -108,6 +111,7 @@ import {
 import { prepareUnmauImage } from "./src/unmauImage.js";
 import { BAILING_BASE_URL, bailingModels, bailingVideoPayload } from "./src/bailingCatalog.js";
 import { HUAJING_BASE_URL, huajingCapability, huajingInputIssue, huajingTaskForm, huajingTaskResult, huajingCreateWithRecovery } from "./src/huajingCatalog.js";
+import { BAOJU_BASE_URL, baojuModels, baojuPayload, baojuInputIssue, baojuTaskResult } from "./src/baojuCatalog.js";
 import { normalizedTaskProgress } from "./src/taskProgress.js";
 import { taskFailureDetails } from "./src/upstreamTaskFailure.js";
 import { friendlyUpstreamError } from "./src/upstreamError.js";
@@ -119,6 +123,7 @@ import {
 import { capabilityLimitIssue, submissionTimeoutForAdapter } from "./src/providerCatalog.js";
 import { cosFingerprintKey, cosPublicUrl, normalizeCosConfig } from "./src/cosStorage.js";
 import { faceScreenRouter } from "./serverFaceScreen.mjs";
+import { textServiceRouter } from "./serverTextService.mjs";
 import {
   directTaskContentPaths,
   requiresOriginalTaskKey,
@@ -405,10 +410,12 @@ function inferAdapter(url) {
   if (host === "pidoi.com" || host === "www.pidoi.com") return "pidoi";
   if (host === "api.aiyrx.xyz") return "aiyrx";
   if (host === "772808.xyz") return "seedancevideo";
+  if (host === "panda626.com" || host === "www.panda626.com") return "seedancevideo";
   if (host === "newapis.unmau.com") return "unmau";
   if (host === "suanliai.top" || host === "www.suanliai.top") return "suanliai";
   if (host === "bailingapi.top" || host === "www.bailingapi.top") return "bailing";
   if (host === "video.huajings.online") return "huajing";
+  if (host === "aimjbbb.cn") return "baoju";
   return "newapi";
 }
 
@@ -419,7 +426,7 @@ function providerConfig(req, requireModel = true) {
   let model = encodedModel;
   try { model = decodeURIComponent(encodedModel); } catch {}
   const requestedAdapter = String(req.get("x-api-adapter") || "").trim();
-  const adapter = ["fmgo", "paipu", "viralee", "canseedream", "lwaigc", "meaicc", "ziyuai", "globalaiopc", "maxforai", "clmm", "pidoi", "aiyrx", "seedancevideo", "unmau", "suanliai", "bailing", "huajing", "qiqi", "newapi"].includes(requestedAdapter)
+  const adapter = ["fmgo", "paipu", "viralee", "canseedream", "lwaigc", "meaicc", "ziyuai", "globalaiopc", "maxforai", "clmm", "pidoi", "aiyrx", "seedancevideo", "unmau", "suanliai", "bailing", "huajing", "baoju", "qiqi", "newapi"].includes(requestedAdapter)
     ? requestedAdapter
     : inferAdapter(resolvedBaseUrl);
   // canseedream.com 目前会 301 跳转至 see.ximeiedu.org。跨域跳转会按
@@ -431,11 +438,12 @@ function providerConfig(req, requireModel = true) {
   if (adapter === "clmm") resolvedBaseUrl = CLMM_BASE_URL;
   if (adapter === "pidoi") resolvedBaseUrl = PIDOI_BASE_URL;
   if (adapter === "aiyrx") resolvedBaseUrl = AIYRX_BASE_URL;
-  if (adapter === "seedancevideo") resolvedBaseUrl = SEEDANCE_VIDEO_BASE_URL;
+  if (adapter === "seedancevideo") resolvedBaseUrl = seedanceVideoBaseUrl(resolvedBaseUrl);
   if (adapter === "unmau") resolvedBaseUrl = UNMAU_BASE_URL;
   if (adapter === "suanliai") resolvedBaseUrl = SUANLIAI_BASE_URL;
   if (adapter === "bailing") resolvedBaseUrl = BAILING_BASE_URL;
   if (adapter === "huajing") resolvedBaseUrl = HUAJING_BASE_URL;
+  if (adapter === "baoju") resolvedBaseUrl = BAOJU_BASE_URL;
   if (adapter === "qiqi") resolvedBaseUrl = QIQI_IMAGE_BASE_URL;
   const rawUploadUrl = String(req.get("x-media-upload-url") || "").trim();
   const mediaUploadUrl = adapter === "maxforai"
@@ -471,11 +479,14 @@ function authHeaders(config, extra = {}) {
 const retryableStatuses = new Set([408, 425, 429, 433, 500, 502, 503, 504, 520, 522, 523, 524]);
 const retryableMethods = new Set(["GET", "HEAD", "OPTIONS"]);
 
-function retryDelay(attempt, response) {
+function retryDelay(attempt, response, url) {
+  if (url && new URL(url).origin === PANDA626_BASE_URL) return seedanceVideoRetryDelay(response?.headers?.get("retry-after"), Math.min(15000, 2000 * (2 ** attempt)));
   const retryAfter = Number(response?.headers?.get("retry-after"));
   if (Number.isFinite(retryAfter) && retryAfter > 0) return Math.min(10_000, retryAfter * 1000);
   return Math.min(5000, 500 * (2 ** attempt));
 }
+
+let pandaNextRequestAt = 0;
 
 async function upstream(url, options = {}, timeoutMs = 180_000) {
   const method = String(options.method || "GET").toUpperCase();
@@ -483,17 +494,24 @@ async function upstream(url, options = {}, timeoutMs = 180_000) {
   let lastError;
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     try {
+      // Panda626 的上传、提交和查询共用账号限流；本机将鉴权请求错开。
+      if (new URL(url).origin === PANDA626_BASE_URL && options.headers?.Authorization) {
+        const now = Date.now();
+        const wait = Math.max(0, pandaNextRequestAt - now);
+        pandaNextRequestAt = Math.max(now, pandaNextRequestAt) + 550;
+        if (wait) await new Promise((resolve) => setTimeout(resolve, wait));
+      }
       const response = await fetch(url, { ...options, signal: AbortSignal.timeout(timeoutMs) });
       if (attempt + 1 < maxAttempts && retryableStatuses.has(response.status)) {
         await response.body?.cancel().catch(() => {});
-        await new Promise((resolve) => setTimeout(resolve, retryDelay(attempt, response)));
+        await new Promise((resolve) => setTimeout(resolve, retryDelay(attempt, response, url)));
         continue;
       }
       return response;
     } catch (error) {
       lastError = error;
       if (attempt + 1 >= maxAttempts) throw error;
-      await new Promise((resolve) => setTimeout(resolve, retryDelay(attempt)));
+      await new Promise((resolve) => setTimeout(resolve, retryDelay(attempt, undefined, url)));
     }
   }
   throw lastError || new Error("上游请求失败");
@@ -513,7 +531,9 @@ async function readJson(response) {
     if (response.status === 433) {
       message = `HTTP 433：网络代理或连接链路异常。工作台已启用直连防丢包，请稍后重试。${message ? ` ${message}` : ""}`;
     }
-    throw httpError(response.status, friendlyUpstreamError(message));
+    const error = httpError(response.status, friendlyUpstreamError(message));
+    if (response.headers.get("retry-after")) error.retryAfterMs = seedanceVideoRetryDelay(response.headers.get("retry-after"), 0);
+    throw error;
   }
   return body;
 }
@@ -692,7 +712,7 @@ function validateMeaiccLimits(config, meta, duration) {
 function validateProviderLimits(config, meta, duration) {
   // 这些中转的能力由带当前 Key 的实时模型接口返回，服务端在创建阶段
   // 拿不到浏览器保存的动态表；保留前端实时校验并交给上游复核。
-  if (["lwaigc", "meaicc", "newapi", "canseedream", "ziyuai", "aiyrx", "unmau", "bailing", "huajing"].includes(config.adapter)) return;
+  if (["lwaigc", "meaicc", "newapi", "canseedream", "ziyuai", "aiyrx", "unmau", "bailing", "huajing", "baoju"].includes(config.adapter)) return;
   const issue = capabilityLimitIssue({ adapter: config.adapter, model: config.model }, meta, duration);
   if (issue) throw httpError(400, issue);
   if (config.adapter === "maxforai" && config.model === MAXFORAI_FT_933_MODEL) {
@@ -1001,6 +1021,8 @@ async function uploadMedia(config, file, material = {}, req) {
   }
   const displayName = String(material.name || file.originalname || "本地素材");
   const originalBytes = fileBytes(file);
+  if (config.adapter === "seedancevideo" && config.baseUrl === PANDA626_BASE_URL && originalBytes.length > 8 * 1024 * 1024)
+    throw httpError(413, `Panda626 单张参考图片不能超过 8 MiB：${displayName}`);
   let uploadBytes = originalBytes;
   let uploadName = displayName;
   let uploadMimeType = file.mimetype || "application/octet-stream";
@@ -1094,7 +1116,7 @@ async function uploadMedia(config, file, material = {}, req) {
     form.set("file", new Blob([uploadBytes], { type: uploadMimeType }), uploadName);
     if (config.adapter === "seedancevideo") form.set("originalName", displayName);
     const headers = { Authorization: `Bearer ${config.mediaUploadKey}` };
-    const maxAttempts = config.adapter === "maxforai" ? 4 : 1;
+    const maxAttempts = config.adapter === "maxforai" || config.baseUrl === PANDA626_BASE_URL ? 4 : 1;
     let response;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       uploadAttemptCount = attempt;
@@ -1104,7 +1126,9 @@ async function uploadMedia(config, file, material = {}, req) {
         180_000,
       );
       if (response.status !== 429 || attempt === maxAttempts) break;
-      const delayMs = configuredUploadRetryDelay(response.headers.get("retry-after"), attempt - 1);
+      const delayMs = config.baseUrl === PANDA626_BASE_URL
+        ? seedanceVideoRetryDelay(response.headers.get("retry-after"), 15000)
+        : configuredUploadRetryDelay(response.headers.get("retry-after"), attempt - 1);
       writeDiagnostic(req, "configured_upload_retry_wait", {
         service: config.adapter,
         fileName: displayName,
@@ -1320,9 +1344,9 @@ async function prepareMaterials(config, files, meta, req) {
 function withReferenceMapping(prompt, materials, enabled) {
   if (!enabled || !materials.length) return prompt;
   const lines = materials.map(
-    (item, index) => `${item.tag || `@Reference${index + 1}`} = ${item.kind} 参考素材（${item.name || "网络素材"}）`,
-  );
-  return `${prompt}\n\n参考素材映射：\n${lines.join("\n")}`;
+    (item, index) => item.noAutoMention === true ? "" : `${item.tag || `@Reference${index + 1}`} = ${item.kind} 参考素材（${item.name || "网络素材"}）`,
+  ).filter(Boolean);
+  return lines.length ? `${prompt}\n\n参考素材映射：\n${lines.join("\n")}` : prompt;
 }
 
 function paipuPayload(config, input) {
@@ -1523,10 +1547,34 @@ function materialCacheExpiresAt(materials) {
 }
 
 async function createSeedanceVideo(config, input) {
-  const idempotencyKey = crypto.randomUUID();
+  const idempotencyKey = /^[0-9a-f-]{36}$/i.test(input.clientSubmissionKey || "") ? input.clientSubmissionKey : crypto.randomUUID();
   const bodyText = JSON.stringify(seedanceVideoPayload(config.model, input));
+  if (Buffer.byteLength(bodyText) > 1024 * 1024) throw httpError(413, "Seedance 视频请求体不能超过 1 MiB");
+  const journalPath = path.join(dataDir, "seedance-video-submissions.jsonl");
+  appendFileSync(journalPath, `${JSON.stringify({
+    idempotencyKey, baseUrl: config.baseUrl, model: config.model,
+    apiKeyFingerprint: apiKeyFingerprint(config.apiKey), createdAt: new Date().toISOString(),
+    state: "submitting", request: JSON.parse(bodyText),
+  })}\n`);
+  let traceId = "";
+  const recordState = (state, extra = {}) => {
+    try { appendFileSync(journalPath, `${JSON.stringify({ idempotencyKey, state, ...extra })}\n`); } catch {}
+  };
+  const unknown = async (message) => {
+    recordState("unknown", { traceId });
+    // 恢复原始请求；补救时仅复用原幂等编号和原请求体，绝不换编号重建。
+    if (config.baseUrl === "https://772808.xyz") {
+      try {
+        const recovered = await recoverSeedanceSubmissions(config, [idempotencyKey]);
+        if (recovered[0]?.job) return recovered[0].job;
+      } catch {}
+    }
+    const error = httpError(502, `${message}。为避免重复扣费，本条不会自动重新提交；请核对中转后台。幂等编号：${idempotencyKey}${traceId ? `；追踪编号：${traceId}` : ""}`);
+    error.submissionUnknown = true;
+    error.idempotencyKey = idempotencyKey;
+    throw error;
+  };
   const deadline = Date.now() + 180_000;
-  let lastError;
   while (Date.now() < deadline) {
     let response;
     try {
@@ -1538,38 +1586,112 @@ async function createSeedanceVideo(config, input) {
         }),
         body: bodyText,
       }, 120_000);
-    } catch (error) {
-      lastError = error;
-      await new Promise((resolve) => setTimeout(resolve, 3000));
+    } catch (cause) {
+      recordState("unknown", { connectionError: cause?.name, connectionCode: cause?.cause?.code || cause?.code });
+      return unknown("Seedance 视频提交连接中断，创建结果仍待确认");
+    }
+
+    const body = await response.clone().json().catch(() => ({}));
+    const code = String(body?.error?.code || body?.code || "");
+    traceId = String(body?.local_task_id || traceId).trim();
+    if ((!response.ok && body?.retryable === false) || ["request_state_uncertain", "idempotency_outcome_unknown", "idempotency_task_expired", "task_deleted"].includes(code) || response.status === 410) {
+      recordState("unknown", { stopReplay: true });
+      return unknown(String(body?.error?.message || body?.message || "中转要求停止重试并核对原请求"));
+    }
+    if (response.status === 409 && code === "request_in_progress") {
+      recordState("waiting", { traceId });
+      await new Promise((resolve) => setTimeout(resolve, seedanceVideoRetryDelay(response.headers.get("retry-after"))));
       continue;
     }
-
-    if (response.status === 409) {
-      const body = await response.json().catch(() => ({}));
-      const code = String(body?.error?.code || body?.code || "");
-      const retryable = body?.retryable;
-      const traceId = String(body?.local_task_id || "").trim();
-      if (code === "request_in_progress" && retryable !== false) {
-        const retryAfter = Number(response.headers.get("retry-after"));
-        await new Promise((resolve) => setTimeout(resolve, Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 3000));
-        continue;
-      }
-      const message = body?.error?.message || body?.error || body?.message || "创建任务状态不确定";
-      throw httpError(409, `${message}${traceId ? `（追踪编号：${traceId}）` : ""}`);
+    if (response.status >= 500 || response.status === 408) return unknown("Seedance 视频上游返回异常，创建结果仍待确认");
+    if (!response.ok) {
+      recordState("rejected", { code, status: response.status });
+      await readJson(response);
     }
-
-    const body = await readJson(response);
-    const taskId = taskIdFrom(body);
-    if (!taskId) throw httpError(502, "Seedance 视频创建成功但没有返回任务 ID");
+    // local_task_id 是错误追踪号，不是已受理的任务 ID。
+    const taskId = String(body?.id || "").trim();
+    if (!taskId) return unknown("Seedance 视频没有返回正式任务 ID");
+    recordState("accepted", { taskId });
+    const status = body.result_pending ? "processing" : normalizeStatus(body.status);
     return {
       adapter: "seedancevideo",
       baseUrl: config.baseUrl,
       taskId,
       statusPath: `/v1/videos/${encodeURIComponent(taskId)}`,
       model: config.model,
+      status,
+      progress: normalizedTaskProgress(status, body.progress || 0),
+      videoUrl: status === "completed" ? videoUrlFrom(body, config.baseUrl) : null,
+      error: status === "failed" ? taskFailureDetails(body)?.reason : undefined,
     };
   }
-  throw lastError || httpError(504, "Seedance 视频创建结果仍待确认；请保留当前任务记录，不要重复提交");
+  return unknown("Seedance 视频创建结果仍待确认");
+}
+
+async function recoverSeedanceSubmissions(config, keys) {
+  const journalPath = path.join(dataDir, "seedance-video-submissions.jsonl");
+  const journal = seedanceSubmissionJournal(existsSync(journalPath) ? readFileSync(journalPath, "utf8") : "");
+  const submissions = keys.map((key) => journal.get(key));
+  if (submissions.some((row) => !row || row.baseUrl !== config.baseUrl || row.apiKeyFingerprint !== apiKeyFingerprint(config.apiKey)))
+    throw httpError(400, "原始提交记录不存在，或不属于当前中转和 API Key；未修改任务");
+  let history = [], historyError;
+  if (submissions.some((row) => !row.taskId)) {
+    try {
+      history = await seedanceTaskHistory(config.baseUrl, async (url) => readJson(await upstream(url, {
+        headers: authHeaders(config, { "Cache-Control": "no-cache, no-store" }), cache: "no-store",
+      }, 30000)));
+    } catch (error) { historyError = error; }
+  }
+  const claimed = new Set();
+  const results = [];
+  for (const submission of submissions) {
+    const match = matchSeedanceSubmission(submission, history);
+    if (historyError && !match.taskId) {
+      match.reason = `中转任务列表查询失败${historyError.status ? `（HTTP ${historyError.status}）` : ""}：${historyError.message}；不能据此认定未创建`;
+      // 仅恢复未收到响应的请求。原 Key、原 JSON 不变；明确停止或超过保留期的请求不回放。
+      if (seedanceReplayAllowed(submission)) {
+        try {
+          const response = await upstream(`${config.baseUrl}/v1/videos`, {
+            method: "POST", headers: authHeaders(config, { "Content-Type": "application/json", "Idempotency-Key": submission.idempotencyKey }),
+            body: JSON.stringify(submission.request),
+          }, 120000);
+          const body = await response.json().catch(() => ({}));
+          const code = String(body?.error?.code || body?.code || "");
+          if (body.retryable === false || ["request_state_uncertain", "idempotency_outcome_unknown", "idempotency_task_expired", "task_deleted"].includes(code) || response.status === 410) {
+            appendFileSync(journalPath, `${JSON.stringify({ idempotencyKey: submission.idempotencyKey, state: "unknown", stopReplay: true })}\n`);
+            match.reason = "中转要求停止原请求回放；继续只读核对，未新建任务";
+          } else if (response.ok && String(body.id || "").trim()) {
+            match.taskId = String(body.id).trim();
+            match.reason = undefined;
+          } else {
+            match.reason += `；原编号恢复暂未返回任务 ID（HTTP ${response.status}），未换编号重建`;
+          }
+        } catch (error) { match.reason += `；原编号恢复连接暂时失败，未换编号重建`; }
+      }
+    }
+    const result = { idempotencyKey: submission.idempotencyKey, reason: match.reason };
+    if (match.taskId && !claimed.has(match.taskId)) {
+      const job = { adapter: "seedancevideo", baseUrl: config.baseUrl, taskId: match.taskId,
+        statusPath: `/v1/videos/${encodeURIComponent(match.taskId)}`, model: submission.model };
+      // ID 一旦确认先落盘，不让下一次状态查询失败把关联关系丢掉。
+      appendFileSync(journalPath, `${JSON.stringify({ idempotencyKey: submission.idempotencyKey, state: "accepted", taskId: match.taskId, recoveredAt: new Date().toISOString() })}\n`);
+      claimed.add(match.taskId);
+      result.createdAt = submission.createdAt;
+      result.submittedPrompt = submission.request.input.prompt;
+      result.parameters = submission.request.parameters;
+      try {
+        const status = await pollJob(config, job);
+        result.job = { ...job, status: status.status, progress: status.progress,
+          videoUrl: status.status === "completed" ? status.videoUrl : null,
+          error: status.status === "failed" ? taskFailureDetails(status.body)?.reason : undefined };
+      } catch (error) {
+        result.job = { ...job, status: "processing", progress: 0, videoUrl: null };
+        result.reason = `对应原任务查询失败：${error.message}；未重新提交`;
+      }
+    } else if (match.taskId) result.reason = "同一后台任务对应多个提交，保留待确认以免串错";
+    results.push(result);
+  }
+  return results;
 }
 
 function isFmgoFeimiaoChatModel(model) {
@@ -1759,6 +1881,95 @@ async function createLwaigc(config, input) {
   };
 }
 
+async function createBaojuVideo(config, input) {
+  const saved = input.recoverySubmission;
+  let request = saved?.request;
+  if (!request) {
+    const catalog = baojuModels(await readJson(await upstream(`${config.baseUrl}/api/v1/models`, { headers: authHeaders(config) })));
+    const cap = catalog.capabilities[config.model];
+    if (!cap) throw httpError(400, "Baoju 当前 Key 没有这个已上架模型，请重新读取模型列表");
+    const issue = baojuInputIssue(cap, input, config.model);
+    if (issue) throw httpError(400, issue);
+    request = baojuPayload(config.model, input, cap);
+  }
+  const bodyText = JSON.stringify(request);
+  if (Buffer.byteLength(bodyText) > 256 * 1024) throw httpError(413, "Baoju 视频请求体不能超过 256 KiB");
+  const idempotencyKey = saved?.idempotencyKey || (/^[0-9a-f-]{36}$/i.test(input.clientSubmissionKey || "") ? input.clientSubmissionKey : crypto.randomUUID());
+  const journalPath = path.join(dataDir, "baoju-video-submissions.jsonl");
+  const record = (state, extra = {}) => appendFileSync(journalPath, `${JSON.stringify({ idempotencyKey, state, ...extra })}\n`);
+  if (!saved) record("submitting", { baseUrl: config.baseUrl, model: config.model, apiKeyFingerprint: apiKeyFingerprint(config.apiKey), createdAt: new Date().toISOString(), request });
+  let lastMessage = "提交响应未确认", stopReplay = false, retryAfterMs = 2000;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    let response;
+    try {
+      response = await upstream(`${config.baseUrl}/api/v1/videos`, {
+        method: "POST", headers: authHeaders(config, { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey }), body: bodyText,
+      }, 120000);
+    } catch (error) {
+      lastMessage = "提交连接中断";
+      if (attempt < 2) { await new Promise((resolve) => setTimeout(resolve, 2000)); continue; }
+      break;
+    }
+    const body = await response.clone().json().catch(() => ({}));
+    const code = String(body?.error?.code || "");
+    if (response.ok && typeof body.id === "string" && body.id.trim()) {
+      const taskId = String(body.id).trim();
+      record("accepted", { taskId });
+      const result = baojuTaskResult(body, config.baseUrl);
+      return { adapter: "baoju", baseUrl: config.baseUrl, taskId, model: request.model,
+        statusPath: `/api/v1/videos/${encodeURIComponent(taskId)}`, contentPath: `/api/v1/videos/${encodeURIComponent(taskId)}/content?index=0`,
+        status: result.status, progress: result.progress, videoUrl: result.videoUrl,
+        error: result.status === "failed" ? taskFailureDetails(result)?.reason : undefined,
+        retryAfterMs: result.retryAfterMs, autoRetryBlocked: result.autoRetryBlocked };
+    }
+    const transient = [408, 429].includes(response.status) || response.status >= 500 || (response.status === 409 && code === "request_in_progress");
+    if (!response.ok && !transient) {
+      record("rejected", { status: response.status });
+      await readJson(response);
+    }
+    lastMessage = response.ok ? "未返回正式任务 ID" : `提交结果暂未确认（HTTP ${response.status}${code ? ` · ${code}` : ""}）`;
+    retryAfterMs = seedanceVideoRetryDelay(response.headers.get("retry-after"), 2000);
+    stopReplay = body?.error?.retryable === false || body?.retryable === false;
+    if (stopReplay || !transient || attempt === 2) break;
+    await new Promise((resolve) => setTimeout(resolve, retryAfterMs));
+  }
+  record("unknown", { stopReplay, nextRecoveryAt: Date.now() + retryAfterMs });
+  const error = httpError(502, `Baoju ${lastMessage}；工作台保留原请求继续核对，请勿换编号重新生成。幂等编号：${idempotencyKey}`);
+  error.submissionUnknown = true;
+  error.idempotencyKey = idempotencyKey;
+  throw error;
+}
+
+async function recoverBaojuSubmissions(config, keys) {
+  const journalPath = path.join(dataDir, "baoju-video-submissions.jsonl");
+  const journal = seedanceSubmissionJournal(existsSync(journalPath) ? readFileSync(journalPath, "utf8") : "");
+  const results = [];
+  for (const key of keys) {
+    const row = journal.get(key);
+    if (!row || row.baseUrl !== config.baseUrl) throw httpError(400, "找不到当前中转的原始提交记录，未重新提交");
+    const result = { idempotencyKey: key, createdAt: row.createdAt, submittedPrompt: row.request.prompt,
+      parameters: { duration: row.request.duration_seconds, resolution: row.request.resolution, ratio: row.request.aspect_ratio } };
+    try {
+      let job;
+      if (row.taskId) {
+        job = { adapter: "baoju", baseUrl: config.baseUrl, taskId: row.taskId, model: row.model,
+          statusPath: `/api/v1/videos/${encodeURIComponent(row.taskId)}`, contentPath: `/api/v1/videos/${encodeURIComponent(row.taskId)}/content?index=0` };
+        const status = await pollJob(config, job);
+        job = { ...job, status: status.status, progress: status.progress, videoUrl: status.videoUrl, autoRetryBlocked: status.body?.autoRetryBlocked,
+          error: status.status === "failed" ? taskFailureDetails(status.body)?.reason : undefined };
+      } else {
+        if (row.stopReplay || row.state === "rejected") throw httpError(409, "中转已明确拒绝或要求停止重试，未新建任务");
+        if (Number(row.nextRecoveryAt) > Date.now()) throw httpError(429, "中转要求稍后恢复，正在等待 Retry-After；未新建任务");
+        if (row.apiKeyFingerprint !== apiKeyFingerprint(config.apiKey)) throw httpError(409, "恢复未确认的原请求需要原 API Key，避免跨账号新建任务");
+        job = await createBaojuVideo(config, { recoverySubmission: row });
+      }
+      result.job = job;
+    } catch (error) { result.reason = error.message; }
+    results.push(result);
+  }
+  return results;
+}
+
 async function createHuajingVideo(config, input) {
   const cap = await huajingLiveCapability(config);
   const issue = huajingInputIssue(cap, input);
@@ -1780,6 +1991,7 @@ async function createHuajingVideo(config, input) {
 }
 
 async function createVideo(config, input) {
+  if (config.adapter === "baoju") return createBaojuVideo(config, input);
   if (config.adapter === "huajing") return createHuajingVideo(config, input);
   if (config.adapter === "fmgo") return createFmgo(config, input);
   if (config.adapter === "lwaigc") return createLwaigc(config, input);
@@ -2089,21 +2301,29 @@ async function createImage(config, input, files) {
 function verifyJobConfig(config, job) {
   if (config.baseUrl !== job.baseUrl || config.adapter !== job.adapter)
     throw httpError(400, "任务所属中转站与当前配置不一致");
-  if (requiresOriginalTaskKey(config.adapter) && job.apiKeyFingerprint && job.apiKeyFingerprint !== apiKeyFingerprint(config.apiKey))
+  if (config.baseUrl !== PANDA626_BASE_URL && requiresOriginalTaskKey(config.adapter) && job.apiKeyFingerprint && job.apiKeyFingerprint !== apiKeyFingerprint(config.apiKey))
     throw httpError(409, "这条任务是用另一把 API Key 创建的；请切回原 KEY 查询，或用当前 KEY 重新提交新任务");
 }
 
 async function pollJob(config, job) {
   const response = await upstream(`${config.baseUrl}${job.statusPath}`, {
-    headers: authHeaders(config, ["fmgo", "huajing"].includes(config.adapter)
+    headers: authHeaders(config, ["fmgo", "huajing", "seedancevideo", "baoju"].includes(config.adapter)
       ? { "Cache-Control": "no-cache, no-store", Pragma: "no-cache" }
       : {}),
-    ...(["fmgo", "huajing"].includes(config.adapter) ? { cache: "no-store" } : {}),
+    ...(["fmgo", "huajing", "seedancevideo", "baoju"].includes(config.adapter) ? { cache: "no-store" } : {}),
   });
+  if (config.adapter === "seedancevideo" && [202, 409].includes(response.status)) {
+    const pending = await response.clone().json().catch(() => ({}));
+    if (response.status === 202 || pending?.error?.code === "video_result_pending" || pending?.code === "video_result_pending" || pending?.result_pending) return {
+      body: pending, status: "processing", progress: 99, videoUrl: null,
+      retryAfterMs: seedanceVideoRetryDelay(response.headers.get("retry-after") || pending.retry_after, 20000),
+    };
+  }
   const responseBody = await readJson(response);
-  const body = config.adapter === "huajing" ? huajingTaskResult(responseBody, config.baseUrl)
+  const body = config.adapter === "baoju" ? baojuTaskResult(responseBody, config.baseUrl)
+    : config.adapter === "huajing" ? huajingTaskResult(responseBody, config.baseUrl)
     : config.adapter === "ziyuai" ? ziyuJobFrom(responseBody) : responseBody;
-  const status = normalizeStatus(
+  const status = config.adapter === "seedancevideo" && body.result_pending ? "processing" : normalizeStatus(
     body?.status || body?.state || body?.task_status || body?.data?.status || body?.data?.state,
   );
   const result = {
@@ -2113,7 +2333,9 @@ async function pollJob(config, job) {
       status,
       body?.progress ?? body?.percentage ?? body?.data?.progress ?? body?.data?.percentage ?? 0,
     ),
-    videoUrl: config.adapter === "huajing" ? body.videoUrl : videoUrlFrom(body, config.baseUrl),
+    videoUrl: ["huajing", "baoju"].includes(config.adapter) ? body.videoUrl : videoUrlFrom(body, config.baseUrl),
+    ...(config.adapter === "baoju" ? { retryAfterMs: body.retryAfterMs } : {}),
+    ...(config.adapter === "seedancevideo" ? { retryAfterMs: seedanceVideoRetryDelay(response.headers.get("retry-after") || body.retry_after, 15000) } : {}),
   };
   if (result.status === "completed" && result.videoUrl) {
     const cacheKey = `${config.baseUrl}\n${job.taskId}`;
@@ -2132,7 +2354,14 @@ function streamResponse(response, res) {
     if (value) res.setHeader(header, value);
   }
   if (!response.body) return res.end();
-  Readable.fromWeb(response.body).pipe(res);
+  pipeline(Readable.fromWeb(response.body), res, (error) => {
+    if (!error || !res.req) return;
+    writeDiagnostic(res.req, error.code === "ERR_STREAM_PREMATURE_CLOSE" ? "media_stream_cancelled" : "media_stream_failed", {
+      error: error.name || "媒体传输失败",
+      code: error.code || error.cause?.code,
+      statusCode: res.statusCode,
+    });
+  });
 }
 
 function sameSiteHost(leftUrl, rightUrl) {
@@ -2149,7 +2378,8 @@ app.use((req, _res, next) => {
   next();
 });
 
-app.use(express.json({ limit: "16kb" }));
+const parseSmallJson = express.json({ limit: "16kb" });
+app.use((req, res, next) => /^\/api\/text(?:\/|$)/.test(req.path) ? next() : parseSmallJson(req, res, next));
 
 app.get("/api/health", (_req, res) => res.json({ ok: true }));
 
@@ -2215,6 +2445,8 @@ app.use("/api", (req, res, next) => {
   return next();
 });
 
+app.use("/api/text", textServiceRouter());
+
 app.use("/api", (req, res, next) => {
   req.diagnostic = {
     requestId: String(req.get("x-diagnostic-request-id") || "").trim() || crypto.randomUUID(),
@@ -2270,6 +2502,10 @@ app.get("/api/storage/status", (_req, res) => {
 app.get("/api/config/models", async (req, res, next) => {
   try {
     const config = providerConfig(req, false);
+    if (config.adapter === "baoju") {
+      const result = baojuModels(await readJson(await upstream(`${config.baseUrl}/api/v1/models`, { headers: authHeaders(config) })));
+      return res.json(result);
+    }
     if (config.adapter === "huajing") {
       const body = await readJson(await upstream(`${config.baseUrl}/v1/models`, { headers: authHeaders(config) }));
       const capabilities = {};
@@ -2281,13 +2517,11 @@ app.get("/api/config/models", async (req, res, next) => {
         capabilities[row.id] = huajingCapability(cap);
         labels[row.id] = `${row.id}${row.creditCost != null || cap.creditCost != null ? ` · ${row.creditCost ?? cap.creditCost}积分` : ""}`;
       }
-      if (!Object.keys(capabilities).length) throw httpError(502, "华镜当前 Key 没有可用视频模型");
       return res.json({ models: Object.keys(capabilities), capabilities, labels });
     }
     if (config.adapter === "bailing") {
       const response = await upstream(`${BAILING_BASE_URL}/v1/models`, { headers: authHeaders(config) });
       const models = bailingModels(await readJson(response));
-      if (!models.length) throw httpError(502, "白灵当前 Key 没有返回模型；请检查 Key 和分组权限");
       return res.json({ models });
     }
     if (config.adapter === "canseedream") {
@@ -2301,7 +2535,6 @@ app.get("/api/config/models", async (req, res, next) => {
       const providers = Array.isArray(health?.defaults?.videoProviders)
         ? health.defaults.videoProviders
         : [];
-      if (!providers.length) throw httpError(502, "CanSeeDream 当前没有返回可用视频线路");
       const capabilities = {};
       const labels = {};
       for (const provider of providers) {
@@ -2334,37 +2567,29 @@ app.get("/api/config/models", async (req, res, next) => {
       const response = await upstream(`${config.baseUrl}/api/v1/models`, { headers: authHeaders(config) });
       const body = await readJson(response);
       const catalog = ziyuModels(body);
-      if (!catalog.models.length) throw httpError(502, "紫域 AI 当前没有返回可用视频模型");
       return res.json(catalog);
     }
     if (config.adapter === "clmm") {
       const response = await upstream(CLMM_PRICING_URL, { headers: authHeaders(config) });
       const models = clmmModels(await readJson(response));
-      if (!models.length) throw httpError(502, "CLMM Mall 当前没有返回可用视频模型");
       return res.json({ models });
-    }
-    if (config.adapter === "pidoi") {
-      return res.json({ models: PIDOI_MODELS });
     }
     if (config.adapter === "aiyrx") {
       const response = await upstream(`${config.baseUrl}/v1/models`, { headers: authHeaders(config) });
       const catalog = aiyrxModels(await readJson(response));
-      if (!catalog.models.length) throw httpError(502, "AIYRX 当前没有返回可用视频模型");
       return res.json(catalog);
     }
     if (config.adapter === "seedancevideo") {
       const response = await upstream(`${config.baseUrl}/v1/models`, { headers: authHeaders(config) });
       const catalog = seedanceVideoModels(await readJson(response));
-      if (!catalog.models.length) throw httpError(502, "Seedance 视频当前没有返回可用模型；请让中转站先为该 KEY 启用模型");
       return res.json(catalog);
     }
     if (config.adapter === "unmau") {
       const [modelsResponse, pricingResponse] = await Promise.all([
         upstream(`${UNMAU_BASE_URL}/v1/models`, { headers: authHeaders(config) }),
-        upstream(`${UNMAU_BASE_URL}/api/pricing`),
+        upstream(`${UNMAU_BASE_URL}/api/pricing`).catch(() => null),
       ]);
-      const catalog = unmauCatalog(await readJson(pricingResponse), await readJson(modelsResponse));
-      if (!catalog.models.length) throw httpError(502, "Unmau 当前 KEY 没有返回可用视频模型");
+      const catalog = unmauCatalog(pricingResponse?.ok ? await readJson(pricingResponse) : {}, await readJson(modelsResponse));
       return res.json(catalog);
     }
     if (config.adapter === "suanliai") {
@@ -2379,11 +2604,14 @@ app.get("/api/config/models", async (req, res, next) => {
         }
       }
       const catalog = suanliaiCatalog(...bodies);
-      if (catalog.models.length) return res.json(catalog);
+      if (bodies.length) return res.json(catalog);
+      const authError = errors.find((error) => [401, 403].includes(error.status));
+      if (authError) throw authError;
       if (errors.length === 2) {
         return res.json({
           models: SUANLIAI_VIDEO_MODELS,
-          warning: `实时模型列表暂时不可用，已使用公开文档模型：${errors[0]?.message || "连接失败"}`,
+          source: "fallback",
+          warning: `实时模型列表暂时不可用，显示内置参考列表，未核实 Key 权限：${errors[0]?.message || "连接失败"}`,
         });
       }
       throw httpError(502, "算力AI 当前 KEY 没有返回可用视频模型");
@@ -2391,33 +2619,25 @@ app.get("/api/config/models", async (req, res, next) => {
     const response = await upstream(`${config.baseUrl}/v1/models`, { headers: authHeaders(config) });
     if (!response.ok && [404, 405, 501].includes(response.status)) {
       const fallback = fallbackModels(config.adapter);
-      if (fallback.length) return res.json({ models: fallback, warning: "模型列表接口不可用，已使用公开文档中的模型" });
+      if (fallback.length) return res.json({ models: fallback, source: "fallback", warning: "模型列表接口不可用，当前显示内置参考列表，尚未核实这把 Key 的模型权限" });
     }
     const body = await readJson(response);
-    const list = Array.isArray(body?.data) ? body.data : Array.isArray(body?.models) ? body.models : [];
-    let models = list.map((item) => (typeof item === "string" ? item : item?.id || item?.name)).filter(Boolean);
-    if (config.adapter === "lwaigc") {
-      const documentedVideoModels = new Set(LWAIGC_VIDEO_MODELS);
-      models = [...new Set([...models.filter((model) => documentedVideoModels.has(model)), ...LWAIGC_VIDEO_MODELS])];
-    }
-    if (config.adapter === "fmgo") {
-      models = [...new Set([...models, ...FMGO_MODELS])];
-    }
-    if (config.adapter === "globalaiopc") {
-      models = [...new Set([...models, ...GLOBAL_AIOPC_MODELS])];
-    }
+    const list = Array.isArray(body) ? body : Array.isArray(body?.data) ? body.data : Array.isArray(body?.models) ? body.models : null;
+    if (!list) throw httpError(502, "中转返回的模型列表格式无法识别");
+    let models = [...new Set(list.map((item) => typeof item === "string" ? item : item?.id || item?.name)
+      .filter((model) => typeof model === "string" && model.trim()).map((model) => model.trim()))];
     if (config.adapter === "maxforai") {
       models = maxforaiModels(models);
     }
     res.json({
-      models: config.adapter === "lwaigc" ? models : models.length ? models : fallbackModels(config.adapter),
+      models, source: "live",
     });
   } catch (error) {
     const adapter = (() => {
       try { return providerConfig(req, false).adapter; } catch { return ""; }
     })();
     const fallback = fallbackModels(adapter);
-    if (fallback.length && error.status >= 500) return res.json({ models: fallback, warning: error.message });
+    if (fallback.length && error.status >= 500) return res.json({ models: fallback, source: "fallback", warning: `实时模型读取失败，显示内置参考列表，未核实 Key 权限：${error.message}` });
     next(error);
   }
 });
@@ -2638,7 +2858,7 @@ app.post("/api/tasks", upload.array("references", 50), async (req, res, next) =>
       throw httpError(400, "参考素材信息无效");
     }
     if (!Array.isArray(meta) || meta.length > 50) throw httpError(400, "参考素材数量无效");
-    const requestedDuration = safeNumber(req.body.duration, 5, 1, 60);
+    const requestedDuration = safeNumber(req.body.duration, 5, 1, config.adapter === "baoju" ? 600 : 60);
     validateLwaigcLimits(config, meta, requestedDuration);
     validateMeaiccLimits(config, meta, requestedDuration);
     validateProviderLimits(config, meta, requestedDuration);
@@ -2678,12 +2898,13 @@ app.post("/api/tasks", upload.array("references", 50), async (req, res, next) =>
       prompt,
       materials,
       duration: requestedDuration,
-      resolution: config.adapter === "seedancevideo"
+      resolution: ["seedancevideo", "baoju"].includes(config.adapter)
         ? String(req.body.resolution || "").trim().slice(0, 64)
         : ["480p", "720p", "768p", "1080p", "2k", "2K", "4k", "4K"].includes(req.body.resolution)
           ? req.body.resolution
           : "720p",
-      aspectRatio: ["21:9", "16:9", "4:3", "1:1", "3:4", "9:16", "auto", "adaptive"].includes(req.body.aspectRatio)
+      aspectRatio: config.adapter === "baoju" ? String(req.body.aspectRatio || "").trim().slice(0, 32)
+        : ["21:9", "16:9", "4:3", "1:1", "3:4", "9:16", "auto", "adaptive"].includes(req.body.aspectRatio)
         ? req.body.aspectRatio
         : "16:9",
       seed: String(req.body.seed || "").trim()
@@ -2694,6 +2915,7 @@ app.post("/api/tasks", upload.array("references", 50), async (req, res, next) =>
     if (config.adapter === "lwaigc" && isLwaigcDqModel(config.model) && Number(input.seed) > 999999999)
       throw httpError(400, "DQ Seedance 2.0 的随机种子必须在 0–999999999 之间");
     const quantity = safeNumber(req.body.quantity, 1, 1, 4);
+    if (["seedancevideo", "baoju"].includes(config.adapter) && quantity === 1) input.clientSubmissionKey = String(req.body.clientSubmissionKey || "");
     const providerStartedAt = Date.now();
     writeDiagnostic(req, "provider_submit_started", {
       quantity,
@@ -2717,7 +2939,18 @@ app.post("/api/tasks", upload.array("references", 50), async (req, res, next) =>
       });
     }
     let jobs;
-    if (config.adapter === "huajing" || (config.adapter === "fmgo" && /^ss-v2(?:-fast)?$/i.test(config.model))) {
+    if (config.adapter === "seedancevideo") {
+      jobs = [];
+      try {
+        for (let index = 0; index < quantity; index += 1) jobs.push(await createVideo(config, input));
+      } catch (error) {
+        if (jobs.length) {
+          error.submissionUnknown = true;
+          error.message = `已有 ${jobs.length} 条任务受理（${jobs.map((job) => job.taskId).join("、")}）；后续提交异常：${error.message}。为避免重复扣费，不会自动整批重交，请先核对中转后台。`;
+        }
+        throw error;
+      }
+    } else if (config.adapter === "huajing" || (config.adapter === "fmgo" && /^ss-v2(?:-fast)?$/i.test(config.model))) {
       jobs = [];
       for (let index = 0; index < quantity; index += 1) {
         if (index && config.adapter !== "huajing") await new Promise((resolve) => setTimeout(resolve, 5000));
@@ -2732,12 +2965,19 @@ app.post("/api/tasks", upload.array("references", 50), async (req, res, next) =>
       upstreamTaskIds: jobs.map((job) => job.taskId),
     });
     const createdAt = new Date().toLocaleString("zh-CN", { hour12: false });
-    const tasks = jobs.map((job) => ({
-      id: encodeJob({ ...job, apiKeyFingerprint: apiKeyFingerprint(config.apiKey) }),
-      status: "queued",
-      progress: 0,
-      createdAt,
-    }));
+    const tasks = jobs.map((job) => {
+      const id = encodeJob({ ...job, apiKeyFingerprint: apiKeyFingerprint(config.apiKey) });
+      return {
+        id,
+        submissionVerified: true,
+        status: ["seedancevideo", "baoju"].includes(job.adapter) ? job.status : "queued",
+        progress: ["seedancevideo", "baoju"].includes(job.adapter) ? job.progress : 0,
+        ...(["seedancevideo", "baoju"].includes(job.adapter) && job.error ? { error: job.error } : {}),
+        ...(["seedancevideo", "baoju"].includes(job.adapter) && job.status === "completed" ? { sourceVideoUrl: job.videoUrl, videoUrl: `/api/tasks/${encodeURIComponent(id)}/content` } : {}),
+        ...(job.adapter === "baoju" ? { retryAfterMs: job.retryAfterMs, autoRetryBlocked: Boolean(job.autoRetryBlocked) } : {}),
+        createdAt,
+      };
+    });
     res.status(202).json({ tasks });
     writeDiagnostic(req, "task_response_sent", { quantity: tasks.length });
   } catch (error) {
@@ -2775,12 +3015,35 @@ app.post("/api/tasks/recover", async (req, res, next) => {
           apiKeyFingerprint: apiKeyFingerprint(config.apiKey),
         }),
         upstreamTaskId: taskId,
+        submissionVerified: false,
         status: "queued",
         progress: 0,
         createdAt,
       })),
     });
   } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/tasks/recover-submissions", async (req, res, next) => {
+  try {
+    const config = providerConfig(req);
+    if (!["seedancevideo", "baoju"].includes(config.adapter)) throw httpError(400, "当前中转不支持按原始提交核对");
+    const keys = [...new Set(Array.isArray(req.body?.idempotencyKeys) ? req.body.idempotencyKeys : [])];
+    if (!keys.length || keys.length > 50 || keys.some((key) => typeof key !== "string" || !/^[0-9a-f-]{36}$/i.test(key)))
+      throw httpError(400, "请选择 1—50 条保留了原始幂等编号的待确认任务");
+    const results = config.adapter === "baoju" ? await recoverBaojuSubmissions(config, keys) : await recoverSeedanceSubmissions(config, keys);
+    res.json({ results: results.map(({ job, ...result }) => {
+      if (!job) return result;
+      const id = encodeJob({ ...job, apiKeyFingerprint: apiKeyFingerprint(config.apiKey) });
+      return { ...result, task: { id, upstreamTaskId: job.taskId, model: job.model,
+        status: job.status, progress: job.progress, error: job.error,
+        ...(job.adapter === "baoju" ? { autoRetryBlocked: Boolean(job.autoRetryBlocked) } : {}),
+        ...(job.status === "completed" ? { sourceVideoUrl: job.videoUrl, videoUrl: `/api/tasks/${encodeURIComponent(id)}/content` } : {}) } };
+    }) });
+  } catch (error) {
+    writeDiagnostic(req, "seedance_recovery_failed", { status: error.status, error: error.message, connectionError: error.name });
     next(error);
   }
 });
@@ -2803,6 +3066,8 @@ app.get("/api/tasks/:id", async (req, res, next) => {
     });
     res.json({
       id: req.params.id,
+      ...((String(result.body?.id || result.body?.task_id || result.body?.taskId || result.body?.data?.id || result.body?.data?.task_id || result.body?.data?.taskId || "") === String(job.taskId)
+        || (result.status === "completed" && result.videoUrl)) ? { submissionVerified: true } : {}),
       status: result.status,
       progress: result.progress,
       videoUrl: result.status === "completed" ? `/api/tasks/${encodeURIComponent(req.params.id)}/content` : undefined,
@@ -2810,6 +3075,8 @@ app.get("/api/tasks/:id", async (req, res, next) => {
       error: failure?.reason,
       cost: result.body?.cost ?? result.body?.amount ?? result.body?.usage?.cost ?? result.body?.metadata?.cost,
       completedAt: dateText(result.body?.completed_at || result.body?.completedAt),
+      retryAfterMs: result.retryAfterMs,
+      ...(job.adapter === "baoju" ? { autoRetryBlocked: Boolean(result.body?.autoRetryBlocked) } : {}),
     });
   } catch (error) {
     writeDiagnostic(req, "task_status_failed", { error: error?.message || "查询任务状态失败", status: error?.status || 500 });
@@ -2821,6 +3088,17 @@ app.get("/api/tasks/:id/content", async (req, res, next) => {
   try {
     const job = decodeJob(req.params.id);
     const range = req.get("range");
+    if (job.adapter === "seedancevideo" && seedanceVideoBaseUrl(job.baseUrl) === PANDA626_BASE_URL) {
+      const response = await upstream(`${seedanceVideoBaseUrl(job.baseUrl)}/v1/videos/${encodeURIComponent(job.taskId)}/content`, {
+        headers: range ? { Range: range } : {},
+      }, 1_800_000);
+      if (!response.ok) await readJson(response);
+      if (/json/i.test(response.headers.get("content-type") || "")) {
+        const body = await readJson(response);
+        throw httpError(409, body?.error?.message || body?.message || "成片文件仍在准备，请稍后查询原任务再下载");
+      }
+      return streamResponse(response, res);
+    }
     const recoveredVideoUrl = job.adapter === "fmgo" ? recoveredFmgoVideoUrl(job.taskId) : null;
     if (recoveredVideoUrl) {
       const recoveredResponse = await upstream(recoveredVideoUrl, {
@@ -2837,6 +3115,27 @@ app.get("/api/tasks/:id/content", async (req, res, next) => {
 
     const config = providerConfig(req);
     verifyJobConfig(config, job);
+    if (job.adapter === "baoju") {
+      let url = `${config.baseUrl}/api/v1/videos/${encodeURIComponent(job.taskId)}/content?index=0`;
+      for (let hop = 0; hop < 4; hop += 1) {
+        const response = await upstream(url, {
+          redirect: "manual", headers: { ...(hop === 0 ? authHeaders(config) : {}), ...(range ? { Range: range } : {}) },
+        }, 1800000);
+        if ([301, 302, 303, 307, 308].includes(response.status)) {
+          const location = response.headers.get("location");
+          await response.body?.cancel().catch(() => {});
+          if (!location || hop === 3) throw httpError(502, "Baoju 下载跳转异常，请重新查询原任务");
+          url = publicUrl(new URL(location, url).toString(), "Baoju 下载地址").toString();
+          continue;
+        }
+        if (!response.ok) await readJson(response);
+        if (/json|text\/html/i.test(response.headers.get("content-type") || "")) {
+          await response.body?.cancel().catch(() => {});
+          throw httpError(409, "Baoju 成片尚未就绪，请继续查询原任务，不要重新生成");
+        }
+        return streamResponse(response, res);
+      }
+    }
     const suppliedSourceUrl = req.query.source
       ? publicUrl(String(req.query.source), "已保存的视频地址").toString()
       : null;
@@ -2949,7 +3248,7 @@ function isAmbiguousMeaiccSubmission(error, req) {
 
 app.use((error, req, res, _next) => {
   if (error.submissionUnknown) return res.status(502).json({
-    code: "SUBMISSION_UNKNOWN", submissionUnknown: true, message: error.message,
+    code: "SUBMISSION_UNKNOWN", submissionUnknown: true, idempotencyKey: error.idempotencyKey, message: error.message,
   });
   if (isAmbiguousMeaiccSubmission(error, req)) {
     return res.status(502).json({
@@ -2965,6 +3264,7 @@ app.use((error, req, res, _next) => {
   );
   res.status(status >= 400 && status < 600 ? status : 500).json({
     message: error?.message || "服务器处理失败",
+    retryAfterMs: error.retryAfterMs,
   });
 });
 

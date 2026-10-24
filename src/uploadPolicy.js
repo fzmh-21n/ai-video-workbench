@@ -1,7 +1,7 @@
 export const AUTOMATIC_UPLOAD_SERVICES = ["Uguu", "Litterbox", "Tmpfiles"];
 
 export function requiresProviderAssetUpload(adapter) {
-  return ["maxforai", "lwaigc", "unmau", "huajing"].includes(adapter);
+  return ["maxforai", "lwaigc", "unmau", "huajing", "seedancevideo"].includes(adapter);
 }
 
 export function isMaxforaiUploadedAssetUrl(value, baseUrl) {
@@ -65,7 +65,7 @@ export function mediaUploadMode(config, mimeType) {
   if (!config?.mediaUploadUrl) return "temporary";
   try {
     const isPaipuUpload = new URL(config.mediaUploadUrl).hostname === "api.paipu.net";
-    const isImageOnlyUpload = isPaipuUpload || new URL(config.mediaUploadUrl).hostname === "772808.xyz";
+    const isImageOnlyUpload = isPaipuUpload || ["772808.xyz", "panda626.com", "www.panda626.com"].includes(new URL(config.mediaUploadUrl).hostname);
     if (isImageOnlyUpload && !String(mimeType || "").startsWith("image/")) return "temporary";
   } catch {}
   return "configured";

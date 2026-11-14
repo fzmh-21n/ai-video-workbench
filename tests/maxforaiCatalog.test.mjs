@@ -74,7 +74,7 @@ test("uses the documented MaxForAI wan3.0th request fields", () => {
   assert.equal("resolution" in payload, false);
 
   const capability = capabilityFor({ adapter: "maxforai", model: "wan3.0th" });
-  assert.equal(capability.images, 10);
+  assert.equal(capability.images, 9, "the workbench SD2.0 image ceiling also applies to preserved provider limits");
   assert.equal(capability.videos, 5);
   assert.equal(capability.audios, 5);
   assert.deepEqual(capability.durations, Array.from({ length: 27 }, (_, index) => index + 4));

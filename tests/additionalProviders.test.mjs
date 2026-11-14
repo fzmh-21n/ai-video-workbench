@@ -291,7 +291,7 @@ test("exposes the documented Pidoi SD2.5 limits", () => {
   assert.deepEqual(capability.ratios, ["16:9", "9:16", "1:1"]);
 });
 
-test("adds the documented Pidoi WAN 3.0 model and capability", () => {
+test("adds Pidoi WAN 3.0 while applying the SD2.0 workbench image ceiling", () => {
   assert.ok(PIDOI_MODELS.includes("wan30-720p"));
   const capability = capabilityFor({ adapter: "pidoi", model: "wan30-720p" });
   assert.deepEqual({
@@ -303,7 +303,7 @@ test("adds the documented Pidoi WAN 3.0 model and capability", () => {
     resolutions: capability.resolutions,
     ratios: capability.ratios,
   }, {
-    images: 10,
+    images: 9,
     videos: 5,
     audios: 5,
     firstDuration: 4,

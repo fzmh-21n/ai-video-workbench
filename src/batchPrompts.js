@@ -1,8 +1,37 @@
 const SECTION_MARKER = /^(?:(\d+)\.[^\S\r\n]*[（(]([^\r\n]*?)[）)][^\S\r\n]*|剧情[^\S\r\n]*[\[【][^\S\r\n]*(\d+)[^\S\r\n]*[\]】][^\S\r\n]*(?:[：:][^\S\r\n]*([^\r\n]*?))?[^\S\r\n]*)$/gm;
 const OUTPUT_WRAPPER = /^\s*_::~(?:OUTPUT_START|OUTPUT_END|FIELD)::~_\s*$/gm;
 const DECORATIVE_SECTION_BANNER = /^\s*[=═]{5,}\s*\r?\n\s*剧情\s*[\[【]\s*\d+\s*[\]】]\s*[：:]?\s*\r?\n\s*[=═]{5,}\s*$/gm;
+const OUTPUT_BLOCK = /_::~OUTPUT_START::~_([\s\S]*?)_::~OUTPUT_END::~_/g;
 
-export function splitBatchPrompts(text) {
+function outputBlockTitle(block, section) {
+  const match = String(block || "").match(/【本组剧情任务】\s*[：:]?\s*\r?\n?\s*([^\r\n]+)/);
+  const title = match?.[1]?.trim().replace(/[。．.!！]+$/, "");
+  return title || `剧情[${section}]`;
+}
+
+function outputBlockStart(sourceName) {
+  const match = String(sourceName || "").match(/剧情\s*0*(\d+)(?:\s*[-—~至到]\s*0*\d+)?\s*合集?/i);
+  return match ? Number(match[1]) : 1;
+}
+
+function makeBatchItem(section, title, prompt, index) {
+  return {
+    id: `section-${section}-${index}`,
+    section,
+    title,
+    prompt: prompt.replace(OUTPUT_WRAPPER, "").trim(),
+    references: [],
+    missingImages: [],
+    status: "unmatched",
+    error: "",
+    expanded: index === 0,
+    overrideEnabled: false,
+    overrides: {},
+    _sourceIndex: index,
+  };
+}
+
+export function splitBatchPrompts(text, options = {}) {
   const source = String(text || "")
     .replace(/^\uFEFF/, "")
     // 合集文件可能先用“==== / 剧情[n] / ====”做目录横幅，随后在
@@ -10,26 +39,31 @@ export function splitBatchPrompts(text) {
     .replace(DECORATIVE_SECTION_BANNER, "")
     .trim();
   if (!source) return [];
+
   const markers = [...source.matchAll(SECTION_MARKER)];
+
+  // 小六月/固定字段合集会用 OUTPUT_START/OUTPUT_END 包住每一节，
+  // 每节内部没有“剧情[1]”标题；按块拆分后用“本组剧情任务”作为卡片标题。
+  // 只有确实没有标准分节标题时才走这个兼容分支，避免改变旧合集的编号。
+  const outputBlocks = [...source.matchAll(OUTPUT_BLOCK)]
+    .map((match) => match[1].trim())
+    .filter(Boolean);
+  if (!markers.length && outputBlocks.length) {
+    const startSection = outputBlockStart(options.sourceName);
+    return outputBlocks.map((block, index) => makeBatchItem(
+      startSection + index,
+      outputBlockTitle(block, startSection + index),
+      block,
+      index,
+    )).map(({ _sourceIndex, ...item }, index) => ({ ...item, id: `section-${item.section}-${index}`, expanded: index === 0 }));
+  }
+
   const candidates = markers.map((marker, index) => {
     const start = marker.index;
     const end = markers[index + 1]?.index ?? source.length;
     const section = Number(marker[1] || marker[3]);
     const title = marker[2]?.trim() || marker[4]?.trim() || `剧情[${section}]`;
-    return {
-      id: `section-${section}-${index}`,
-      section,
-      title,
-      prompt: source.slice(start, end).replace(OUTPUT_WRAPPER, "").trim(),
-      references: [],
-      missingImages: [],
-      status: "unmatched",
-      error: "",
-      expanded: index === 0,
-      overrideEnabled: false,
-      overrides: {},
-      _sourceIndex: index,
-    };
+    return makeBatchItem(section, title, source.slice(start, end), index);
   });
   // 某些合集会同时写“章节目录横幅”和真正的剧情标题。即使横幅样式
   // 尚未被识别，也只保留同一章节号中内容最完整的一项，避免整批翻倍。

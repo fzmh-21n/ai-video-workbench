@@ -2972,6 +2972,7 @@ function Workbench({ onImageMode, onFaceMode, onTextMode, onLogout, onAuthExpire
           onClose={() => setCostOpen(false)}
           onSelectModel={selectFavoriteModel}
           profiles={profiles}
+          projectNames={taskProjects}
         />
       )}
       {taskProjectOpen && (

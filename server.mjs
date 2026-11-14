@@ -712,7 +712,7 @@ function validateMeaiccLimits(config, meta, duration) {
 function validateProviderLimits(config, meta, duration) {
   // 这些中转的能力由带当前 Key 的实时模型接口返回，服务端在创建阶段
   // 拿不到浏览器保存的动态表；保留前端实时校验并交给上游复核。
-  if (["lwaigc", "meaicc", "newapi", "canseedream", "ziyuai", "aiyrx", "unmau", "bailing", "huajing", "baoju"].includes(config.adapter)) return;
+  if (["lwaigc", "meaicc", "newapi", "canseedream", "ziyuai", "aiyrx", "unmau", "bailing", "huajing", "baoju", "seedancevideo"].includes(config.adapter)) return;
   const issue = capabilityLimitIssue({ adapter: config.adapter, model: config.model }, meta, duration);
   if (issue) throw httpError(400, issue);
   if (config.adapter === "maxforai" && config.model === MAXFORAI_FT_933_MODEL) {
@@ -1563,7 +1563,7 @@ async function createSeedanceVideo(config, input) {
   const unknown = async (message) => {
     recordState("unknown", { traceId });
     // 恢复原始请求；补救时仅复用原幂等编号和原请求体，绝不换编号重建。
-    if (config.baseUrl === "https://772808.xyz") {
+    if (config.baseUrl === "https://772808.xyz" || config.baseUrl === PANDA626_BASE_URL) {
       try {
         const recovered = await recoverSeedanceSubmissions(config, [idempotencyKey]);
         if (recovered[0]?.job) return recovered[0].job;

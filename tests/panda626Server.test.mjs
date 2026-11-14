@@ -154,6 +154,30 @@ test("772808 lost POST response reconciles full paginated history via GET and ne
   assert.equal(state.journal.find((row) => row.connectionCode)?.connectionCode, "UND_ERR_SOCKET");
 });
 
+test("Panda lost POST response immediately reconciles the same idempotency key via GET", async () => {
+  const calls = [];
+  const request = catalog.seedanceVideoPayload(config.model, input);
+  const state = creation(async (url, options) => {
+    calls.push([url, options.method || "GET"]);
+    if (options.method === "POST") throw Object.assign(new TypeError("fetch failed"), { cause: { code: "UND_ERR_SOCKET" } });
+    if (url.includes("?limit=")) return response({ data: [{ id: "panda-recovered", model: config.model, input: request.input, parameters: request.parameters, created_at: Date.now() / 1000 }], has_more: false });
+    return response({ id: "panda-recovered", status: "failed", error: { message: "上游素材上传失败" } });
+  });
+  Object.assign(state.context, {
+    existsSync: () => true,
+    readFileSync: () => state.journal.map((row) => JSON.stringify(row)).join("\n"),
+    pollJob: async (provider, job) => {
+      const body = await (await state.context.upstream(`${provider.baseUrl}${job.statusPath}`, { headers: {} })).json();
+      return { body, status: "failed", progress: 100 };
+    },
+  });
+  const job = await state.context.createSeedanceVideo(config, input);
+  assert.equal(job.taskId, "panda-recovered");
+  assert.equal(job.status, "failed");
+  assert.deepEqual(calls.map((call) => call[1]), ["POST", "GET", "GET"]);
+  assert.equal(state.journal.at(-1).state, "accepted");
+});
+
 test("772808 history HTTP 500 recovers a timed-out request by exact original idempotency replay", async () => {
   const calls = [];
   const state = creation(async (url, options) => {

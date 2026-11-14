@@ -410,6 +410,20 @@ input, select {
 .cost-model-row label span { white-space: nowrap; color: #806f58; }
 .cost-model-row label input { width: 95px; }
 .cost-footnote { margin: 0 18px 18px; color: #9b6010; font-size: 14px; }
+.finance-toolbar { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(180px, 240px); gap: 10px; margin: 12px 0; }
+.finance-toolbar label, .finance-entry-form label { display: grid; gap: 5px; color: #806f58; font-size: 14px; }
+.finance-summary-grid { grid-template-columns: repeat(4, 1fr); padding: 10px 0 4px; }
+.finance-summary-grid .cost-summary-card b { color: #087d69; }
+.finance-summary-grid .finance-negative b { color: #b24d3c; }
+.finance-entry-form { display: grid; grid-template-columns: minmax(140px, .9fr) minmax(120px, .7fr) minmax(130px, .7fr) minmax(150px, 1fr) minmax(110px, .6fr) minmax(160px, 1fr) auto; gap: 9px; align-items: end; margin: 14px 0; padding: 12px; border: 1px dashed #dfc9a8; border-radius: 10px; background: #fffdf8; }
+.finance-note-field { min-width: 0; }
+.finance-entry-actions { display: flex; gap: 6px; align-items: center; white-space: nowrap; }
+.finance-entry-list { display: grid; gap: 6px; }
+.finance-entry-row { display: grid; grid-template-columns: 48px minmax(130px, 1fr) minmax(160px, 1.4fr) 100px auto auto; gap: 8px; align-items: center; padding: 8px 10px; border: 1px solid #eadfce; border-radius: 8px; background: #fff; }
+.finance-entry-row small { color: #907e65; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.finance-entry-row b { text-align: right; }
+.finance-income { color: #087d69; font-weight: 700; }
+.finance-cost { color: #b05c22; font-weight: 700; }
 .submission-explanation { color: #806f58; font-size: 14px; line-height: 1.6; }
 .submission-filters { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin-bottom: 14px; }
 .submission-filters label { display: grid; gap: 4px; }
@@ -473,7 +487,8 @@ input, select {
 .task-project-model-row label { display: flex; align-items: center; gap: 5px; color: #806f58; font-size: 14px; }
 .task-project-model-row input { width: 86px; padding: 6px 7px; border: 1px solid #dbc5a3; border-radius: 7px; background: #fff; }
 .task-project-model-row > b { color: #087d69; text-align: right; }
-@media (max-width: 760px) { .cost-summary-grid { grid-template-columns: 1fr; } .cost-chart-row { grid-template-columns: 54px 1fr; } .cost-chart-row > div:last-child { grid-column: 2; } .cost-model-row { grid-template-columns: 34px 1fr; } .cost-model-row code,.cost-model-row label { grid-column: 2; } }
+@media (max-width: 900px) { .finance-summary-grid { grid-template-columns: repeat(2, 1fr); } .finance-entry-form { grid-template-columns: repeat(3, 1fr); } .finance-entry-actions { grid-column: span 3; } }
+@media (max-width: 760px) { .cost-summary-grid, .finance-summary-grid { grid-template-columns: 1fr; } .cost-chart-row { grid-template-columns: 54px 1fr; } .cost-chart-row > div:last-child { grid-column: 2; } .cost-model-row { grid-template-columns: 34px 1fr; } .cost-model-row code,.cost-model-row label { grid-column: 2; } .finance-toolbar, .finance-entry-form { grid-template-columns: 1fr; } .finance-entry-actions { grid-column: auto; } .finance-entry-row { grid-template-columns: 48px 1fr auto; } .finance-entry-row small { grid-column: 2 / -1; } .finance-entry-row b { text-align: left; } }
 @media (max-width: 760px) { .task-project-create,.task-project-history { grid-template-columns: 1fr; } .task-project-history > p { grid-column: 1; } .task-project-row { grid-template-columns: 1fr; } .task-project-actions { justify-content: flex-start; } .task-project-model-row { grid-template-columns: 1fr; } .task-project-model-row > b { text-align: left; } .fixed-content-manager-layout { grid-template-columns: 1fr; overflow: auto; } .fixed-content-manager-layout aside { border-right: 0; border-bottom: 1px solid #ead8bc; } }
 .config-layout { display: grid; grid-template-columns: 240px minmax(0, 1fr); flex: 1; min-height: 0; overflow: hidden; }
 .profile-list { min-height: 0; padding: 12px; border-right: 1px solid #ebdecb; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; background: #faf6ef; }

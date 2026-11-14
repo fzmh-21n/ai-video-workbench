@@ -639,6 +639,7 @@ function rawCapabilityFor(profile) {
   if (adapter === "seedancevideo") {
     return profile?.routeCapabilities?.[profile?.model] || {
       ...base,
+      _sdVersion: sdVersionForModel(profile?.model),
       images: 50,
       videos: 50,
       audios: 50,
@@ -707,6 +708,10 @@ export function capabilityFor(profile) {
     : capability._sdVersion || sdVersionForModel(profile?.model);
   if (version !== "sd25" && !capability._preserveLimits) {
     return { ...capability, images: 9, audios: 3, videos: 3 };
+  }
+  // 实时目录的宽松上限不能绕过顶部 SD2.0 模式的 9 图边界；更低限制仍保留。
+  if (sdVersionForProfile(profile) === "sd20" && capability.images > 9) {
+    return { ...capability, images: 9 };
   }
   return capability;
 }

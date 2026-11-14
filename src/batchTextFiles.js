@@ -11,7 +11,7 @@ export async function importBatchTextFiles(fileList, importId) {
   const failures = [];
   for (const { file, index } of ordered) {
     try {
-      const parsed = splitBatchPrompts(await file.text());
+      const parsed = splitBatchPrompts(await file.text(), { sourceName: file.name });
       if (!parsed.length) throw new Error("没有识别到分节标记，请检查 TXT 格式");
       additions.push(...parsed.map((item, sectionIndex) => ({
         ...item,

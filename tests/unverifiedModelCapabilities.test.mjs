@@ -10,19 +10,24 @@ const adapters = ["fmgo", "pidoi", "globalaiopc", "maxforai"];
 for (const adapter of adapters) {
   const profile = { adapter, model: "vendor/brand-new-opaque-route" };
 
-  test(`${adapter} does not turn guessed legacy limits into hard gates for a new model`, () => {
+  test(`${adapter} keeps unknown models available within the SD2.0 image ceiling`, () => {
     const cap = capabilityFor(profile);
     assert.equal(cap._capabilityUnverified, true);
     assert.equal(cap._preserveLimits, true);
-    assert.deepEqual([cap.images, cap.videos, cap.audios], [50, 50, 50]);
+    assert.deepEqual([cap.images, cap.videos, cap.audios], [9, 50, 50]);
     assert.deepEqual(cap.durations, Array.from({ length: 30 }, (_, index) => index + 1));
-    assert.equal(capabilityLimitIssue(profile, references("image", 30), 30), "");
+    assert.equal(capabilityLimitIssue(profile, references("image", 9), 30), "");
+    assert.ok(capabilityLimitIssue(profile, references("image", 10), 30));
+    const sd25 = { adapter, model: "vendor/future-sd2.5-route" };
+    assert.equal(capabilityFor(sd25).images, 50);
+    assert.equal(capabilityLimitIssue(sd25, references("image", 30), 30), "");
   });
 
   test(`${adapter} still enforces workbench-wide material and duration boundaries for unknown models`, () => {
     const mixed = ["image", "video", "audio"].flatMap((kind) => references(kind, 17));
     assert.ok(capabilityLimitIssue(profile, mixed, 30), "51 mixed references must not bypass a total-50 boundary");
-    assert.equal(capabilityLimitIssue(profile, references("image", 50), 30), "");
+    const maximum = [...references("image", 9), ...references("video", 21), ...references("audio", 20)];
+    assert.equal(capabilityLimitIssue(profile, maximum, 30), "");
     for (const duration of [0, 31, 60, 61, 1.5]) assert.ok(capabilityLimitIssue(profile, [], duration), `reject duration ${duration}`);
   });
 

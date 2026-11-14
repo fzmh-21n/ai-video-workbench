@@ -26,6 +26,23 @@ test("multiple selected TXT files are read sequentially in stable natural numeri
   assert.ok(imported.additions.every((item) => item.status === "unmatched"));
 });
 
+test("imports OUTPUT-wrapped collections whose filename supplies the missing plot section range", async () => {
+  const wrapped = (text) => `_::~OUTPUT_START::~_\n_::~FIELD::~_\n${text}\n_::~OUTPUT_END::~_`;
+  const text = [
+    wrapped("【本组目标时长】：30秒\n第一节的完整提示词"),
+    wrapped("【本组目标时长】：30秒\n第二节的完整提示词"),
+  ].join("\n\n");
+  const imported = await importBatchTextFiles([
+    file("第01集_灵堂上，大伯抢走了存折_30秒视频提示词_紧凑节奏_剧情001-002合集.txt", text),
+  ], "wrapped-import");
+
+  assert.deepEqual(imported.failures, []);
+  assert.deepEqual(imported.additions.map((item) => item.section), [1, 2]);
+  assert.match(imported.additions[0].prompt, /第一节的完整提示词/);
+  assert.match(imported.additions[1].prompt, /第二节的完整提示词/);
+  assert.doesNotMatch(imported.additions.map((item) => item.prompt).join("\n"), /_::~/);
+});
+
 test("duplicate filenames and section numbers cannot collide across one selection or later imports", async () => {
   const files = [file("第1集.txt"), file("第1集.txt")];
   const first = await importBatchTextFiles(files, "import-a");

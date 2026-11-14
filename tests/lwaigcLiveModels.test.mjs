@@ -12,12 +12,12 @@ test("unknown live LWAIGC models are not rejected by the static documented names
   assert.equal(lwaigcLimitIssue("future-model-opaque", images, 30), "");
 });
 
-test("unknown model controls are explicitly unverified workbench limits rather than SD2.0 limits", () => {
+test("unknown model controls remain unverified while respecting the selected SD image ceiling", () => {
   for (const model of [newModel, "future-model-opaque"]) {
     const capability = capabilityFor({ adapter: "lwaigc", model });
     assert.equal(capability._capabilityUnverified, true);
     assert.equal(capability._preserveLimits, true);
-    assert.deepEqual([capability.images, capability.videos, capability.audios], [50, 50, 50]);
+    assert.deepEqual([capability.images, capability.videos, capability.audios], [model === newModel ? 50 : 9, 50, 50]);
     assert.ok(capability.durations.includes(30));
     assert.deepEqual(capability.durations, Array.from({ length: 30 }, (_, index) => index + 1));
     assert.deepEqual(capability.resolutions, ["720p"]);

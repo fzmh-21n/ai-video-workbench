@@ -10,6 +10,15 @@ import {
   modelPriceKey,
   saveCostSettings,
 } from "./costAnalytics.js";
+import {
+  financeEntry,
+  financeMonthKey,
+  loadProjectFinance,
+  projectFinanceSummary,
+  removeFinanceEntry,
+  saveProjectFinance,
+  upsertFinanceEntry,
+} from "./projectFinance.js";
 
 const PERIODS = {
   day: { label: "每天", count: 14 },
@@ -21,8 +30,14 @@ function money(value) {
   return `¥${Number(value || 0).toFixed(2)}`;
 }
 
-export default function CostDashboard({ activeProfileId, modelOptions, onClose, onSelectModel, profiles }) {
+function moneyCents(value) {
+  return money(Number(value || 0) / 100);
+}
+
+export default function CostDashboard({ activeProfileId, modelOptions, onClose, onSelectModel, profiles, projectNames = [] }) {
   const [tasks, setTasks] = useState([]);
+  const [financeTasks, setFinanceTasks] = useState([]);
+  const [financeEntries, setFinanceEntries] = useState([]);
   const [settings, setSettings] = useState(loadCostSettings);
   const [period, setPeriod] = useState("day");
   const [providerFilter, setProviderFilter] = useState(activeProfileId || "all");
@@ -35,12 +50,18 @@ export default function CostDashboard({ activeProfileId, modelOptions, onClose, 
   const [refreshVersion, setRefreshVersion] = useState(0);
   const [selectedKey, setSelectedKey] = useState("");
   const [detailPage, setDetailPage] = useState(1);
+  const [financeMonth, setFinanceMonth] = useState(financeMonthKey());
+  const [financeForm, setFinanceForm] = useState({
+    projectName: "未归类", kind: "cost", incomeChannel: "douyin", month: financeMonthKey(), title: "", amount: "", note: "",
+  });
+  const [financeEditingId, setFinanceEditingId] = useState("");
+  const [financeError, setFinanceError] = useState("");
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    getSubmissionRecords().then((values) => {
-      if (!cancelled) { setTasks(values); setLoadError(""); }
+    Promise.all([getSubmissionRecords(), Promise.resolve().then(() => loadProjectFinance())]).then(([values, entries]) => {
+      if (!cancelled) { setTasks(values); setFinanceTasks(values); setFinanceEntries(entries); setLoadError(""); }
     }).catch((error) => {
       if (!cancelled) setLoadError(error.message || "提交台账读取失败，请重试");
     }).finally(() => {
@@ -77,7 +98,10 @@ export default function CostDashboard({ activeProfileId, modelOptions, onClose, 
   const maxGenerated = Math.max(1, ...series.map((item) => item.generated));
   const maxCost = Math.max(0.01, ...series.map((item) => item.cost));
   const projects = useMemo(() => [...new Set(tasks.map((task) => task.projectName || "未归类"))]
-    .sort((left, right) => left.localeCompare(right, "zh-CN")), [tasks]);
+    .concat(["未归类"], projectNames || [], financeEntries.map((entry) => entry.projectName))
+    .filter(Boolean)
+    .filter((name, index, values) => values.indexOf(name) === index)
+    .sort((left, right) => left.localeCompare(right, "zh-CN")), [tasks, financeEntries, projectNames]);
   const submissionGroups = useMemo(() => modelSubmissionStats(tasks, {
     projectName: projectFilter, from: fromDate, to: toDate,
   }).filter((item) => (providerFilter === "all" || item.profileId === providerFilter)
@@ -90,8 +114,51 @@ export default function CostDashboard({ activeProfileId, modelOptions, onClose, 
   const currentDetailPage = Math.min(detailPage, detailPages);
   const shownRecords = detailRecords.slice((currentDetailPage - 1) * 50, currentDetailPage * 50);
   const acceptedCount = submissionGroups.reduce((total, item) => total + item.accepted, 0);
+  const financeSummary = projectFinanceSummary(financeTasks, settings, financeEntries, { projectName: projectFilter, month: financeMonth });
+  const visibleFinanceEntries = financeEntries
+    .filter((entry) => (projectFilter === "all" || entry.projectName === projectFilter) && entry.month === financeMonth)
+    .sort((left, right) => right.updatedAtMs - left.updatedAtMs);
   function modelDisplayName(item) {
     return profiles.find((profile) => profile.id === item.profileId)?.routeLabels?.[item.model] || item.model;
+  }
+
+  function resetFinanceForm(month = financeMonth) {
+    setFinanceEditingId("");
+    setFinanceForm({ projectName: projectFilter === "all" ? projects[0] || "未归类" : projectFilter, kind: "cost", incomeChannel: "douyin", month, title: "", amount: "", note: "" });
+    setFinanceError("");
+  }
+
+  function submitFinanceEntry(event) {
+    event.preventDefault();
+    try {
+      const existing = financeEditingId ? financeEntries.find((entry) => entry.id === financeEditingId) : null;
+      const nextEntry = financeEntry(financeForm, existing);
+      const next = upsertFinanceEntry(financeEntries, nextEntry);
+      saveProjectFinance(next);
+      setFinanceEntries(next);
+      setFinanceMonth(nextEntry.month);
+      resetFinanceForm(nextEntry.month);
+    } catch (error) {
+      setFinanceError(error.message || "保存项目账本失败");
+    }
+  }
+
+  function editFinanceEntry(entry) {
+    setFinanceEditingId(entry.id);
+    setFinanceForm({ projectName: entry.projectName, kind: entry.kind, incomeChannel: entry.incomeChannel || "douyin", month: entry.month, title: entry.title, amount: (entry.amountCents / 100).toFixed(2), note: entry.note || "" });
+    setFinanceError("");
+  }
+
+  function deleteFinanceEntry(entry) {
+    if (!window.confirm(`确定删除“${entry.title}”这条${entry.kind === "income" ? "收入" : "成本"}记录吗？`)) return;
+    try {
+      const next = removeFinanceEntry(financeEntries, entry.id);
+      saveProjectFinance(next);
+      setFinanceEntries(next);
+      if (financeEditingId === entry.id) resetFinanceForm();
+    } catch (error) {
+      setFinanceError(error.message || "删除项目账本失败");
+    }
   }
 
   async function exportSubmissions() {
@@ -122,6 +189,36 @@ export default function CostDashboard({ activeProfileId, modelOptions, onClose, 
             {!submissionGroups.length && <p>当前范围没有可核对的任务 ID 记录。</p>}
             {selectedGroup && <div className="submission-details"><h4>{selectedGroup.model} · task ID 明细</h4><div className="submission-table-scroll"><table className="submission-table"><thead><tr><th>提交时间</th><th>task ID</th><th>项目／章节</th><th>状态</th><th>同节追加</th></tr></thead><tbody>{shownRecords.map((record) => <tr key={record.identity}><td>{record.createdAtMs ? new Date(record.createdAtMs).toLocaleString("zh-CN", { hour12: false }) : "时间未知"}</td><td><code>{record.taskId}</code></td><td>{record.projectName}<br />{record.batchTitle}{record.batchSection ? ` · 第${record.batchSection}节` : ""}</td><td>{record.cancelledByUser ? "手动取消" : ({ completed: "已生成", failed: "生成失败", queued: "排队中", processing: "生成中" }[record.status] || "状态未知")}</td><td>{record.additional ? "是" : "否"}</td></tr>)}</tbody></table></div><div className="cost-section-title"><button disabled={currentDetailPage === 1} onClick={() => setDetailPage(currentDetailPage - 1)}>上一页</button><span>第 {currentDetailPage}/{detailPages} 页 · 共 {detailRecords.length} 个 ID</span><button disabled={currentDetailPage === detailPages} onClick={() => setDetailPage(currentDetailPage + 1)}>下一页</button></div></div>}
             <p className="submission-explanation">“同节追加”包含主动重做、抽卡和自动重试，不等于重复扣费证据。退款均待账单核实；未拿到 ID 的拒绝／待确认提交不计入已受理。日期按本机提交／恢复记录，状态为本机最后记录。台账从现存记录回填；过去已彻底删除的历史可能不完整。此后删除任务仍保留轻量受理台账。</p>
+          </section>
+          <section className="cost-section finance-section">
+            <div className="cost-section-title"><h3>项目收入与成本账本</h3><span>每个月单独录入一次平台结算，不会自动沿用上月收入</span></div>
+            <div className="finance-toolbar">
+              <label>统计项目<select value={projectFilter} onChange={(event) => setProjectFilter(event.target.value)}><option value="all">全部项目</option>{projects.map((name) => <option key={name} value={name}>{name}</option>)}</select></label>
+              <label>统计月份<input type="month" value={financeMonth} onChange={(event) => setFinanceMonth(event.target.value)} /></label>
+            </div>
+            <div className="cost-summary-grid finance-summary-grid">
+              <div className="cost-summary-card"><strong>抖音结算收入</strong><b>{moneyCents(financeSummary.douyinIncomeCents)}</b><span>{financeMonth} 手动录入</span></div>
+              <div className="cost-summary-card"><strong>百家号结算收入</strong><b>{moneyCents(financeSummary.baijiahaoIncomeCents)}</b><span>{financeMonth} 手动录入</span></div>
+              <div className="cost-summary-card"><strong>平台总收入</strong><b>{moneyCents(financeSummary.incomeCents)}</b><span>抖音＋百家号</span></div>
+              <div className="cost-summary-card"><strong>手动成本</strong><b>{moneyCents(financeSummary.manualCostCents)}</b><span>会员费、素材费等</span></div>
+              <div className="cost-summary-card"><strong>API 估算成本</strong><b>{moneyCents(financeSummary.apiCostCents)}</b><span>已完成任务 × 模型单价</span></div>
+              <div className={`cost-summary-card${financeSummary.netCents < 0 ? " finance-negative" : ""}`}><strong>净收益</strong><b>{moneyCents(financeSummary.netCents)}</b><span>收入 − 手动成本 − API 估算成本</span></div>
+            </div>
+            {(financeSummary.unpricedTasks || financeSummary.undatedTasks) > 0 && <p className="cost-footnote">当前统计仍有 {financeSummary.unpricedTasks ? `${financeSummary.unpricedTasks} 条已完成任务未填写模型单价` : ""}{financeSummary.unpricedTasks && financeSummary.undatedTasks ? "；" : ""}{financeSummary.undatedTasks ? `${financeSummary.undatedTasks} 条任务没有可用日期，未计入指定月份` : ""}。</p>}
+            <form className="finance-entry-form" onSubmit={submitFinanceEntry}>
+              <label>项目<select value={financeForm.projectName} onChange={(event) => setFinanceForm((current) => ({ ...current, projectName: event.target.value }))}>{projects.map((name) => <option key={name} value={name}>{name}</option>)}</select></label>
+              <label>类型<select value={financeForm.kind} onChange={(event) => setFinanceForm((current) => ({ ...current, kind: event.target.value }))}><option value="cost">手动成本</option><option value="income">平台结算收入</option></select></label>
+              {financeForm.kind === "income" ? <label>收入来源<select value={financeForm.incomeChannel} onChange={(event) => setFinanceForm((current) => ({ ...current, incomeChannel: event.target.value }))}><option value="douyin">抖音</option><option value="baijiahao">百家号</option></select></label> : <span />}
+              <label>月份<input type="month" required value={financeForm.month} onChange={(event) => setFinanceForm((current) => ({ ...current, month: event.target.value }))} /></label>
+              <label>名称<input required value={financeForm.title} onChange={(event) => setFinanceForm((current) => ({ ...current, title: event.target.value }))} placeholder={financeForm.kind === "income" ? "例如：11月平台结算" : "例如：GPT会员"} /></label>
+              <label>金额（元）<input required inputMode="decimal" value={financeForm.amount} onChange={(event) => setFinanceForm((current) => ({ ...current, amount: event.target.value }))} placeholder="0.00" /></label>
+              <label className="finance-note-field">备注<input value={financeForm.note} onChange={(event) => setFinanceForm((current) => ({ ...current, note: event.target.value }))} placeholder="可选" /></label>
+              <div className="finance-entry-actions"><button className="primary-button" type="submit">{financeEditingId ? "保存修改" : "添加本月记录"}</button>{financeEditingId && <button type="button" onClick={() => resetFinanceForm()}>取消编辑</button>}</div>
+            </form>
+            {financeError && <p className="task-project-error" role="alert">{financeError}</p>}
+            <div className="finance-entry-list">
+              {visibleFinanceEntries.length ? visibleFinanceEntries.map((entry) => <div className="finance-entry-row" key={entry.id}><span className={entry.kind === "income" ? "finance-income" : "finance-cost"}>{entry.kind === "income" ? (entry.incomeChannel === "baijiahao" ? "百家号" : "抖音") : "成本"}</span><strong>{entry.title}</strong><small>{entry.projectName}{entry.note ? ` · ${entry.note}` : ""}</small><b>{entry.kind === "income" ? "+" : "−"}{moneyCents(entry.amountCents)}</b><button onClick={() => editFinanceEntry(entry)}>编辑</button><button className="danger-button" onClick={() => deleteFinanceEntry(entry)}>删除</button></div>) : <p>本月还没有手动收入或成本记录。抖音、百家号收入都需要每月分别录入。</p>}
+            </div>
           </section>
           <div className="cost-summary-grid">
             {[["今天", today], ["本周", week], ["本月", month]].map(([label, value]) => (

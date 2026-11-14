@@ -7,6 +7,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { createServer } from "vite";
 import * as batchReferences from "../src/batchReferences.js";
 import { imageReferenceIssues, normalizeImageReferenceBindings, planProjectReferences } from "../src/projectReferences.js";
+import { capabilityFor } from "../src/providerCatalog.js";
+import { seedanceVideoModels } from "../src/seedanceVideoCatalog.js";
 
 const source = readFileSync(new URL("../src/BatchPanel.jsx", import.meta.url), "utf8");
 const names = Array.from({ length: 31 }, (_, index) => `角色图_${String(index + 1).padStart(3, "0")}_人物${index + 1}.png`);
@@ -104,6 +106,22 @@ test("every below-limit row is blocked even when array filtering passes an index
   assert.deepEqual(notices, ["没有可提交章节，请先处理标红问题"]);
 });
 
+test("SD2.0 batch submission blocks ten images even when missing-image submission is allowed", async () => {
+  const ctx = context();
+  const model = "wanzhou-seedance-2.0";
+  const catalog = seedanceVideoModels({ data: [{ id: model, durations: [15] }] });
+  ctx.capability = capabilityFor({ adapter: "seedancevideo", model, routeCapabilities: catalog.capabilities });
+  ctx.allowMissingImages = true;
+  ctx.apiKey = "local-fixture";
+  ctx.canBatchSubmit = () => true;
+  const notices = [];
+  ctx.onNotice = (message) => notices.push(message);
+  ctx.fetch = () => { throw new Error("Over-limit rows must not upload or create a paid task"); };
+  vm.runInContext(extract("  async function submitSelected(", "\n  useEffect(() => {"), ctx);
+  await ctx.submitSelected([item(10)]);
+  assert.deepEqual(notices, ["没有可提交章节，请先处理标红问题"]);
+});
+
 test("the real cards, missing badges and generation button share the capacity-aware result", async () => {
   const previousStorage = globalThis.localStorage;
   const previousWindow = globalThis.window;
@@ -113,11 +131,11 @@ test("the real cards, missing badges and generation button share the capacity-aw
   const vite = await createServer({ server: { middlewareMode: true, hmr: false }, appType: "custom" });
   try {
     const { default: BatchPanel } = await vite.ssrLoadModule("/src/BatchPanel.jsx");
-    const render = (count, images = 9, status = "matched") => {
+    const render = (count, images = 9, status = "matched", profile) => {
       row = { ...item(count), expanded: true, status };
       return renderToStaticMarkup(React.createElement(BatchPanel, {
-        activeProfile: { id: "mock", adapter: "mock", name: "mock", model: "mock" }, apiKey: "",
-        capability: { images, audios: 3, videos: 3, durations: [15], resolutions: ["720p"], ratios: ["16:9"] },
+        activeProfile: profile || { id: "mock", adapter: "mock", name: "mock", model: "mock" }, apiKey: "",
+        capability: profile ? capabilityFor(profile) : { images, audios: 3, videos: 3, durations: [15], resolutions: ["720p"], ratios: ["16:9"] },
         duration: 15, resolution: "720p", ratio: "16:9", quantity: 1, seed: "", syncAudio: false,
         fixedContent: "", fixedContentTemplates: [], fixedContentTemplateId: "", projectAssets: assets, taskDatabaseReady: false,
       })).match(/<article\b[\s\S]*?<\/article>/)[0];
@@ -134,6 +152,22 @@ test("the real cards, missing badges and generation button share the capacity-aw
     assert.match(render(10), /图片 10\/9/);
     assert.match(render(9, 30), /缺少图片/);
     assert.ok(!render(0, 9, "unmatched").includes("batch-missing-badge"));
+    const catalog = seedanceVideoModels({ data: [
+      { id: "wanzhou-seedance-2.0", durations: [5, 10, 15], resolutions: [{ value: "720p" }] },
+      { id: "seedance-2.5", durations: [15, 30], resolutions: [{ value: "720p" }] },
+    ] });
+    const profile = { id: "fixture", name: "小熊猫（测试）", adapter: "seedancevideo", model: "wanzhou-seedance-2.0", routeCapabilities: catalog.capabilities };
+    const overLimit = render(10, 9, "matched", profile);
+    assert.match(overLimit, /has-issue/);
+    assert.match(overLimit, /图片 10\/9/);
+    assert.match(overLimit, /<button[^>]*disabled[^>]*>开始生成本节/);
+    const corrected = render(9, 9, "matched", profile);
+    assert.ok(!corrected.includes("has-issue"));
+    assert.ok(!corrected.includes("缺少图片"));
+    assert.match(corrected, /<button(?![^>]*disabled)[^>]*>开始生成本节/);
+    const sd25 = render(10, 30, "matched", { ...profile, model: "seedance-2.5" });
+    assert.ok(!sd25.includes("has-issue"));
+    assert.match(sd25, /<button(?![^>]*disabled)[^>]*>开始生成本节/);
   } finally {
     await vite.close();
     globalThis.localStorage = previousStorage;

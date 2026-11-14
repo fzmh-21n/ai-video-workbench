@@ -135,6 +135,21 @@ test("shows the source episode beside section numbers instead of confusing episo
   assert.equal(batchItemChapterLabel("第01集_剧情002-006合集.txt"), "第1集");
   assert.equal(batchItemChapterLabel("第02集_剧情001-005合集.txt"), "第2集");
   assert.equal(batchItemChapterLabel("第十二集_剧情001.txt"), "第十二集");
+  assert.equal(batchItemChapterLabel("第01集_灵堂上，大伯抢走了存折_30秒视频提示词_紧凑节奏_剧情001-007合集.txt"), "第1集");
+});
+
+test("splits OUTPUT_START/OUTPUT_END fixed-field bundles without inline 剧情 markers", () => {
+  const text = `_::~OUTPUT_START::~_\n【本组剧情任务】：灵堂争抢存折\n【出场人物】：角色图_001_禾禾.png\n_::~OUTPUT_END::~_\n\n══════════════\n\n_::~OUTPUT_START::~_\n【本组剧情任务】\n：算盘第一次开口\n【出场人物】：角色图_001_禾禾.png\n_::~OUTPUT_END::~_`;
+  const items = splitBatchPrompts(text, { sourceName: "第01集_剧情008-009合集.txt" });
+  assert.deepEqual(items.map((item) => item.section), [8, 9]);
+  assert.deepEqual(items.map((item) => item.title), ["灵堂争抢存折", "算盘第一次开口"]);
+  assert.match(items[0].prompt, /【出场人物】/);
+  assert.doesNotMatch(items[0].prompt, /OUTPUT_(?:START|END)/);
+});
+
+test("keeps standard 剧情 markers when they are wrapped by OUTPUT blocks", () => {
+  const items = splitBatchPrompts(`_::~OUTPUT_START::~_\n剧情[3]：第三节\n正文\n_::~OUTPUT_END::~_\n_::~OUTPUT_START::~_\n剧情[4]：第四节\n正文\n_::~OUTPUT_END::~_`);
+  assert.deepEqual(items.map((item) => [item.section, item.title]), [[3, "第三节"], [4, "第四节"]]);
 });
 
 test("recovers batch rows interrupted while submitting", () => {

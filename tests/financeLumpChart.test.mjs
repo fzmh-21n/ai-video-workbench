@@ -83,8 +83,14 @@ test("revenue chart aggregates monthly income, cost and net; cumulative view sta
   assert.deepEqual(chart.cumulative.map((month) => month.netCents), [59800, 69600, 71400]);
   assert.equal(chart.cumulative.at(-1).netCents, chart.totals.netCents);
   assert.deepEqual(chart.lump, { incomeCents: 100000, costCents: 40000, netCents: 60000, hasValue: true });
+  const t = chart.totals;
+  assert.equal(t.douyinIncomeCents + t.baijiahaoIncomeCents + t.otherIncomeCents + t.lumpIncomeCents, t.incomeCents);
+  assert.equal(t.apiCostCents + t.manualCostCents + t.lumpCostCents, t.costCents);
+  assert.deepEqual([t.apiCostCents, t.manualCostCents, t.lumpCostCents], [600, 3000, 40000]);
   const projectA = buildRevenueChart({ tasks, settings, entries, lumps, projectName: "项目A", endMonth: "2026-11", count: 3 });
   assert.equal(projectA.lump, null);
+  assert.equal(projectA.totals.lumpCostCents, 0);
+  assert.equal(projectA.totals.apiCostCents + projectA.totals.manualCostCents, projectA.totals.costCents);
   assert.deepEqual(projectA.months.map((month) => month.netCents), [0, 9800, -3000]);
 });
 

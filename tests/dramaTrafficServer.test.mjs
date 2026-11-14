@@ -92,3 +92,57 @@ test("requests retry once, concurrent refreshes share one run, renamed projects 
   assert.throws(() => instance.syncProjects("not-array"), /数组/);
   assert.throws(() => instance.setMonitor("不存在", true), /不存在/);
 });
+
+test("projects not on the billboards fall back to a pasted Douyin series/mix link", async (t) => {
+  const base = fakeFetch();
+  const calls = [];
+  const seriesDetail = { status_code: 0, series_info: { series_id: "7447840066937817128", series_name: "短剧 · 蛟泪归海", stats: { play_vv: 12345678, collect_vv: 9, total_episode: 60 }, author: { nickname: "测试号" } } };
+  const fetchImpl = async (url, options) => {
+    calls.push(url);
+    if (url.startsWith("https://v.douyin.com/")) return { ok: false, status: 302, headers: { get: () => "https://www.iesdouyin.com/share/playlet/detail/7447840066937817128/?from_ssr=1" } };
+    if (url.includes("/series/detail/")) return jsonResponse(seriesDetail);
+    if (url.includes("/mix/detail/")) return jsonResponse({ status_code: 5, status_msg: "参数不合法" });
+    return base.fetchImpl(url, options);
+  };
+  const { instance, cleanup } = service({ fetchImpl });
+  t.after(cleanup);
+  instance.syncProjects(["蛟泪归海", "没链接的剧"]);
+  await assert.rejects(instance.setLink("蛟泪归海", "随便写的"), /没认出/);
+  let snapshot = await instance.setLink("蛟泪归海", "7.43 复制打开抖音 https://v.douyin.com/AbC123/ 我正在看【蛟泪归海】");
+  let project = snapshot.projects.find((row) => row.name === "蛟泪归海");
+  assert.deepEqual({ kind: project.douyinLink.kind, id: project.douyinLink.id }, { kind: "series", id: "7447840066937817128" });
+  assert.equal(project.status, "found");
+  assert.equal(project.douyin.playCount, 12345678);
+  assert.equal(project.douyin.title, "蛟泪归海");
+  snapshot = await instance.refresh("test");
+  project = snapshot.projects.find((row) => row.name === "蛟泪归海");
+  assert.equal(project.status, "found");
+  assert.equal(project.douyin.board, "短剧链接");
+  assert.equal(snapshot.lastRun.linked, 1);
+  assert.equal(snapshot.projects.find((row) => row.name === "没链接的剧").status, "not_found");
+  assert.equal(calls.filter((url) => url.includes("/series/detail/")).length, 2);
+  snapshot = await instance.setLink("蛟泪归海", "");
+  assert.equal(snapshot.projects.find((row) => row.name === "蛟泪归海").douyinLink, undefined);
+});
+
+test("a failing link keeps the last value and reports the problem", async (t) => {
+  const base = fakeFetch();
+  let fail = false;
+  const fetchImpl = async (url, options) => {
+    if (url.includes("/detail/")) {
+      if (fail) throw new Error("network down");
+      return jsonResponse({ status_code: 0, mix_info: { mix_id: "7640082975291344931", mix_name: "知微辞", statis: { play_vv: 5000 } } });
+    }
+    return base.fetchImpl(url, options);
+  };
+  const { instance, cleanup } = service({ fetchImpl });
+  t.after(cleanup);
+  instance.syncProjects(["知微辞"]);
+  await instance.setLink("知微辞", "https://www.douyin.com/collection/7640082975291344931");
+  fail = true;
+  const snapshot = await instance.refresh("test");
+  const project = snapshot.projects.find((row) => row.name === "知微辞");
+  assert.equal(project.status, "failed");
+  assert.match(project.message, /抖音链接读取失败/);
+  assert.equal(project.douyin.playCount, 5000);
+});

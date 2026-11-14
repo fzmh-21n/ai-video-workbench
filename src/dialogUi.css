@@ -308,6 +308,25 @@
 .cost-trend-toolbar { margin-top: 18px !important; }
 .cost-pane .cost-period-cards { margin-bottom: 4px; }
 
+/* 成本统计：总览（所有月份累计）与月度明细两段 */
+.cost-overview { margin: 20px 28px 0; padding: 18px 20px 14px; border: 1px solid #efe3d1; border-radius: 16px; background: #fffaf2; }
+.cost-monthly { margin: 26px 28px 0; padding-top: 18px; border-top: 1px dashed #ddcdb5; }
+.cost-section-head { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px 16px; margin-bottom: 14px; }
+.cost-section-head h3 { margin: 2px 0 0; color: #493b2c; font-size: 19px; }
+.cost-section-kicker { display: inline-block; padding: 2px 8px; border-radius: 6px; background: #fff3d8; color: #a56d0b; font-size: 13px; font-weight: 700; letter-spacing: .08em; }
+.cost-section-tools { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px 12px; }
+.cost-section-tools > label { display: grid; gap: 5px; }
+.cost-section-tools > label > span { color: #8b7963; font-size: 13px; }
+.cost-center .cost-section-tools :where(input, select) { height: 38px; min-height: 38px; padding: 6px 10px; font-size: 15px; }
+.cost-section-tools select { width: 220px; max-width: 100%; }
+.modal-backdrop .cost-section-tools .cost-tabs-refresh { margin: 0 0 2px; }
+.cost-overview .cost-overview-kpis { margin: 0; grid-template-columns: repeat(4, 1fr); background: #fffdf9; }
+.cost-overview .cost-overview-kpis .cost-kpi > b { font-size: 28px; }
+.cost-overview .cost-overview-kpis .cost-kpi > small { white-space: normal; }
+.cost-overview .revenue-card { margin: 14px 0 0; padding: 14px 0 0; border: 0; border-top: 1px solid #efe3d1; border-radius: 0; background: transparent; }
+.cost-monthly .cost-kpis { margin: 0; }
+.cost-monthly + .cost-tabs { margin-top: 18px; }
+
 @media (max-width: 860px) {
   .cost-kpis, .cost-period-cards { grid-template-columns: repeat(2, 1fr); }
   .cost-kpis .cost-kpi:nth-child(3), .cost-period-cards .cost-kpi:nth-child(3) { border-left: 0; }
@@ -315,7 +334,8 @@
   .finance-breakdown { grid-template-columns: 1fr; gap: 12px; }
 }
 @media (max-width: 560px) {
-  .cost-kpis, .cost-tabs, .cost-scopebar, .revenue-card, .cost-module { margin-left: 16px; margin-right: 16px; }
+  .cost-kpis, .cost-tabs, .cost-scopebar, .revenue-card, .cost-module, .cost-overview, .cost-monthly { margin-left: 16px; margin-right: 16px; }
+  .cost-overview .cost-kpis, .cost-monthly .cost-kpis, .cost-overview .revenue-card { margin-left: 0; margin-right: 0; }
   .cost-module-toggles { margin-left: 0; justify-content: flex-start; }
   .revenue-totals { gap: 12px; }
   .cost-pane { padding: 16px; }
@@ -324,3 +344,45 @@
   .cost-center .finance-entry-row { grid-template-columns: 48px 1fr auto; }
   .cost-center .finance-entry-row small { grid-column: 2 / -1; }
 }
+/* 录入收入／成本：独立大卡片 */
+.cost-center .finance-entry-card { margin: 22px 0 6px; padding: 20px 22px 22px; border: 1px solid #ead8bc; border-radius: 16px; background: #fffaf2; box-shadow: 0 2px 10px rgba(120, 84, 30, .06); }
+.cost-center .finance-entry-card.editing { border-color: #d89a2e; background: #fff8e7; }
+.finance-entry-card-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid #efe3d1; }
+.finance-entry-card-head h4 { margin: 0; color: #493b2c; font-size: 20px; font-weight: 800; }
+.finance-entry-card-head small { color: #8b7963; font-size: 14px; }
+.cost-center .finance-entry-form.finance-entry-big { display: grid; grid-template-columns: minmax(0, 1fr); align-items: stretch; gap: 18px; }
+.finance-entry-row-top { display: flex; flex-wrap: wrap; gap: 14px 28px; }
+.finance-field { display: grid; gap: 7px; }
+.cost-center .finance-entry-big :where(.finance-field, label) > span { color: #6f5a41; font-size: 15px; font-weight: 600; }
+.finance-segment { display: inline-flex; padding: 4px; border: 1px solid #e5d3b6; border-radius: 12px; background: #fff; }
+.modal-backdrop .finance-segment button { min-width: 108px; height: 44px; margin: 0; padding: 0 22px; border: 0; border-radius: 9px; background: transparent; color: #806d54; font-size: 17px; font-weight: 700; box-shadow: none; }
+.modal-backdrop .finance-segment button:hover { background: #f6efe4; }
+.modal-backdrop .finance-segment button.active { background: #d08b18; color: #fff; }
+.modal-backdrop .finance-segment button.income.active { background: #159681; }
+.modal-backdrop .finance-segment button.cost.active { background: #d08b18; }
+.cost-center .finance-entry-big .finance-entry-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px 18px; }
+.cost-center .finance-entry-big .finance-entry-grid label { display: grid; gap: 7px; min-width: 0; flex: none; }
+.cost-center .finance-entry-big .finance-title-field { grid-column: span 2; }
+.cost-center .finance-entry-big .finance-amount-field { grid-column: span 2; }
+.cost-center .finance-entry-big .finance-note-field { grid-column: span 2; flex: none !important; }
+.cost-center .finance-entry-big :where(input, select) { width: 100%; height: 48px; min-height: 48px; padding: 8px 14px; border-radius: 10px; font-size: 17px; }
+.finance-amount-input { position: relative; }
+.finance-amount-input > i { position: absolute; left: 14px; top: 50%; transform: translateY(-50%); color: #9b8972; font-size: 18px; font-style: normal; font-weight: 700; pointer-events: none; }
+.cost-center .finance-entry-big .finance-amount-input input { padding-left: 34px; font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.cost-center .finance-entry-big .finance-entry-actions { display: flex; justify-content: flex-end; gap: 12px; margin: 0; grid-column: auto; }
+.modal-backdrop .finance-entry-big .finance-submit-button { min-width: 220px; height: 52px; padding: 0 30px !important; border-radius: 12px; font-size: 18px; font-weight: 800; }
+.modal-backdrop .finance-entry-big .finance-cancel-button { height: 52px; padding: 0 22px; border-radius: 12px; font-size: 16px; }
+@media (max-width: 760px) {
+  .cost-center .finance-entry-big .finance-entry-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .modal-backdrop .finance-entry-big .finance-submit-button { flex: 1; min-width: 0; }
+}
+.cost-kpi-split { display: grid; gap: 3px; margin-top: 6px; }
+.cost-kpi-split > span { display: flex; justify-content: space-between; gap: 8px; color: #8b7963; font-size: 13px; }
+.cost-kpi-split i { font-style: normal; }
+.cost-kpi-split i.douyin { color: #159681; font-weight: 600; }
+.cost-kpi-split i.baijiahao { color: #3077a8; font-weight: 600; }
+.cost-kpi-split i.api { color: #d08b18; font-weight: 600; }
+.cost-kpi-split i.manual { color: #6b5640; font-weight: 600; }
+.cost-kpi-split em { color: #6b5640; font-style: normal; font-weight: 700; font-variant-numeric: tabular-nums; }
+.drama-table .drama-link-button { display: inline-block; margin-left: 8px; font-size: 12px; }
+.drama-link-form .finance-note-field { flex: 1 1 360px !important; }

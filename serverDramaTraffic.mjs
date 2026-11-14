@@ -5,12 +5,16 @@ import path from "node:path";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import {
   DOUYIN_BILLBOARD_BASE,
+  DOUYIN_MIX_DETAIL,
+  DOUYIN_SERIES_DETAIL,
   defaultMonitorEnabled,
   localDayKey,
   matchDramaProject,
   mergeDailyHistory,
   parseDouyinBillboard,
   parseDouyinBillboardTabs,
+  parseDouyinDramaDetail,
+  parseDouyinDramaLink,
 } from "./src/dramaTraffic.js";
 
 export const DRAMA_TRAFFIC_FILE = "drama-traffic.json";
@@ -115,10 +119,32 @@ export function createDramaTrafficService({
     return { entries, boards: boards.length, okBoards, problems };
   }
 
-  function applyEntries(entries, { dayKey, checkedAt, fetchFailed, message = "" }) {
+  // 没上榜的项目：用户贴过抖音短剧／合集链接的，逐个读详情接口（串行、带间隔，失败不影响其他项目）。
+  async function fetchLinkedEntries(names) {
+    const found = {};
+    const problems = {};
+    for (const name of names) {
+      const link = state.projects[name]?.douyinLink;
+      if (!link?.id) continue;
+      await sleep(pageDelayMs);
+      const kinds = link.kind === "mix" ? ["mix", "series"] : ["series", "mix"];
+      let lastError;
+      for (const kind of kinds) {
+        try {
+          const url = kind === "mix" ? `${DOUYIN_MIX_DETAIL}?mix_id=${encodeURIComponent(link.id)}` : `${DOUYIN_SERIES_DETAIL}?series_id=${encodeURIComponent(link.id)}`;
+          found[name] = parseDouyinDramaDetail(await fetchJson(url));
+          break;
+        } catch (error) { lastError = error; }
+      }
+      if (!found[name]) problems[name] = lastError?.message || "读取失败";
+    }
+    return { found, problems };
+  }
+
+  function applyEntries(entries, { dayKey, checkedAt, fetchFailed, message = "", linked = {}, linkProblems = {} }) {
     for (const [name, project] of Object.entries(state.projects)) {
       if (!project.active || !project.monitor) continue;
-      const match = fetchFailed ? null : matchDramaProject(name, entries);
+      const match = (fetchFailed ? null : matchDramaProject(name, entries)) || linked[name] || null;
       project.lastCheckedAt = checkedAt;
       if (match) {
         project.status = "found";
@@ -129,12 +155,15 @@ export function createDramaTrafficService({
           account: match.account, tags: match.tags, board: match.board, episodes: match.episodes,
         };
         if (Number.isFinite(match.playCount)) project.history = mergeDailyHistory(project.history, { date: dayKey, playCount: match.playCount });
+      } else if (linkProblems[name]) {
+        project.status = "failed";
+        project.message = `抖音链接读取失败：${linkProblems[name]}，保留上次数据`;
       } else if (fetchFailed) {
         project.status = "failed";
         project.message = message || "抖音榜单未取到，保留上次数据";
       } else {
         project.status = "not_found";
-        project.message = "未在抖音短剧榜单中找到同名短剧，保留上次数据";
+        project.message = project.douyinLink?.id ? "抖音链接没读到播放量，保留上次数据" : "未在抖音短剧榜单中找到同名短剧，可以贴抖音短剧链接";
       }
     }
   }
@@ -150,12 +179,17 @@ export function createDramaTrafficService({
     }
     const fetchFailed = result.okBoards === 0;
     const message = result.problems.slice(0, 5).join("；");
-    applyEntries(result.entries, { dayKey: localDayKey(startedAt), checkedAt: now(), fetchFailed, message });
+    const unmatched = Object.entries(state.projects)
+      .filter(([name, project]) => project.active && project.monitor && project.douyinLink?.id && (fetchFailed || !matchDramaProject(name, result.entries)))
+      .map(([name]) => name);
+    let linkedResult = { found: {}, problems: {} };
+    try { linkedResult = await fetchLinkedEntries(unmatched); } catch (error) { logger?.warn?.(`[drama-traffic] ${error.message}`); }
+    applyEntries(result.entries, { dayKey: localDayKey(startedAt), checkedAt: now(), fetchFailed, message, linked: linkedResult.found, linkProblems: linkedResult.problems });
     if (!fetchFailed) state.lastEntries = result.entries.map(({ title, normalizedTitle, playCount, collectCount, seriesId, account, tags, board, episodes }) => ({ title, normalizedTitle, playCount, collectCount, seriesId, account, tags, board, episodes }));
     state.lastRun = {
       startedAt, finishedAt: now(), reason,
       status: fetchFailed ? "failed" : (result.problems.length ? "partial" : "ok"),
-      boards: result.boards, okBoards: result.okBoards, entries: result.entries.length, message,
+      boards: result.boards, okBoards: result.okBoards, entries: result.entries.length, linked: Object.keys(linkedResult.found).length, message,
     };
     save();
     if (fetchFailed) logger?.warn?.(`[drama-traffic] 抖音榜单未取到：${message}`);
@@ -223,6 +257,45 @@ export function createDramaTrafficService({
     return snapshot();
   }
 
+  async function resolveShortLink(url) {
+    let current = url;
+    for (let hop = 0; hop < 4; hop += 1) {
+      const response = await fetchImpl(current, { redirect: "manual", headers: { "User-Agent": USER_AGENT }, signal: AbortSignal.timeout(timeoutMs) });
+      const location = response.headers?.get?.("location");
+      if (!location) break;
+      current = new URL(location, current).toString();
+      const parsed = parseDouyinDramaLink(current);
+      if (parsed?.id) return parsed;
+    }
+    return null;
+  }
+
+  async function setLink(name, rawLink) {
+    const key = String(name ?? "").trim();
+    if (!state.projects[key]) throw Object.assign(new Error("项目不存在，请先刷新项目列表"), { status: 404 });
+    const raw = String(rawLink ?? "").trim().slice(0, 500);
+    if (!raw) {
+      delete state.projects[key].douyinLink;
+      save();
+      return snapshot();
+    }
+    let parsed = parseDouyinDramaLink(raw);
+    if (parsed?.kind === "short") parsed = await resolveShortLink(parsed.url).catch(() => null);
+    if (!parsed?.id) throw Object.assign(new Error("没认出抖音短剧／合集链接，请在抖音里点分享→复制链接后粘贴"), { status: 400 });
+    state.projects[key].douyinLink = { kind: parsed.kind, id: parsed.id, raw, savedAt: now() };
+    // 立即读一次，让用户马上看到结果。
+    const { found, problems } = await fetchLinkedEntries([key]);
+    if (found[key] || problems[key]) {
+      const project = state.projects[key];
+      const all = state.projects;
+      state.projects = { [key]: project };
+      applyEntries([], { dayKey: localDayKey(now()), checkedAt: now(), fetchFailed: false, linked: found, linkProblems: problems });
+      state.projects = all;
+    }
+    save();
+    return snapshot();
+  }
+
   function start() {
     const check = () => { if (isDue()) refresh("schedule").catch((error) => logger?.warn?.(`[drama-traffic] ${error.message}`)); };
     const first = setTimeout(check, FIRST_CHECK_DELAY_MS);
@@ -235,7 +308,7 @@ export function createDramaTrafficService({
     for (const timer of timers.splice(0)) { clearTimeout(timer); clearInterval(timer); }
   }
 
-  return { snapshot, syncProjects, setMonitor, refresh, isDue, nextRunAt, start, stop, get file() { return file; } };
+  return { snapshot, syncProjects, setMonitor, setLink, refresh, isDue, nextRunAt, start, stop, get file() { return file; } };
 }
 
 export function dramaTrafficRouter(service) {
@@ -246,6 +319,9 @@ export function dramaTrafficRouter(service) {
   });
   router.put("/monitor", (req, res, next) => {
     try { res.json(service.setMonitor(req.body?.name, req.body?.monitor)); } catch (error) { next(error); }
+  });
+  router.put("/link", async (req, res, next) => {
+    try { res.json(await service.setLink(req.body?.name, req.body?.link)); } catch (error) { next(error); }
   });
   router.post("/refresh", (_req, res) => {
     service.refresh("manual").catch(() => {});

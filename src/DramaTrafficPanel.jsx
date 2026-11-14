@@ -10,7 +10,7 @@ import {
 } from "./projectFinance.js";
 
 const STATUS_TEXT = {
-  found: "已上榜",
+  found: "已取到",
   not_found: "未上榜/未找到",
   failed: "未取到",
   pending: "等待首次更新",
@@ -43,11 +43,13 @@ function Sparkline({ values, width = 120, height = 30 }) {
   return <svg className="drama-spark" viewBox={`0 0 ${width} ${height}`} width={width} height={height} aria-hidden="true"><polyline points={points} /></svg>;
 }
 
-export default function DramaTrafficPanel({ projects, projectFilter, defaultMonth }) {
+export default function DramaTrafficPanel({ projects, projectFilter, defaultMonth, onDataChange }) {
   const [server, setServer] = useState(null);
   const [serverError, setServerError] = useState("");
   const [hongguoRows, setHongguoRows] = useState(() => { try { return loadHongguoPlays(); } catch { return []; } });
   const [hongguoError, setHongguoError] = useState("");
+  const [linkForm, setLinkForm] = useState({ projectName: "", link: "" });
+  const [linkState, setLinkState] = useState({ busy: false, error: "" });
   const monitorableProjects = useMemo(() => projects.filter((name) => name && name !== "all"), [projects]);
   const [form, setForm] = useState({ projectName: "", month: defaultMonth, playCount: "" });
   const projectKey = monitorableProjects.join("\n");
@@ -73,6 +75,8 @@ export default function DramaTrafficPanel({ projects, projectFilter, defaultMont
     if (!form.projectName && monitorableProjects.length) setForm((current) => ({ ...current, projectName: projectFilter !== "all" ? projectFilter : monitorableProjects.find((name) => name !== "未归类") || monitorableProjects[0] }));
   }, [projectKey]);
 
+  useEffect(() => { onDataChange?.(server, hongguoRows); }, [server, hongguoRows]);
+
   const serverProjects = useMemo(() => new Map((server?.projects || []).map((project) => [project.name, project])), [server]);
   const activeServerProjects = (server?.projects || []).filter((project) => project.active !== false && monitorableProjects.includes(project.name));
   const totals = summarizeDramaPlays(activeServerProjects, hongguoRows, monitorableProjects);
@@ -92,6 +96,17 @@ export default function DramaTrafficPanel({ projects, projectFilter, defaultMont
       setServer(await readJson(await fetch("/api/drama-traffic/monitor", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, monitor }) })));
       setServerError("");
     } catch (error) { setServerError(error.message); }
+  }
+
+  async function saveLink(event, clear = false) {
+    event?.preventDefault?.();
+    if (!linkForm.projectName) return;
+    setLinkState({ busy: true, error: "" });
+    try {
+      setServer(await readJson(await fetch("/api/drama-traffic/link", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: linkForm.projectName, link: clear ? "" : linkForm.link }) })));
+      setLinkForm((current) => ({ ...current, link: "" }));
+      setLinkState({ busy: false, error: "" });
+    } catch (error) { setLinkState({ busy: false, error: error.message }); }
   }
 
   function persistHongguo(next) {
@@ -122,7 +137,7 @@ export default function DramaTrafficPanel({ projects, projectFilter, defaultMont
     <div className="cost-pane drama-pane" role="tabpanel" aria-label="短剧流量">
       <div className="cost-kpis drama-kpis">
         <div className="cost-kpi cost-kpi-main"><span>合计播放量</span><b>{formatPlayCount(totals.totalPlays)}</b><small>全部项目 · 抖音＋红果</small></div>
-        <div className="cost-kpi"><span>抖音播放量 <em className="drama-tag">自动</em></span><b>{formatPlayCount(totals.douyinPlays)}</b><small>{totals.hasDouyinDelta ? `较前一日 ${deltaText(totals.douyinDelta, true)}` : `${totals.douyinFound}/${totals.monitored} 部已上榜`}</small><Sparkline values={totalSeries} width={150} height={26} /></div>
+        <div className="cost-kpi"><span>抖音播放量 <em className="drama-tag">自动</em></span><b>{formatPlayCount(totals.douyinPlays)}</b><small>{totals.hasDouyinDelta ? `较前一日 ${deltaText(totals.douyinDelta, true)}` : `${totals.douyinFound}/${totals.monitored} 部已取到`}</small><Sparkline values={totalSeries} width={150} height={26} /></div>
         <div className="cost-kpi"><span>红果播放量 <em className="drama-tag">手动</em></span><b>{formatPlayCount(totals.hongguoPlays)}</b><small>{totals.hasHongguoDelta ? `较上次录入 ${deltaText(totals.hongguoDelta, true)}` : `${totals.hongguoProjects} 个项目已录入（各取最近月份）`}</small></div>
       </div>
 
@@ -150,7 +165,7 @@ export default function DramaTrafficPanel({ projects, projectFilter, defaultMont
         const hongguo = latestHongguoPlay(hongguoRows, name).latest;
         const status = project ? (project.monitor ? project.status : "disabled") : "pending";
         return <tr key={name}>
-          <td><span>{name}</span>{project?.douyin?.account && <code>{project.douyin.account} · {project.douyin.board}</code>}</td>
+          <td><span>{name}</span>{project?.douyin?.account && <code>{project.douyin.account} · {project.douyin.board}</code>}{name !== "未归类" && <button className="cost-link-button drama-link-button" title="贴抖音短剧／合集链接，不上榜也能自动更新" onClick={() => setLinkForm((current) => ({ ...current, projectName: name }))}>{project?.douyinLink?.id ? "已关联链接" : "贴链接"}</button>}</td>
           <td className="action"><input type="checkbox" aria-label={`监控 ${name}`} disabled={!project} checked={Boolean(project?.monitor)} onChange={(event) => toggleMonitor(name, event.target.checked)} /></td>
           <td className={`num${project?.douyin?.playCount ? "" : " is-zero"}`}>{formatPlayCount(project?.douyin?.playCount)}</td>
           <td><Sparkline values={history.slice(-30).map((row) => row.playCount)} /></td>
@@ -160,6 +175,14 @@ export default function DramaTrafficPanel({ projects, projectFilter, defaultMont
         </tr>;
       })}</tbody></table></div>
       {!rows.length && <p className="cost-empty">还没有项目。</p>}
+
+      <h4 className="cost-subtitle">关联抖音短剧链接 <small>没上榜的剧在抖音里点分享→复制链接，贴进来后每 24 小时自动更新播放量</small></h4>
+      <form className="finance-entry-form drama-link-form" onSubmit={(event) => saveLink(event)}>
+        <label><span>项目</span><select value={linkForm.projectName} onChange={(event) => setLinkForm((current) => ({ ...current, projectName: event.target.value }))}><option value="">选择项目</option>{monitorableProjects.filter((name) => name !== "未归类").map((name) => <option key={name} value={name}>{name}</option>)}</select></label>
+        <label className="finance-note-field"><span>抖音链接或分享口令</span><input required value={linkForm.link} onChange={(event) => setLinkForm((current) => ({ ...current, link: event.target.value }))} placeholder={serverProjects.get(linkForm.projectName)?.douyinLink?.raw || "例如 https://v.douyin.com/xxxx/ 或 iesdouyin.com/share/playlet/detail/…"} /></label>
+        <div className="finance-entry-actions"><button className="primary-button" type="submit" disabled={!linkForm.projectName || linkState.busy}>{linkState.busy ? "读取中…" : "保存并读取"}</button>{serverProjects.get(linkForm.projectName)?.douyinLink?.id && <button type="button" disabled={linkState.busy} onClick={(event) => saveLink(event, true)}>取消关联</button>}</div>
+      </form>
+      {linkState.error && <p className="task-project-error" role="alert">{linkState.error}</p>}
 
       <h4 className="cost-subtitle">录入红果播放量 <small>每个项目每月一次，填最终播放量；同月再次保存会覆盖</small></h4>
       <form className="finance-entry-form" onSubmit={submitHongguo}>

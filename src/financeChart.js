@@ -32,6 +32,14 @@ export function buildRevenueChart({ tasks = [], settings = {}, entries = [], lum
   const totals = {
     incomeCents: allTime.incomeCents + lump.incomeCents,
     costCents: allTime.totalCostCents + lump.costCents,
+    // 总览卡片里的拆分：各部分相加正好等于合计。
+    douyinIncomeCents: allTime.douyinIncomeCents,
+    baijiahaoIncomeCents: allTime.baijiahaoIncomeCents,
+    otherIncomeCents: allTime.incomeCents - allTime.douyinIncomeCents - allTime.baijiahaoIncomeCents,
+    lumpIncomeCents: lump.incomeCents,
+    apiCostCents: allTime.apiCostCents,
+    manualCostCents: allTime.manualCostCents,
+    lumpCostCents: lump.costCents,
   };
   totals.netCents = totals.incomeCents - totals.costCents;
   // 累计视图：起点 = 未归类历史汇总 + 图表窗口之前所有月份，再逐月累加。

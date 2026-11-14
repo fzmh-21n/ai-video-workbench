@@ -3,6 +3,9 @@
 
 export const UNCLASSIFIED_DRAMA_PROJECT = "未归类";
 export const DOUYIN_BILLBOARD_BASE = "https://api.amemv.com/aweme/v1/series/billboard/";
+// 不上榜的短剧：按用户贴的抖音短剧／合集链接，用公开详情接口读累计播放量（不需要登录）。
+export const DOUYIN_SERIES_DETAIL = "https://api.amemv.com/aweme/v1/series/detail/";
+export const DOUYIN_MIX_DETAIL = "https://api.amemv.com/aweme/v1/mix/detail/";
 
 const PUNCTUATION = /[\s\u3000《》〈〉「」『』【】〔〕（）()\[\]{}<>"'“”‘’`·•・.,，。:：;；!！?？、\/\\|_\-—–~～…#＃*＊+＋=＝&＆@＠%％^＾$￥]/g;
 
@@ -164,4 +167,52 @@ export function formatPlayCount(value) {
   if (abs >= 1e8) return `${(number / 1e8).toFixed(2).replace(/\.?0+$/, "")}亿`;
   if (abs >= 1e4) return `${(number / 1e4).toFixed(1).replace(/\.0$/, "")}万`;
   return String(Math.round(number));
+}
+
+/**
+ * 解析用户贴进来的抖音短剧／合集链接或分享口令。
+ * 支持 iesdouyin/douyin 的 playlet、series、mix、collection 地址、series_id/mix_id/object_id 参数、纯数字 ID，
+ * 以及 v.douyin.com 短链（返回 kind:"short"，由服务端跟随跳转后再解析）。
+ */
+export function parseDouyinDramaLink(value) {
+  const text = String(value ?? "").trim();
+  if (!text) return null;
+  const pick = (pattern, kind) => { const match = text.match(pattern); return match ? { kind, id: match[1] } : null; };
+  const found = pick(/\/(?:share\/)?playlet\/(?:detail\/)?(\d{12,22})/i, "series")
+    || pick(/\/series\/(?:detail\/)?(\d{12,22})/i, "series")
+    || pick(/[?&]series_id=(\d{12,22})/i, "series")
+    || pick(/\/(?:share\/)?mix\/(?:detail\/)?(\d{12,22})/i, "mix")
+    || pick(/\/collection\/(\d{12,22})/i, "mix")
+    || pick(/[?&]mix_id=(\d{12,22})/i, "mix")
+    || pick(/[?&]object_id=(\d{12,22})/i, "series");
+  if (found) return found;
+  const short = text.match(/https?:\/\/v\.douyin\.com\/[A-Za-z0-9_-]+\/?/i);
+  if (short) return { kind: "short", url: short[0] };
+  if (/^\d{12,22}$/.test(text)) return { kind: "series", id: text };
+  return null;
+}
+
+/** 解析 series/detail 或 mix/detail 的返回，取标题和累计播放量。 */
+export function parseDouyinDramaDetail(json) {
+  if (!json || typeof json !== "object") throw new Error("抖音详情返回格式无效");
+  if (Number(json.status_code || 0) !== 0) throw new Error(`抖音详情返回错误：${json.status_msg || json.status_code}`);
+  const info = json.series_info || json.mix_info;
+  if (!info || typeof info !== "object") throw new Error("抖音详情里没有短剧信息");
+  const stats = info.stats || info.statis || {};
+  const title = String(info.series_name || info.mix_name || "").replace(/^\s*短剧\s*[·・:：]\s*/, "").trim();
+  const playCount = finiteNumber(stats.play_vv);
+  if (!title || playCount === null) throw new Error("抖音详情里没有播放量");
+  return {
+    source: "douyin",
+    seriesId: String(info.series_id || info.mix_id || ""),
+    title,
+    normalizedTitle: normalizeDramaTitle(title),
+    playCount,
+    collectCount: finiteNumber(stats.collect_vv),
+    episodes: finiteNumber(stats.total_episode ?? stats.updated_to_episode),
+    tags: [],
+    account: String(info.author?.nickname || "").trim(),
+    board: json.series_info ? "短剧链接" : "合集链接",
+    boardType: null,
+  };
 }

@@ -13,6 +13,7 @@ import {
 import {
   financeEntry,
   financeMonthKey,
+  financeMonths,
   loadProjectFinance,
   projectFinanceSummary,
   removeFinanceEntry,
@@ -28,6 +29,8 @@ import { buildRevenueChart } from "./financeChart.js";
 import RevenueChart from "./RevenueChart.jsx";
 import CostTrendChart from "./CostTrendChart.jsx";
 import DramaTrafficPanel from "./DramaTrafficPanel.jsx";
+import { formatPlayCount, summarizeDramaPlays } from "./dramaTraffic.js";
+import { loadHongguoPlays } from "./projectFinance.js";
 
 const PERIODS = {
   day: { label: "每天", count: 14 },
@@ -81,6 +84,9 @@ export default function CostDashboard({ activeProfileId, modelOptions, onClose, 
   const [activeTab, setActiveTab] = useState("finance");
   const [showAllColumns, setShowAllColumns] = useState(false);
   const [chartMode, setChartMode] = useState("month");
+  const [chartRange, setChartRange] = useState("12");
+  const [trafficServer, setTrafficServer] = useState(null);
+  const [hongguoRows, setHongguoRows] = useState(() => { try { return loadHongguoPlays(); } catch { return []; } });
   const [openModules, setOpenModules] = useState([]);
   const toggleModule = (key) => setOpenModules((current) => current.includes(key) ? current.filter((item) => item !== key) : [...current, key]);
   const [lumpSums, setLumpSums] = useState({});
@@ -106,6 +112,14 @@ export default function CostDashboard({ activeProfileId, modelOptions, onClose, 
     }).finally(() => {
       if (!cancelled) setLoading(false);
     });
+    return () => { cancelled = true; };
+  }, [refreshVersion]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/drama-traffic").then((response) => response.ok ? response.json() : null)
+      .then((body) => { if (!cancelled && body) setTrafficServer(body); })
+      .catch(() => {});
     return () => { cancelled = true; };
   }, [refreshVersion]);
 
@@ -213,9 +227,25 @@ export default function CostDashboard({ activeProfileId, modelOptions, onClose, 
     || submissionGroups.some((item) => Number(item[column.key]) !== 0));
   const hiddenColumnCount = SUBMISSION_COLUMNS.length - visibleColumns.length;
   const refresh = () => setRefreshVersion((value) => value + 1);
-  const revenueChart = useMemo(() => buildRevenueChart({
-    tasks: financeTasks, settings, entries: financeEntries, lumps: lumpSums, projectName: projectFilter, endMonth: financeMonth,
-  }), [financeTasks, settings, financeEntries, lumpSums, projectFilter, financeMonth]);
+  const todayMonth = financeMonthKey();
+  const todayText = new Date().toLocaleDateString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" }).replace(/\//g, "-");
+  const revenueChart = useMemo(() => {
+    let count = 12;
+    if (chartRange === "all") {
+      const earliest = financeMonths(financeTasks, financeEntries, projectFilter).filter((month) => month <= todayMonth).at(-1);
+      if (earliest) {
+        const [fromYear, fromMonth] = earliest.split("-").map(Number);
+        const [toYear, toMonth] = todayMonth.split("-").map(Number);
+        count = Math.max(12, (toYear - fromYear) * 12 + toMonth - fromMonth + 1);
+      }
+    }
+    return buildRevenueChart({ tasks: financeTasks, settings, entries: financeEntries, lumps: lumpSums, projectName: projectFilter, endMonth: todayMonth, count });
+  }, [financeTasks, settings, financeEntries, lumpSums, projectFilter, todayMonth, chartRange]);
+  const trafficProjects = projects.filter((name) => projectFilter === "all" || name === projectFilter);
+  const trafficTotals = summarizeDramaPlays((trafficServer?.projects || []).filter((project) => project.active !== false && trafficProjects.includes(project.name)), hongguoRows, trafficProjects);
+  const projectLabel = projectFilter === "all" ? "全部项目" : projectFilter;
+  const totalsSplit = revenueChart.totals;
+  const splitRows = (rows) => <div className="cost-kpi-split">{rows.filter(([, , cents, always]) => always || cents).map(([label, tone, cents]) => <span key={label}><i className={tone}>{label}</i><em>{moneyCents(cents)}</em></span>)}</div>;
   const showLumpForm = projectFilter === "all" || projectFilter === LUMP_SUM_PROJECT;
 
   function saveLumpSum(event) {
@@ -242,37 +272,52 @@ export default function CostDashboard({ activeProfileId, modelOptions, onClose, 
         <div className="dialog-heading"><div><span>COST CENTER</span><h2>提交台账与成本统计</h2></div><button onClick={onClose} aria-label="关闭">×</button></div>
         {loadError && <p className="cost-footnote cost-alert" role="alert">{loadError} <button onClick={refresh}>重新读取</button></p>}
         {loading ? <div className="cost-loading">正在读取本机任务记录…</div> : <>
-          <div className="cost-scopebar">
-            <label><span>项目</span><select aria-label="统计项目" value={projectFilter} onChange={(event) => setProjectFilter(event.target.value)}><option value="all">全部项目</option>{projects.map((name) => <option key={name} value={name}>{name}</option>)}</select></label>
-            <label><span>月份</span><input aria-label="统计月份" type="month" value={financeMonth} onChange={(event) => setFinanceMonth(event.target.value)} /></label>
-            <button className="cost-tabs-refresh" onClick={refresh} title="重新读取本机任务记录和账本">刷新统计</button>
-          </div>
-
-          <section className="revenue-card" aria-label="收益曲线">
-            <div className="revenue-head">
-              <div>
-                <h3>收益曲线 <small>截至 {financeMonth} 近 12 个月 · 点击柱子切换月份</small></h3>
-                <div className="revenue-legend"><span className="income">收入</span><span className="cost">成本（手动＋API 估算）</span><span className="net">{chartMode === "month" ? "净收益" : "累计净收益"}</span></div>
-              </div>
-              <div className="revenue-side">
-                <div className="cost-period-switch">{[["month", "按月"], ["cumulative", "累计"]].map(([value, label]) => <button key={value} className={chartMode === value ? "active" : ""} onClick={() => setChartMode(value)}>{label}</button>)}</div>
-                <dl className="revenue-totals">
-                  <div><dt>累计收入</dt><dd>{moneyCents(revenueChart.totals.incomeCents)}</dd></div>
-                  <div><dt>累计成本</dt><dd>{moneyCents(revenueChart.totals.costCents)}</dd></div>
-                  <div className={revenueChart.totals.netCents < 0 ? "finance-negative" : ""}><dt>累计净收益</dt><dd>{moneyCents(revenueChart.totals.netCents)}</dd></div>
-                </dl>
+          <section className="cost-overview" aria-label="总览">
+            <div className="cost-section-head">
+              <div><span className="cost-section-kicker">总览</span><h3>截至 {todayText} · 所有月份累计</h3></div>
+              <div className="cost-section-tools">
+                <label><span>项目范围</span><select aria-label="统计项目" value={projectFilter} onChange={(event) => setProjectFilter(event.target.value)}><option value="all">全部项目</option>{projects.map((name) => <option key={name} value={name}>{name}</option>)}</select></label>
+                <button className="cost-tabs-refresh" onClick={refresh} title="重新读取本机任务记录、账本和播放量">刷新统计</button>
               </div>
             </div>
-            <RevenueChart points={chartMode === "month" ? revenueChart.months : revenueChart.cumulative} selectedKey={financeMonth} onSelect={setFinanceMonth} />
-            {revenueChart.lump && <p className="revenue-note">累计数字{chartMode === "cumulative" ? "和累计曲线" : ""}已包含未归类历史汇总：收入 {moneyCents(revenueChart.lump.incomeCents)}、成本 {moneyCents(revenueChart.lump.costCents)}（不属于任何月份）。</p>}
+            <div className="cost-kpis cost-overview-kpis">
+              <div className="cost-kpi"><span>总收入</span><b>{moneyCents(revenueChart.totals.incomeCents)}</b>{splitRows([["抖音", "douyin", totalsSplit.douyinIncomeCents, true], ["百家号", "baijiahao", totalsSplit.baijiahaoIncomeCents, true], ["其他收入", "", totalsSplit.otherIncomeCents], ["未归类", "", totalsSplit.lumpIncomeCents]])}</div>
+              <div className="cost-kpi"><span>总成本</span><b>{moneyCents(revenueChart.totals.costCents)}</b>{splitRows([["API 估算", "api", totalsSplit.apiCostCents, true], ["手动成本", "manual", totalsSplit.manualCostCents, true], ["未归类", "", totalsSplit.lumpCostCents]])}</div>
+              <div className={`cost-kpi cost-kpi-main${revenueChart.totals.netCents < 0 ? " finance-negative" : ""}`}><span>净利润</span><b>{moneyCents(revenueChart.totals.netCents)}</b><small>总收入 − 总成本</small></div>
+              <div className="cost-kpi"><span>短剧总流量</span><b>{formatPlayCount(trafficTotals.totalPlays)}</b><small>抖音 {formatPlayCount(trafficTotals.douyinPlays)} ＋ 红果 {formatPlayCount(trafficTotals.hongguoPlays)}</small></div>
+            </div>
+
+            <div className="revenue-card" aria-label="收益曲线">
+              <div className="revenue-head">
+                <div>
+                  <h3>收益曲线 <small>{chartRange === "all" ? "全部月份" : "近 12 个月"} · 截至 {todayMonth} · 点击柱子查看该月明细</small></h3>
+                  <div className="revenue-legend"><span className="income">收入</span><span className="cost">成本（手动＋API 估算）</span><span className="net">{chartMode === "month" ? "净收益" : "累计净收益"}</span></div>
+                </div>
+                <div className="revenue-side">
+                  <div className="cost-period-switch">{[["12", "近12个月"], ["all", "全部月份"]].map(([value, label]) => <button key={value} className={chartRange === value ? "active" : ""} onClick={() => setChartRange(value)}>{label}</button>)}</div>
+                  <div className="cost-period-switch">{[["month", "按月"], ["cumulative", "累计"]].map(([value, label]) => <button key={value} className={chartMode === value ? "active" : ""} onClick={() => setChartMode(value)}>{label}</button>)}</div>
+                </div>
+              </div>
+              <RevenueChart points={chartMode === "month" ? revenueChart.months : revenueChart.cumulative} selectedKey={financeMonth} onSelect={(month) => { setFinanceMonth(month); document.getElementById("cost-monthly-detail")?.scrollIntoView({ behavior: "smooth", block: "start" }); }} />
+              {revenueChart.lump && <p className="revenue-note">总收入、总成本{chartMode === "cumulative" ? "和累计曲线" : ""}已包含未归类历史汇总：收入 {moneyCents(revenueChart.lump.incomeCents)}、成本 {moneyCents(revenueChart.lump.costCents)}（不属于任何月份）。</p>}
+            </div>
           </section>
 
-          <div className="cost-kpis">
-            <div className={`cost-kpi cost-kpi-main${financeSummary.netCents < 0 ? " finance-negative" : ""}`}><span>净收益</span><b>{moneyCents(financeSummary.netCents)}</b><small>{financeScope}</small></div>
-            <div className="cost-kpi"><span>平台总收入</span><b>{moneyCents(financeSummary.incomeCents)}</b><small>抖音＋百家号</small></div>
-            <div className="cost-kpi"><span>总成本</span><b>{moneyCents(totalCostCents)}</b><small>手动成本＋API 估算</small></div>
-            <div className="cost-kpi"><span>实际提交成功</span><b>{acceptedCount}<em>次</em></b><small>提交台账当前筛选</small></div>
-          </div>
+          <section className="cost-monthly" id="cost-monthly-detail" aria-label="月度明细">
+            <div className="cost-section-head">
+              <div><span className="cost-section-kicker">月度明细</span><h3>{Number(financeMonth.slice(0, 4))}年{Number(financeMonth.slice(5))}月 · {projectLabel}</h3></div>
+              <div className="cost-section-tools">
+                <label><span>月份</span><input aria-label="统计月份" type="month" value={financeMonth} onChange={(event) => setFinanceMonth(event.target.value)} /></label>
+                {financeMonth !== todayMonth && <button className="cost-link-button" onClick={() => setFinanceMonth(todayMonth)}>回到本月</button>}
+              </div>
+            </div>
+            <div className="cost-kpis">
+              <div className={`cost-kpi cost-kpi-main${financeSummary.netCents < 0 ? " finance-negative" : ""}`}><span>本月净收益</span><b>{moneyCents(financeSummary.netCents)}</b><small>{financeScope}</small></div>
+              <div className="cost-kpi"><span>本月收入</span><b>{moneyCents(financeSummary.incomeCents)}</b><small>抖音＋百家号</small></div>
+              <div className="cost-kpi"><span>本月成本</span><b>{moneyCents(totalCostCents)}</b><small>手动成本＋API 估算</small></div>
+              <div className="cost-kpi"><span>实际提交成功</span><b>{acceptedCount}<em>次</em></b><small>提交台账当前筛选</small></div>
+            </div>
+          </section>
 
           <div className="cost-tabs" role="tablist" aria-label="成本统计分区">
             {COST_TABS.map(([value, label]) => <button key={value} role="tab" aria-selected={activeTab === value} className={activeTab === value ? "active" : ""} onClick={() => setActiveTab(value)}>{label}</button>)}
@@ -358,17 +403,23 @@ export default function CostDashboard({ activeProfileId, modelOptions, onClose, 
               {lumpSums[LUMP_SUM_PROJECT] && <p className="cost-hint lump-saved">已保存：收入 {moneyCents(lumpSums[LUMP_SUM_PROJECT].incomeCents)} · 成本 {moneyCents(lumpSums[LUMP_SUM_PROJECT].costCents)} · 净额 {moneyCents(lumpSums[LUMP_SUM_PROJECT].incomeCents - lumpSums[LUMP_SUM_PROJECT].costCents)}</p>}
             </>}
 
-            <h4 className="cost-subtitle">{financeEditingId ? "修改记录" : "录入收入／成本"}</h4>
-            <form className="finance-entry-form" onSubmit={submitFinanceEntry}>
-              <label><span>项目</span><select value={financeForm.projectName} onChange={(event) => setFinanceForm((current) => ({ ...current, projectName: event.target.value }))}>{projects.map((name) => <option key={name} value={name}>{name}</option>)}</select></label>
-              <label><span>类型</span><select value={financeForm.kind} onChange={(event) => setFinanceForm((current) => ({ ...current, kind: event.target.value }))}><option value="cost">手动成本</option><option value="income">平台结算收入</option></select></label>
-              {financeForm.kind === "income" && <label><span>收入来源</span><select value={financeForm.incomeChannel} onChange={(event) => setFinanceForm((current) => ({ ...current, incomeChannel: event.target.value }))}><option value="douyin">抖音</option><option value="baijiahao">百家号</option></select></label>}
-              <label><span>月份</span><input type="month" required value={financeForm.month} onChange={(event) => setFinanceForm((current) => ({ ...current, month: event.target.value }))} /></label>
-              <label><span>名称</span><input required value={financeForm.title} onChange={(event) => setFinanceForm((current) => ({ ...current, title: event.target.value }))} placeholder={financeForm.kind === "income" ? "例如：11月平台结算" : "例如：GPT会员"} /></label>
-              <label><span>金额（元）</span><input required inputMode="decimal" value={financeForm.amount} onChange={(event) => setFinanceForm((current) => ({ ...current, amount: event.target.value }))} placeholder="0.00" /></label>
-              <label className="finance-note-field"><span>备注</span><input value={financeForm.note} onChange={(event) => setFinanceForm((current) => ({ ...current, note: event.target.value }))} placeholder="可选" /></label>
-              <div className="finance-entry-actions"><button className="primary-button" type="submit">{financeEditingId ? "保存修改" : "添加本月记录"}</button>{financeEditingId && <button type="button" onClick={() => resetFinanceForm()}>取消编辑</button>}</div>
-            </form>
+            <section className={`finance-entry-card${financeEditingId ? " editing" : ""}`} aria-label="录入收入／成本">
+              <div className="finance-entry-card-head"><h4>{financeEditingId ? "修改记录" : "录入收入／成本"}</h4><small>{financeEditingId ? "修改后点「保存修改」" : "抖音、百家号收入和手动成本每月分别录入"}</small></div>
+              <form className="finance-entry-form finance-entry-big" onSubmit={submitFinanceEntry}>
+                <div className="finance-entry-row-top">
+                  <div className="finance-field"><span>类型</span><div className="finance-segment" role="radiogroup" aria-label="类型">{[["income", "收入"], ["cost", "成本"]].map(([value, label]) => <button key={value} type="button" role="radio" aria-checked={financeForm.kind === value} className={`${value}${financeForm.kind === value ? " active" : ""}`} onClick={() => setFinanceForm((current) => ({ ...current, kind: value }))}>{label}</button>)}</div></div>
+                  {financeForm.kind === "income" && <div className="finance-field"><span>收入来源</span><div className="finance-segment" role="radiogroup" aria-label="收入来源">{[["douyin", "抖音"], ["baijiahao", "百家号"]].map(([value, label]) => <button key={value} type="button" role="radio" aria-checked={financeForm.incomeChannel === value} className={financeForm.incomeChannel === value ? "active" : ""} onClick={() => setFinanceForm((current) => ({ ...current, incomeChannel: value }))}>{label}</button>)}</div></div>}
+                </div>
+                <div className="finance-entry-grid">
+                  <label><span>项目</span><select value={financeForm.projectName} onChange={(event) => setFinanceForm((current) => ({ ...current, projectName: event.target.value }))}>{projects.map((name) => <option key={name} value={name}>{name}</option>)}</select></label>
+                  <label><span>月份</span><input type="month" required value={financeForm.month} onChange={(event) => setFinanceForm((current) => ({ ...current, month: event.target.value }))} /></label>
+                  <label className="finance-title-field"><span>名称</span><input required value={financeForm.title} onChange={(event) => setFinanceForm((current) => ({ ...current, title: event.target.value }))} placeholder={financeForm.kind === "income" ? "例如：11月抖音结算" : "例如：GPT会员"} /></label>
+                  <label className="finance-amount-field"><span>金额（元）</span><div className="finance-amount-input"><i>¥</i><input required inputMode="decimal" value={financeForm.amount} onChange={(event) => setFinanceForm((current) => ({ ...current, amount: event.target.value }))} placeholder="0.00" /></div></label>
+                  <label className="finance-note-field"><span>备注</span><input value={financeForm.note} onChange={(event) => setFinanceForm((current) => ({ ...current, note: event.target.value }))} placeholder="可选，例如结算周期、用途" /></label>
+                </div>
+                <div className="finance-entry-actions">{financeEditingId && <button type="button" className="finance-cancel-button" onClick={() => resetFinanceForm()}>取消编辑</button>}<button className="primary-button finance-submit-button" type="submit">{financeEditingId ? "保存修改" : financeForm.kind === "income" ? "＋ 添加收入记录" : "＋ 添加成本记录"}</button></div>
+              </form>
+            </section>
             {financeError && <p className="task-project-error" role="alert">{financeError}</p>}
 
             <h4 className="cost-subtitle">{financeMonth} 记录 <small>{visibleFinanceEntries.length} 条</small></h4>
@@ -377,7 +428,7 @@ export default function CostDashboard({ activeProfileId, modelOptions, onClose, 
             </div>
           </div>}
 
-          {activeTab === "drama" && <DramaTrafficPanel projects={projects} projectFilter={projectFilter} defaultMonth={financeMonth} />}
+          {activeTab === "drama" && <DramaTrafficPanel projects={projects} projectFilter={projectFilter} defaultMonth={financeMonth} onDataChange={(server, rows) => { if (server) setTrafficServer(server); setHongguoRows(rows); }} />}
 
         </>}
       </section>

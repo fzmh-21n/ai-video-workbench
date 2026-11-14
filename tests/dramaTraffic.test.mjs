@@ -96,3 +96,17 @@ test("play counts are formatted in 万/亿", () => {
   assert.equal(formatPlayCount(9999), "9999");
   assert.equal(formatPlayCount(undefined), "—");
 });
+
+test("parseDouyinDramaLink recognises share links, ids and short links", async () => {
+  const { parseDouyinDramaLink, parseDouyinDramaDetail } = await import("../src/dramaTraffic.js");
+  assert.deepEqual(parseDouyinDramaLink("https://www.iesdouyin.com/share/playlet/detail/7447840066937817128/?schema_type=43"), { kind: "series", id: "7447840066937817128" });
+  assert.deepEqual(parseDouyinDramaLink("https://www.iesdouyin.com/share/mix/detail/7447840066937817128/"), { kind: "mix", id: "7447840066937817128" });
+  assert.deepEqual(parseDouyinDramaLink("https://www.douyin.com/collection/7640082975291344931"), { kind: "mix", id: "7640082975291344931" });
+  assert.deepEqual(parseDouyinDramaLink("7447840066937817128"), { kind: "series", id: "7447840066937817128" });
+  assert.deepEqual(parseDouyinDramaLink("1.74 TYz:/ https://v.douyin.com/iAbC12/ 复制此链接"), { kind: "short", url: "https://v.douyin.com/iAbC12/" });
+  assert.equal(parseDouyinDramaLink("蛟泪归海"), null);
+  const detail = parseDouyinDramaDetail({ status_code: 0, series_info: { series_id: "1", series_name: "短剧 · 以爱之名", stats: { play_vv: 549137113, total_episode: 17 } } });
+  assert.equal(detail.title, "以爱之名");
+  assert.equal(detail.playCount, 549137113);
+  assert.throws(() => parseDouyinDramaDetail({ status_code: 5, status_msg: "参数不合法" }), /参数不合法/);
+});

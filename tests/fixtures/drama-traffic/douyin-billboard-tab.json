@@ -1,0 +1,48 @@
+{
+ "billboard_type_list": [
+  {
+   "type": 1001,
+   "name": "热播榜",
+   "sub_billboard_list": null,
+   "select_page_content_list": null
+  },
+  {
+   "type": 1940,
+   "name": "爱情榜",
+   "sub_billboard_list": null,
+   "select_page_content_list": null
+  },
+  {
+   "type": 1957,
+   "name": "剧情榜",
+   "sub_billboard_list": null,
+   "select_page_content_list": null
+  },
+  {
+   "type": 1944,
+   "name": "逆袭榜",
+   "sub_billboard_list": null,
+   "select_page_content_list": null
+  },
+  {
+   "type": 2092,
+   "name": "反转榜",
+   "sub_billboard_list": null,
+   "select_page_content_list": null
+  },
+  {
+   "type": 1941,
+   "name": "亲情榜",
+   "sub_billboard_list": null,
+   "select_page_content_list": null
+  },
+  {
+   "type": 2091,
+   "name": "恩怨榜",
+   "sub_billboard_list": null,
+   "select_page_content_list": null
+  }
+ ],
+ "status_code": 0,
+ "status_msg": ""
+}

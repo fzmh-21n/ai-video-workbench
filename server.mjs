@@ -124,6 +124,7 @@ import { capabilityLimitIssue, submissionTimeoutForAdapter } from "./src/provide
 import { cosFingerprintKey, cosPublicUrl, normalizeCosConfig } from "./src/cosStorage.js";
 import { faceScreenRouter } from "./serverFaceScreen.mjs";
 import { textServiceRouter } from "./serverTextService.mjs";
+import { createDramaTrafficService, dramaTrafficRouter } from "./serverDramaTraffic.mjs";
 import {
   directTaskContentPaths,
   requiresOriginalTaskKey,
@@ -2462,6 +2463,10 @@ app.use("/api", (req, res, next) => {
 });
 
 app.use("/api/face-screen", faceScreenRouter(rootDir));
+
+const dramaTrafficService = createDramaTrafficService({ dataDir });
+dramaTrafficService.start();
+app.use("/api/drama-traffic", dramaTrafficRouter(dramaTrafficService));
 
 app.get("/api/diagnostics", (req, res) => {
   const sessionId = String(req.query.sessionId || "").trim();

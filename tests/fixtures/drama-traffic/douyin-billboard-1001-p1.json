@@ -1,0 +1,158 @@
+{
+ "series_infos": [
+  {
+   "series_id": "7704969923331622938",
+   "series_name": "发现丈夫不对劲那天，我笑了",
+   "real_name": "发现丈夫不对劲那天，我笑了",
+   "status": {
+    "status": 2,
+    "status_desc": "64集全",
+    "is_collected": 0
+   },
+   "stats": {
+    "play_vv": 215205502,
+    "collect_vv": 220400,
+    "current_episode": 0,
+    "updated_to_episode": 64,
+    "total_episode": 64,
+    "last_added_item_time": 1794021396
+   },
+   "hot_value": 20647110,
+   "series_content_types_new": [
+    {
+     "series_content_type": 130,
+     "name": "悬疑情感",
+     "jump_schema": ""
+    },
+    {
+     "series_content_type": 133,
+     "name": "离奇惊悚",
+     "jump_schema": ""
+    }
+   ],
+   "billboard_info": {
+    "labels": [
+     {
+      "text_color": "#EB6A41",
+      "background_color": "#FFF2ED",
+      "border_color": "rgba(235, 106, 65, 0.08)",
+      "text": "播放破1亿"
+     }
+    ]
+   },
+   "author": {
+    "uid": "312688231591599",
+    "nickname": "月光剧场",
+    "unique_id": "96296504916",
+    "sec_uid": "MS4wLjABAAAAxKtExlVPfMALHjIWbFLJ1HhhJUebELJXNU6UQw42-kY"
+   },
+   "share_info": {
+    "share_url": "https://www.iesdouyin.com/share/playlet/detail/7704969923331622938/?schema_type=43&object_id=7704969923331622938&from_ssr=1"
+   },
+   "create_time": 1793953106,
+   "update_time": 1794619779
+  },
+  {
+   "series_id": "7704581708909119488",
+   "series_name": "母凭子贵后被皇家宠上天3",
+   "real_name": "母凭子贵后被皇家宠上天3",
+   "status": {
+    "status": 2,
+    "status_desc": "71集全",
+    "is_collected": 0
+   },
+   "stats": {
+    "play_vv": 68200253,
+    "collect_vv": 130019,
+    "current_episode": 0,
+    "updated_to_episode": 71,
+    "total_episode": 71,
+    "last_added_item_time": 1794580243
+   },
+   "hot_value": 10093896,
+   "series_content_types_new": [
+    {
+     "series_content_type": 116,
+     "name": "古风爱情",
+     "jump_schema": ""
+    },
+    {
+     "series_content_type": 144,
+     "name": "女性成长",
+     "jump_schema": ""
+    }
+   ],
+   "billboard_info": {
+    "labels": []
+   },
+   "author": {
+    "uid": "68006774673",
+    "nickname": "阅文短剧",
+    "unique_id": "",
+    "sec_uid": "MS4wLjABAAAApOaEIBF7MFrqaHOd-mtYY3EGpWGqeiMrIVmbi7mZWAU"
+   },
+   "share_info": {
+    "share_url": "https://www.iesdouyin.com/share/playlet/detail/7704581708909119488/?schema_type=43&object_id=7704581708909119488&from_ssr=1"
+   },
+   "create_time": 1793862718,
+   "update_time": 1794580243
+  },
+  {
+   "series_id": "7703828515069626394",
+   "series_name": "温柔以待，终有回甘",
+   "real_name": "温柔以待，终有回甘",
+   "status": {
+    "status": 2,
+    "status_desc": "84集全",
+    "is_collected": 0
+   },
+   "stats": {
+    "play_vv": 838449229,
+    "collect_vv": 1079292,
+    "current_episode": 0,
+    "updated_to_episode": 84,
+    "total_episode": 84,
+    "last_added_item_time": 1793688784
+   },
+   "hot_value": 5815068,
+   "series_content_types_new": [
+    {
+     "series_content_type": 113,
+     "name": "家长里短",
+     "jump_schema": ""
+    },
+    {
+     "series_content_type": 122,
+     "name": "都市日常",
+     "jump_schema": ""
+    }
+   ],
+   "billboard_info": {
+    "labels": [
+     {
+      "text_color": "#EB6A41",
+      "background_color": "#FFF2ED",
+      "border_color": "rgba(235, 106, 65, 0.08)",
+      "text": "播放破1亿"
+     }
+    ]
+   },
+   "author": {
+    "uid": "312688231591599",
+    "nickname": "月光剧场",
+    "unique_id": "96296504916",
+    "sec_uid": "MS4wLjABAAAAxKtExlVPfMALHjIWbFLJ1HhhJUebELJXNU6UQw42-kY"
+   },
+   "share_info": {
+    "share_url": "https://www.iesdouyin.com/share/playlet/detail/7703828515069626394/?schema_type=43&object_id=7703828515069626394&from_ssr=1"
+   },
+   "create_time": 1793687351,
+   "update_time": 1794596144
+  }
+ ],
+ "offset": 15,
+ "has_more": true,
+ "update_time": 1794658802,
+ "status_code": 0,
+ "status_msg": ""
+}

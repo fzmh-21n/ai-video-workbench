@@ -1,6 +1,6 @@
 import { ACTIVE_TASK_PROJECT_KEY, TASK_PROJECT_CREATED_AT_KEY, TASK_PROJECT_RATIOS_KEY, TASK_PROJECTS_KEY, UNCLASSIFIED_PROJECT } from "./taskProjects.js";
 import { TASK_PROJECT_FIXED_CONTENT_KEY } from "./fixedContentStore.js";
-import { loadProjectFinance } from "./projectFinance.js";
+import { HONGGUO_PLAYS_KEY, loadHongguoPlays, loadProjectFinance } from "./projectFinance.js";
 
 const PROJECT_FINANCE_KEY = "video-workbench-project-finance-v1";
 
@@ -9,6 +9,13 @@ function readProjectFinance(storage) {
   if (raw === null) return null;
   try { return loadProjectFinance(storage); }
   catch { throw new Error("项目成本账本格式损坏，请先导出备份后再重命名"); }
+}
+
+function readHongguoPlays(storage) {
+  const raw = storage.getItem(HONGGUO_PLAYS_KEY);
+  if (raw === null) return null;
+  try { return loadHongguoPlays(storage); }
+  catch { throw new Error("红果播放量数据格式损坏，请先导出备份后再重命名"); }
 }
 
 export function taskProjectRenamePlan(state, oldName, newName, knownNames = []) {
@@ -49,6 +56,11 @@ export async function persistTaskProjectRename(plan, renameRecords, storage = lo
     changes.push([PROJECT_FINANCE_KEY, JSON.stringify(financeEntries.map((entry) => (
       String(entry.projectName || "").trim() === plan.from ? { ...entry, projectName: plan.to } : entry
     ))) ]);
+  }
+  const hongguoPlays = readHongguoPlays(storage);
+  if (hongguoPlays?.some((row) => row.projectName === plan.from)) {
+    if (hongguoPlays.some((row) => row.projectName === plan.to)) throw new Error("红果播放量中已经存在目标项目的历史记录，请换一个名称；不会合并记录");
+    changes.push([HONGGUO_PLAYS_KEY, JSON.stringify(hongguoPlays.map((row) => row.projectName === plan.from ? { ...row, projectName: plan.to } : row))]);
   }
   const originals = changes.map(([key]) => [key, storage.getItem(key)]);
   try {

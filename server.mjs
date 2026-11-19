@@ -29,6 +29,7 @@ import {
   lwaigcLimitIssue,
   lwaigcPromptIssue,
   lwaigcReferencePrompt,
+  lwaigcSelectedResolution,
   lwaigcVideoPayload,
 } from "./src/lwaigcCatalog.js";
 import {
@@ -2866,6 +2867,10 @@ app.post("/api/tasks", upload.array("references", 50), async (req, res, next) =>
     if (!Array.isArray(meta) || meta.length > 50) throw httpError(400, "参考素材数量无效");
     const requestedDuration = safeNumber(req.body.duration, 5, 1, config.adapter === "baoju" ? 600 : 60);
     validateLwaigcLimits(config, meta, requestedDuration);
+    // 在素材上传前拒绝缺失／无效的 V2 清晰度，避免悄悄改成 720p 或遗漏 resolution。
+    const lwaigcResolution = config.adapter === "lwaigc" && config.model === "lg-sd2.5-v2"
+      ? lwaigcSelectedResolution(config.model, req.body.resolution)
+      : null;
     validateMeaiccLimits(config, meta, requestedDuration);
     validateProviderLimits(config, meta, requestedDuration);
     if (config.adapter === "clmm") {
@@ -2904,11 +2909,11 @@ app.post("/api/tasks", upload.array("references", 50), async (req, res, next) =>
       prompt,
       materials,
       duration: requestedDuration,
-      resolution: ["seedancevideo", "baoju"].includes(config.adapter)
+      resolution: lwaigcResolution ?? (["seedancevideo", "baoju"].includes(config.adapter)
         ? String(req.body.resolution || "").trim().slice(0, 64)
         : ["480p", "720p", "768p", "1080p", "2k", "2K", "4k", "4K"].includes(req.body.resolution)
           ? req.body.resolution
-          : "720p",
+          : "720p"),
       aspectRatio: config.adapter === "baoju" ? String(req.body.aspectRatio || "").trim().slice(0, 32)
         : ["21:9", "16:9", "4:3", "1:1", "3:4", "9:16", "auto", "adaptive"].includes(req.body.aspectRatio)
         ? req.body.aspectRatio

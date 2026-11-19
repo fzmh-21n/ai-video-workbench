@@ -46,6 +46,7 @@ export const LWAIGC_VIDEO_MODELS = [
   "ld-sd2.5-v2",
   "ld-sd2.5-v3",
   "lg-sd2.5-v1",
+  "lg-sd2.5-v2",
   "wf-sd2.5-v5",
   "wf-sd2.5-v5-face",
   "fs-sd2.5-v1",
@@ -183,6 +184,11 @@ export function lwaigcCapability(modelName) {
   if (["ld-sd2.5-v1", "lg-sd2.5-v1"].includes(model)) {
     return { ...common, images: 30, videos: 10, audios: 10, durations: range(4, 30), resolutions: ["480p", "720p", "1080p"], _sdVersion: "sd25" };
   }
+  // LWAIGC 2026-11-19 统一接口文档，第 2、5 页：V2 由用户选择分辨率并显式发送。
+  // 不沿用旧 lg-sd2.5-v1 的规则，也不退回未知模型的固定 720p。
+  if (model === "lg-sd2.5-v2") {
+    return { ...common, images: 30, videos: 10, audios: 10, durations: range(4, 30), resolutions: ["480p", "720p", "1080p", "4k"], _sdVersion: "sd25" };
+  }
   if (model === "ld-sd2.5-v2") {
     return { ...common, images: 9, videos: 0, audios: 0, durations: [30], resolutions: ["720p"], _sdVersion: "sd25" };
   }
@@ -216,6 +222,16 @@ export function lwaigcCapability(modelName) {
   };
 }
 
+/** 仅适配有明确文档的 LG SD2.5 V2，不猜测其他通道的分辨率。 */
+export function lwaigcSelectedResolution(model, value) {
+  if (model !== "lg-sd2.5-v2") return value;
+  const resolution = String(value || "").trim().toLowerCase();
+  if (!lwaigcCapability(model).resolutions.includes(resolution)) {
+    throw Object.assign(new Error(`${model} 需要选择分辨率：480p、720p、1080p 或 4k`), { status: 400 });
+  }
+  return resolution;
+}
+
 export function lwaigcVideoPayload(model, input, clientTaskId) {
   const images = input.materials.filter((item) => item.kind === "image").map((item) => item.url);
   const videos = input.materials.filter((item) => item.kind === "video").map((item) => item.url);
@@ -246,6 +262,7 @@ export function lwaigcVideoPayload(model, input, clientTaskId) {
   }
 
   payload.aspect_ratio = input.aspectRatio;
+  if (model === "lg-sd2.5-v2") payload.resolution = lwaigcSelectedResolution(model, input.resolution);
   if (["mg-sd431-mini", "mg-sd431-fast", "mg-sd431-Pro", "dbb-sd2.5-v2", "ld-sd2.5-v1", "ld-sd2.5-v3", "lg-sd2.5-v1"].includes(model)) {
     payload.resolution = input.resolution;
   }

@@ -413,7 +413,9 @@ function Workbench({ onImageMode, onFaceMode, onTextMode, onLogout, onAuthExpire
   const [projectDirectoryHandle, setProjectDirectoryHandle] = useState(null);
   const [projectNeedsPermission, setProjectNeedsPermission] = useState(false);
   const [projectFolderLoading, setProjectFolderLoading] = useState(false);
+  const [projectFolderDiagnostic, setProjectFolderDiagnostic] = useState(null);
   const projectFolderLoadRef = useRef(0);
+  const projectFolderPickerRef = useRef(false);
   const projectFolderInitialProjectRef = useRef(activeTaskProject);
   const projectFolderTargetRef = useRef(activeTaskProject);
   const activeTaskProjectRef = useRef(activeTaskProject);
@@ -608,22 +610,95 @@ function Workbench({ onImageMode, onFaceMode, onTextMode, onLogout, onAuthExpire
     let cancelled = false;
     const version = ++projectFolderLoadRef.current;
     const isCurrent = () => !cancelled && version === projectFolderLoadRef.current;
+    const startedAt = Date.now();
+    let waitingTimer;
+    const labels = {
+      project_folder_restore_started: "开始恢复已保存的素材文件夹",
+      project_folder_db_open_started: "等待浏览器打开文件夹绑定库",
+      project_folder_db_open_completed: "文件夹绑定库已打开",
+      project_folder_db_open_blocked: "文件夹绑定库打开被阻塞，仍在等待浏览器",
+      project_folder_db_open_failed: "文件夹绑定库打开失败",
+      project_folder_transaction_started: "已发起文件夹绑定事务",
+      project_folder_binding_read_started: "正在读取当前项目的目录绑定",
+      project_folder_binding_read_completed: "目录绑定读取已返回，等待事务完成",
+      project_folder_legacy_read_started: "正在检查旧版目录绑定",
+      project_folder_legacy_read_completed: "旧版目录绑定检查已返回，等待事务完成",
+      project_folder_transaction_completed: "文件夹绑定事务已完成",
+      project_folder_transaction_failed: "文件夹绑定事务出错",
+      project_folder_transaction_aborted: "文件夹绑定事务被取消",
+      project_folder_permission_query_started: "等待浏览器查询目录读取权限",
+      project_folder_permission_query_completed: "目录读取权限查询已返回",
+      project_folder_permission_query_timeout: "浏览器权限查询超过10秒未返回；原目录绑定已保留，请点击“恢复项目”或“重新选择文件夹”",
+      project_folder_permission_request_started: "等待用户确认目录读取权限",
+      project_folder_permission_request_completed: "目录权限申请已返回",
+      project_folder_scan_started: "开始枚举素材目录",
+      project_folder_scan_directory_started: "等待浏览器返回目录条目",
+      project_folder_scan_file_started: "等待浏览器返回文件信息",
+      project_folder_scan_progress: "正在读取素材文件信息",
+      project_folder_scan_completed: "素材目录读取完成",
+      project_folder_restore_completed: "自动恢复检查已结束",
+      project_folder_restore_failed: "自动恢复检查失败",
+    };
+    const onDiagnostic = (entry) => {
+      if (!isCurrent()) return;
+      try {
+        clearTimeout(waitingTimer);
+        const stepStartedAt = Date.now();
+        const details = [
+          entry.permission ? `权限：${entry.permission}` : "",
+          Number.isFinite(entry.fileCount) ? `已读取 ${entry.fileCount} 个文件` : "",
+          entry.errorName ? `异常类型：${entry.errorName}` : "",
+        ].filter(Boolean).join("；");
+        const diagnostic = {
+          ...entry,
+          scope: "workbench",
+          taskProjectName: activeTaskProject,
+          folderLoadVersion: version,
+          elapsedMs: stepStartedAt - startedAt,
+          message: `文件夹诊断：${labels[entry.stage] || entry.stage}${details ? `；${details}` : ""}`,
+        };
+        const scanStep = ["project_folder_scan_file_started", "project_folder_scan_directory_started", "project_folder_scan_progress"].includes(entry.stage);
+        if (!scanStep || !Number.isFinite(entry.fileCount) || entry.fileCount % 25 === 0) {
+          setProjectFolderDiagnostic(diagnostic);
+          try { recordDiagnostic(diagnostic); } catch {}
+        }
+        if (!["project_folder_restore_completed", "project_folder_restore_failed", "project_folder_permission_query_timeout"].includes(entry.stage)) {
+          waitingTimer = setTimeout(() => {
+            if (!isCurrent()) return;
+            const waiting = {
+              ...diagnostic,
+              stage: "project_folder_waiting",
+              waitingStage: entry.stage,
+              elapsedMs: Date.now() - startedAt,
+              stepWaitMs: Date.now() - stepStartedAt,
+              message: `${diagnostic.message}；本步骤已等待至少10秒，浏览器尚未返回（仅记录，不中断读取）`,
+            };
+            setProjectFolderDiagnostic(waiting);
+            try { recordDiagnostic(waiting); } catch {}
+          }, 10_000);
+        }
+      } catch {}
+    };
     setProjectName("");
     setProjectAssets([]);
     setProjectDirectoryHandle(null);
     setProjectNeedsPermission(false);
     setProjectFolderLoading(true);
+    onDiagnostic({ stage: "project_folder_restore_started" });
     (async () => {
       try {
-        const handle = await loadTaskProjectDirectory(activeTaskProject, { migrateLegacy: activeTaskProject === projectFolderInitialProjectRef.current });
-        if (isCurrent() && handle) await openRememberedProject(handle, false, isCurrent);
+        const handle = await loadTaskProjectDirectory(activeTaskProject, { migrateLegacy: activeTaskProject === projectFolderInitialProjectRef.current, onDiagnostic });
+        if (isCurrent() && handle) await openRememberedProject(handle, false, isCurrent, onDiagnostic);
+        onDiagnostic({ stage: "project_folder_restore_completed", found: Boolean(handle) });
       } catch (error) {
+        onDiagnostic({ stage: error?.code === "PROJECT_FOLDER_PERMISSION_TIMEOUT" ? "project_folder_permission_query_timeout" : "project_folder_restore_failed", errorName: error?.name || "Error" });
         if (isCurrent()) setNotice(`恢复项目素材文件夹失败：${error.message}`);
       } finally {
+        clearTimeout(waitingTimer);
         if (isCurrent()) setProjectFolderLoading(false);
       }
     })();
-    return () => { cancelled = true; };
+    return () => { cancelled = true; clearTimeout(waitingTimer); };
   }, [activeTaskProject]);
   useEffect(() => () => {
     if (videoBlob?.url) URL.revokeObjectURL(videoBlob.url);
@@ -749,11 +824,11 @@ function Workbench({ onImageMode, onFaceMode, onTextMode, onLogout, onAuthExpire
     const exceeded = Object.keys(REFERENCE_LIMITS).filter(
       (kind) => referenceCounts[kind] > (nextCapability[`${kind}s`] ?? 0),
     );
-    const label = version === "sd25" ? "SD2.5（30图 / 10音频 / 10视频 / 最长30秒）" : "SD2.0（9图 / 3音频 / 3视频 / 最长15秒）";
+    const label = version === "sd25" ? "SD2.5" : "SD2.0";
     const warning = exceeded.length
       ? `；已有素材超限：${exceeded.map((kind) => `${KIND_LABELS[kind]} ${referenceCounts[kind]}/${nextCapability[`${kind}s`]}`).join("、")}，请删除标红的超额素材后提交`
       : "";
-    setNotice(`已切换到 ${label}，当前模型：${model}${warning}`);
+    setNotice(`已切换到 ${label}，当前模型：${model}${nextCapability._capabilityUnverified ? "；模型参数能力尚未核实，请以对应模型文档为准" : ""}${warning}`);
   }
 
   function headersFor(profile, explicitKey) {
@@ -1124,26 +1199,34 @@ function Workbench({ onImageMode, onFaceMode, onTextMode, onLogout, onAuthExpire
     );
   }
 
-  async function openRememberedProject(handle, requestPermission = false, isCurrent = () => true) {
-    const permission = await projectDirectoryPermission(handle, requestPermission);
+  async function openRememberedProject(handle, requestPermission = false, isCurrent = () => true, onDiagnostic, permissionGranted = false) {
     if (!isCurrent()) return false;
     setProjectDirectoryHandle(handle);
     setProjectName(handle.name || "已保存项目");
     setProjectAssets([]);
+    let permission;
+    try {
+      permission = permissionGranted ? "granted" : await projectDirectoryPermission(handle, requestPermission, onDiagnostic);
+    } catch (error) {
+      if (!isCurrent()) return false;
+      setProjectNeedsPermission(true);
+      throw error;
+    }
+    if (!isCurrent()) return false;
     if (permission !== "granted") {
       setProjectNeedsPermission(true);
       setNotice(`已记住项目“${handle.name || "已保存项目"}”，点击“恢复项目”即可继续使用`);
       return false;
     }
-    const files = await filesFromProjectDirectory(handle);
-    if (!isCurrent()) return false;
     setProjectNeedsPermission(false);
+    const files = await filesFromProjectDirectory(handle, onDiagnostic);
+    if (!isCurrent()) return false;
     selectProjectFolder(files, handle.name);
     return true;
   }
 
   async function chooseProjectFolder() {
-    if (projectFolderLoading) return;
+    if (projectFolderPickerRef.current || (projectFolderLoading && !projectNeedsPermission)) return;
     const targetProject = activeTaskProject;
     if (!window.showDirectoryPicker) {
       projectFolderTargetRef.current = targetProject;
@@ -1152,14 +1235,17 @@ function Workbench({ onImageMode, onFaceMode, onTextMode, onLogout, onAuthExpire
     }
     const version = ++projectFolderLoadRef.current;
     const isCurrent = () => version === projectFolderLoadRef.current && activeTaskProjectRef.current === targetProject;
+    projectFolderPickerRef.current = true;
     setProjectFolderLoading(true);
+    setProjectFolderDiagnostic(null);
     try {
       const handle = await window.showDirectoryPicker({ mode: "read" });
       await saveTaskProjectDirectory(targetProject, handle);
-      if (isCurrent()) await openRememberedProject(handle, true, isCurrent);
+      if (isCurrent()) await openRememberedProject(handle, false, isCurrent, undefined, true);
     } catch (error) {
       if (isCurrent() && error?.name !== "AbortError") setNotice(`项目文件夹读取失败：${error.message}`);
     } finally {
+      projectFolderPickerRef.current = false;
       if (isCurrent()) setProjectFolderLoading(false);
     }
   }
@@ -1170,6 +1256,7 @@ function Workbench({ onImageMode, onFaceMode, onTextMode, onLogout, onAuthExpire
     const version = ++projectFolderLoadRef.current;
     const isCurrent = () => version === projectFolderLoadRef.current && activeTaskProjectRef.current === targetProject;
     setProjectFolderLoading(true);
+    setProjectFolderDiagnostic(null);
     try {
       await openRememberedProject(projectDirectoryHandle, true, isCurrent);
     } catch (error) {
@@ -2416,13 +2503,13 @@ function Workbench({ onImageMode, onFaceMode, onTextMode, onLogout, onAuthExpire
               className={sdVersion === "sd20" ? "active" : ""}
               disabled={!sdVersionAvailability.sd20 || (Array.isArray(availableActiveModels) && !availableActiveModels.includes(sdVersionAvailability.sd20))}
               onClick={() => switchSdVersion("sd20")}
-              title="9张图片、3个音频、3个视频，最长15秒"
+              title="切换 SD2.0 模型，具体参数以所选模型为准"
             >SD2.0</button>
             <button
               className={sdVersion === "sd25" ? "active" : ""}
               disabled={!sdVersionAvailability.sd25 || (Array.isArray(availableActiveModels) && !availableActiveModels.includes(sdVersionAvailability.sd25))}
               onClick={() => switchSdVersion("sd25")}
-              title="30张图片、10个音频、10个视频，最长30秒"
+              title="切换 SD2.5 模型，具体参数以所选模型为准"
             >SD2.5</button>
           </div>
           <label>
@@ -2486,6 +2573,7 @@ function Workbench({ onImageMode, onFaceMode, onTextMode, onLogout, onAuthExpire
               projectNeedsPermission={projectNeedsPermission}
               projectName={projectName}
               projectFolderLoading={projectFolderLoading}
+              projectFolderDiagnostic={projectFolderDiagnostic}
               taskProjectName={activeTaskProject}
               quantity={quantity}
               ratio={ratio}
@@ -2521,8 +2609,9 @@ function Workbench({ onImageMode, onFaceMode, onTextMode, onLogout, onAuthExpire
                   disabled={projectFolderLoading}
                   onClick={projectNeedsPermission ? restoreProjectFolder : chooseProjectFolder}
                 >
-                  {projectFolderLoading ? "正在读取文件夹…" : projectNeedsPermission ? "恢复项目" : projectName ? "更换项目" : "选择项目文件夹"}
+                  {projectFolderLoading ? projectNeedsPermission ? "等待浏览器授权…" : "正在读取文件夹…" : projectNeedsPermission ? "恢复项目" : projectName ? "更换项目" : "选择项目文件夹"}
                 </button>
+                {projectNeedsPermission && <button className="secondary-button" onClick={chooseProjectFolder}>重新选择文件夹</button>}
                 <button className="one-click-button" disabled={!projectAssets.length} onClick={runOneClickReference}>
                   一键参考
                 </button>
@@ -2531,6 +2620,8 @@ function Workbench({ onImageMode, onFaceMode, onTextMode, onLogout, onAuthExpire
                 </button>
               </div>
             </div>
+
+            {projectFolderDiagnostic && <div className="notice" role="status">{projectFolderDiagnostic.message} · 记录时累计 {(projectFolderDiagnostic.elapsedMs / 1000).toFixed(1)} 秒</div>}
 
             <FixedContentControls
               fixedContent={fixedContent}

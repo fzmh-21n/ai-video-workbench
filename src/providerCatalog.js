@@ -230,6 +230,7 @@ export const FALLBACK_MODELS = {
     "viraldance921-2.0",
     "viraldance933",
     "viraldance933-fast",
+    "viraldance2.5-30",
     "sora-2-landscape-8s",
     "sora-2-landscape-12s",
     "sora-2-portrait-8s",
@@ -313,6 +314,10 @@ export const FALLBACK_MODEL_LABELS = {
 };
 
 const SD_VERSION_MODELS = {
+  viralee: {
+    sd20: "viraldance933",
+    sd25: "viraldance2.5-30",
+  },
   fmgo: {
     sd20: "feimiao-v2",
     sd25: FMGO_V25_MODEL,
@@ -375,7 +380,7 @@ export function submissionTimeoutForAdapter(adapter) {
 
 export function sdVersionForModel(modelName) {
   const model = String(modelName || "").toLowerCase();
-  return /(?:seedance|sd)[-.]?2[.-]?5|sd25|feimiao-v2\.5/.test(model) ? "sd25" : "sd20";
+  return /(?:seedance|sd)[-.]?2[.-]?5|sd25|feimiao-v2\.5|viraldance[-_. ]?2[.-]5(?:$|[^0-9])/.test(model) ? "sd25" : "sd20";
 }
 
 function rawCapabilityFor(profile) {
@@ -572,10 +577,11 @@ function rawCapabilityFor(profile) {
         ratios: [ratio],
       };
     }
-    if (model === "viraldance933" || model === "viraldance933-fast") {
+    if (model === "viraldance933" || model === "viraldance933-fast" || model === "viraldance2.5-30") {
       return {
         ...unrestricted,
-        durations: Array.from({ length: 12 }, (_, index) => index + 4),
+        ...(model === "viraldance2.5-30" ? { images: 30, videos: 10, audios: 10 } : {}),
+        durations: model === "viraldance2.5-30" ? [30] : Array.from({ length: 12 }, (_, index) => index + 4),
         resolutions: ["720p"],
         ratios: ["16:9", "9:16", "1:1", "4:3"],
         syncAudioFixed: true,

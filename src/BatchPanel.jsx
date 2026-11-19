@@ -177,6 +177,7 @@ export default function BatchPanel({
   projectNeedsPermission,
   projectName,
   projectFolderLoading = false,
+  projectFolderDiagnostic = null,
   taskProjectName,
   quantity,
   ratio,
@@ -1748,13 +1749,16 @@ export default function BatchPanel({
               disabled={projectFolderLoading}
               onClick={projectNeedsPermission ? onRestoreProjectFolder : onChooseProjectFolder}
             >
-              {projectFolderLoading ? "正在读取文件夹…" : projectNeedsPermission ? "恢复项目" : projectName ? "更换项目" : "选择项目文件夹"}
+              {projectFolderLoading ? projectNeedsPermission ? "等待浏览器授权…" : "正在读取文件夹…" : projectNeedsPermission ? "恢复项目" : projectName ? "更换项目" : "选择项目文件夹"}
             </button>
+          {projectNeedsPermission && <button className="secondary-button" onClick={onChooseProjectFolder}>重新选择文件夹</button>}
           <button className="secondary-button" onClick={() => textInput.current?.click()}>导入批量 TXT</button>
           <button className="secondary-button batch-clear-button" disabled={!items.length || !!busy} onClick={clearBatch}>一键清空</button>
           <input ref={textInput} type="file" multiple hidden accept="text/plain,.txt" onChange={(event) => { importText(event.target.files); event.target.value = ""; }} />
         </div>
       </div>
+
+      {projectFolderDiagnostic && <div className="notice" role="status">{projectFolderDiagnostic.message} · 记录时累计 {(projectFolderDiagnostic.elapsedMs / 1000).toFixed(1)} 秒</div>}
 
       <FixedContentControls
         fixedContent={fixedContent}

@@ -339,6 +339,7 @@ const VIRALEE_MODELS = [
   "viraldance921-2.0",
   "viraldance933",
   "viraldance933-fast",
+  "viraldance2.5-30",
   "sora-2-landscape-8s",
   "sora-2-landscape-12s",
   "sora-2-portrait-8s",
@@ -1434,7 +1435,7 @@ function viraleePayload(config, input) {
       ...videos.map((item) => ({ type: "video_url", video_url: { url: item.url }, sub_type: "reference" })),
       ...audios.map((item) => ({ type: "audio_url", audio_url: { url: item.url }, sub_type: "reference" })),
     ];
-  } else if (model === "viraldance933" || model === "viraldance933-fast") {
+  } else if (model === "viraldance933" || model === "viraldance933-fast" || model === "viraldance2.5-30") {
     payload.duration = input.duration;
     payload.ratio = input.aspectRatio;
     payload.resolution = "720p";

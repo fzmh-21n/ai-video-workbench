@@ -6,9 +6,10 @@ import vm from "node:vm";
 const projectKey = (name) => `task-project:${JSON.stringify(name)}`;
 const handle = (token) => ({ name: "同名素材文件夹", token, removeEntry() { throw new Error("不能删除真实目录"); } });
 
-function harness(initial = [], { failAt = 0, synchronousFailure = false } = {}) {
+function harness(initial = [], { failAt = 0, synchronousFailure = false, pendingOpen = false, pendingCommit = false } = {}) {
   let values = new Map(initial);
   const stats = { operations: [], commits: 0, aborts: 0, closes: 0 };
+  const controls = {};
   const db = {
     close() { stats.closes += 1; },
     transaction(_name, mode) {
@@ -43,7 +44,7 @@ function harness(initial = [], { failAt = 0, synchronousFailure = false } = {}) 
           result.onsuccess?.();
           pending -= 1;
           if (!pending) setImmediate(() => {
-            if (closed || pending) return;
+            if (closed || pending || pendingCommit) return;
             closed = true;
             if (mode === "readwrite") values = draft;
             stats.commits += 1;
@@ -63,13 +64,15 @@ function harness(initial = [], { failAt = 0, synchronousFailure = false } = {}) 
   const indexedDB = {
     open() {
       const request = {};
-      setImmediate(() => { request.result = db; request.onsuccess?.(); });
+      controls.openRequest = request;
+      controls.completeOpen = () => { request.result = db; request.onsuccess?.(); };
+      if (!pendingOpen) setImmediate(controls.completeOpen);
       return request;
     },
   };
   const context = vm.createContext({ indexedDB, Promise, String, Error, JSON });
   vm.runInContext(readFileSync(new URL("../src/projectFolderStore.js", import.meta.url), "utf8").replace(/export /g, ""), context);
-  return { context, stats, snapshot: () => new Map(values) };
+  return { context, stats, controls, snapshot: () => new Map(values) };
 }
 
 test("legacy save and load APIs keep their old key but wait for transaction completion", async () => {
@@ -211,4 +214,87 @@ test("failed reads and failed binding removal reject without changing stored han
       assert.equal(stats.aborts, 1);
     }
   }
+});
+
+test("folder lookup diagnostics expose each completed stage without changing readonly operations or leaking handles", async () => {
+  const secret = handle("SECRET_HANDLE");
+  const { context, stats, snapshot } = harness([[projectKey("SECRET_PROJECT"), secret]]);
+  const events = [];
+  assert.equal(await context.loadTaskProjectDirectory("SECRET_PROJECT", { onDiagnostic: (event) => events.push(event) }), secret);
+  const stages = events.map((event) => event.stage);
+  for (const stage of ["db_open_started", "db_open_completed", "transaction_started", "binding_read_started", "binding_read_completed", "transaction_completed"]) {
+    assert.ok(stages.includes(`project_folder_${stage}`), stage);
+  }
+  assert.ok(stages.indexOf("project_folder_binding_read_completed") < stages.indexOf("project_folder_transaction_completed"));
+  assert.equal(events.find((event) => event.stage === "project_folder_binding_read_completed").found, true);
+  assert.deepEqual(stats.operations, [["get", projectKey("SECRET_PROJECT")]]);
+  assert.equal(stats.commits, 1);
+  assert.equal(stats.aborts, 0);
+  assert.equal(stats.closes, 1);
+  assert.equal(snapshot().get(projectKey("SECRET_PROJECT")), secret);
+  assert.doesNotMatch(JSON.stringify(events), /SECRET|removeEntry|同名素材文件夹/);
+});
+
+test("legacy migration diagnostics leave its existing get put delete sequence unchanged", async () => {
+  const secret = handle("legacy");
+  const { context, stats } = harness([["current-project", secret]]);
+  const events = [];
+  assert.equal(await context.loadTaskProjectDirectory("项目A", { migrateLegacy: true, onDiagnostic: (event) => events.push(event) }), secret);
+  assert.deepEqual(stats.operations, [["get", projectKey("项目A")], ["get", "current-project"], ["put", projectKey("项目A")], ["delete", "current-project"]]);
+  assert.ok(events.some((event) => event.stage === "project_folder_legacy_read_started"));
+  assert.equal(events.find((event) => event.stage === "project_folder_legacy_read_completed").found, true);
+});
+
+test("diagnostic observer errors cannot abort or reject a successful folder lookup", async () => {
+  const folder = handle("safe");
+  const { context, stats } = harness([[projectKey("项目A"), folder]]);
+  assert.equal(await context.loadTaskProjectDirectory("项目A", { onDiagnostic() { throw new Error("observer failure"); } }), folder);
+  assert.equal(stats.commits, 1);
+  assert.equal(stats.aborts, 0);
+  assert.equal(stats.closes, 1);
+});
+
+test("a blocked or pending database open is only reported and does not reject cancel or clear the binding", async () => {
+  const folder = handle("unchanged");
+  const { context, stats, controls, snapshot } = harness([[projectKey("项目A"), folder]], { pendingOpen: true });
+  const events = [];
+  let settled = false;
+  const loading = context.loadTaskProjectDirectory("项目A", { onDiagnostic: (event) => events.push(event) });
+  loading.then(() => { settled = true; }, () => { settled = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(events.at(-1)?.stage, "project_folder_db_open_started");
+  controls.openRequest.onblocked?.();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(events.at(-1)?.stage, "project_folder_db_open_blocked");
+  assert.equal(settled, false);
+  assert.equal(stats.operations.length, 0);
+  assert.equal(stats.aborts, 0);
+  assert.equal(snapshot().get(projectKey("项目A")), folder);
+  controls.completeOpen();
+  assert.equal(await loading, folder);
+});
+
+test("a pending read transaction remains pending after its result is observed and is not force closed", async () => {
+  const { context, stats } = harness([[projectKey("项目A"), handle("pending")]], { pendingCommit: true });
+  const events = [];
+  let settled = false;
+  context.loadTaskProjectDirectory("项目A", { onDiagnostic: (event) => events.push(event) }).then(() => { settled = true; });
+  for (let tick = 0; tick < 4; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(events.some((event) => event.stage === "project_folder_binding_read_completed"));
+  assert.equal(events.some((event) => event.stage === "project_folder_transaction_completed"), false);
+  assert.equal(settled, false);
+  assert.equal(stats.aborts, 0);
+  assert.equal(stats.closes, 0);
+  assert.deepEqual(stats.operations, [["get", projectKey("项目A")]]);
+});
+
+test("database open errors are diagnosed while preserving their original rejection", async () => {
+  const { context, controls } = harness([], { pendingOpen: true });
+  const events = [];
+  const loading = context.loadTaskProjectDirectory("项目A", { onDiagnostic: (event) => events.push(event) });
+  const error = new Error("open failed");
+  controls.openRequest.error = error;
+  controls.openRequest.onerror?.();
+  await assert.rejects(loading, (actual) => actual === error);
+  assert.ok(events.some((event) => event.stage === "project_folder_db_open_failed"));
 });

@@ -2,7 +2,7 @@ import { archivedUselessTask, uselessTaskBatches } from "./uselessBatches.js";
 import { mergeSubmissionRecord, submissionRecord } from "./submissionRecords.js";
 
 const DB_NAME = "ai-video-workbench";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const STORE_NAME = "tasks";
 const SUBMISSION_STORE_NAME = "submission_records";
 const HISTORY_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -28,7 +28,7 @@ export function openTaskDatabase() {
   if (!databasePromise) {
     databasePromise = new Promise((resolve, reject) => {
       const request = indexedDB.open(DB_NAME, DB_VERSION);
-      request.onupgradeneeded = () => {
+      request.onupgradeneeded = (event) => {
         const database = request.result;
         const store = database.objectStoreNames.contains(STORE_NAME)
           ? request.transaction.objectStore(STORE_NAME)
@@ -48,7 +48,17 @@ export function openTaskDatabase() {
         cursorRequest.onsuccess = () => {
           const cursor = cursorRequest.result;
           if (!cursor) return;
-          putSubmissionRecord(request.transaction, cursor.value);
+          const task = cursor.value;
+          if (event.oldVersion < 2) putSubmissionRecord(request.transaction, task);
+          else {
+            // v2 -> v3: enrich only missing pricing evidence; never overwrite ledger status/timestamps.
+            const existing = records.get(task.id);
+            existing.onsuccess = () => {
+              const recovered = submissionRecord(task);
+              if (!existing.result) records.put(recovered);
+              else if (!existing.result.resolution && recovered.resolution) records.put({ ...existing.result, resolution: recovered.resolution });
+            };
+          }
           cursor.continue();
         };
       };

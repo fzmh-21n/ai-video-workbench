@@ -1,3 +1,5 @@
+import { normalizeTaskResolution, recordedTaskResolution } from "./taskResolution.js";
+
 export const COST_SETTINGS_KEY = "video-workbench-cost-settings-v1";
 
 export function modelPriceKey(profileId, model) {
@@ -7,14 +9,75 @@ export function modelPriceKey(profileId, model) {
 export function loadCostSettings(storage = localStorage) {
   try {
     const parsed = JSON.parse(storage.getItem(COST_SETTINGS_KEY) || "{}");
-    return parsed && typeof parsed === "object" ? parsed : {};
+    return migrateCostSettings(parsed);
   } catch {
     return {};
   }
 }
 
 export function saveCostSettings(settings, storage = localStorage) {
-  storage.setItem(COST_SETTINGS_KEY, JSON.stringify(settings || {}));
+  storage.setItem(COST_SETTINGS_KEY, JSON.stringify(migrateCostSettings(settings)));
+}
+
+export function isResolutionPricedModel(model) {
+  return model === "lg-sd2.5-v2";
+}
+
+const LG_RESOLUTION_DEFAULTS = { "480p": "3.5", "720p": "4.5" };
+export const LG_COST_RESOLUTIONS = ["480p", "720p", "1080p", "4k"];
+
+function resolutionPrices(entry) {
+  const result = {};
+  if (entry?.resolutionPrices && typeof entry.resolutionPrices === "object") {
+    // Canonical keys win over old upper-case/numeric aliases.
+    const pairs = Object.entries(entry.resolutionPrices);
+    for (const [key, value] of [...pairs.filter(([key]) => key !== normalizeTaskResolution(key)), ...pairs.filter(([key]) => key === normalizeTaskResolution(key))]) {
+      const resolution = normalizeTaskResolution(key);
+      if (resolution) result[resolution] = value;
+    }
+  }
+  return result;
+}
+
+export function modelResolutionPrices(model, entry = {}) {
+  return { ...(isResolutionPricedModel(model) ? LG_RESOLUTION_DEFAULTS : {}), ...resolutionPrices(entry) };
+}
+
+// Additive, idempotent migration in the existing storage key. Keep old generic price/favorites.
+// An explicitly blank override means "use generic price", not "restore the default".
+export function migrateCostSettings(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value).map(([key, entry]) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [key, entry];
+    const model = key.slice(key.indexOf("::") + 2);
+    return [key, isResolutionPricedModel(model) || entry.resolutionPrices
+      ? { ...entry, resolutionPrices: modelResolutionPrices(model, entry) } : entry];
+  }));
+}
+
+function priceNumber(value) {
+  if (value === undefined || value === null || String(value).trim() === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
+export function resolvedTaskPrice(task, settings = {}) {
+  const entry = settings?.[modelPriceKey(task?.profileId, task?.model)] || {};
+  const resolution = recordedTaskResolution(task);
+  const prices = modelResolutionPrices(task?.model, entry);
+  const specific = resolution ? priceNumber(prices[resolution]) : null;
+  const generic = priceNumber(entry.unitPrice);
+  return { resolution, unitPrice: specific ?? generic ?? 0, priced: specific !== null || generic !== null,
+    source: specific !== null ? "resolution" : generic !== null ? "model" : "unpriced" };
+}
+
+export function withCostUnitPrice(settings, profileId, model, value, resolution = "") {
+  const key = modelPriceKey(profileId, model);
+  const entry = settings?.[key] || {};
+  const normalized = normalizeTaskResolution(resolution);
+  return { ...settings, [key]: normalized
+    ? { ...entry, resolutionPrices: { ...modelResolutionPrices(model, entry), [normalized]: value } }
+    : { ...entry, unitPrice: value } };
 }
 
 function taskTimestamp(task) {
@@ -63,9 +126,7 @@ function periodLabel(date, period) {
 
 export function taskEstimatedCost(task, settings) {
   if (task?.status !== "completed") return 0;
-  const entry = settings?.[modelPriceKey(task.profileId, task.model)];
-  const price = Number(entry?.unitPrice);
-  return Number.isFinite(price) && price > 0 ? price : 0;
+  return resolvedTaskPrice(task, settings).unitPrice;
 }
 
 export function costSeries(tasks, settings, period = "day", count = 14, now = Date.now()) {
@@ -135,9 +196,12 @@ export function projectSuccessfulModels(tasks, settings, projectName) {
   const values = new Map();
   for (const task of tasks || []) {
     if (task?.status !== "completed" || (task.projectName || "未归类") !== projectName) continue;
-    const key = modelPriceKey(task.profileId, task.model);
+    const settingKey = modelPriceKey(task.profileId, task.model);
+    const price = resolvedTaskPrice(task, settings);
+    const resolution = isResolutionPricedModel(task.model) ? price.resolution : "";
+    const key = isResolutionPricedModel(task.model) ? `${settingKey}::${resolution || "unknown"}` : settingKey;
     if (!values.has(key)) values.set(key, {
-      key,
+      key, settingKey, resolution,
       profileId: task.profileId || "",
       providerName: task.providerName || "历史中转站",
       model: task.model || "未知模型",
@@ -145,13 +209,12 @@ export function projectSuccessfulModels(tasks, settings, projectName) {
       unitPrice: 0,
       subtotal: 0,
     });
-    values.get(key).count += 1;
+    const item = values.get(key);
+    item.count += 1;
+    item.unitPrice = price.unitPrice;
+    item.subtotal += price.unitPrice;
   }
-  return [...values.values()].map((item) => {
-    const unitPrice = Number(settings?.[item.key]?.unitPrice);
-    const safePrice = Number.isFinite(unitPrice) && unitPrice > 0 ? unitPrice : 0;
-    return { ...item, unitPrice: safePrice, subtotal: Number((item.count * safePrice).toFixed(4)) };
-  }).sort((left, right) => (
+  return [...values.values()].map((item) => ({ ...item, subtotal: Number(item.subtotal.toFixed(4)) })).sort((left, right) => (
     left.providerName.localeCompare(right.providerName, "zh-CN")
     || left.model.localeCompare(right.model, "zh-CN", { numeric: true })
   ));

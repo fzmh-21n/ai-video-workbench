@@ -4,7 +4,7 @@ import { submissionRecord } from "../../src/submissionRecords.js";
 const copy = (value) => value === undefined ? undefined : structuredClone(value);
 
 export function taskDatabase(tasks = [], options = {}) {
-  let version = options.version ?? 2;
+  let version = options.version ?? 3;
   let data = new Map([["tasks", new Map(tasks.map((task) => [task.id, copy(task)]))]]);
   if (version >= 2) data.set("submission_records", new Map((options.records ?? tasks.map(submissionRecord)).map((row) => [row.id, copy(row)])));
   let indexes = new Map([...data.keys()].map((name) => [name, new Set(name === "tasks" ? ["createdAtMs", "status", "projectName"] : ["projectName"])]));

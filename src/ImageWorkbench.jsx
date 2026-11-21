@@ -19,6 +19,12 @@ import {
   withoutDeletedIds,
 } from "./deletionStore.js";
 
+import { IMAGE_ADAPTERS, imageProfileHeaders as profileHeaders, imageProviderRoutes, imageProviderSnapshot,
+  imageTaskProvider, loadImageProviders, normalizeImageProvider, saveImageProviders } from "./imageProviderSettings.js";
+
+import { fetchImageModelCatalog, imageModelScope, imageSelectableModels, readImageModelCatalogs,
+  imageCatalogMatches, imageModelFingerprint, saveImageModelCatalog, imageModelCatalogStatus } from "./imageModelDiscovery.js";
+
 const ACTIVE_PROVIDER_KEY = "image-workbench-active-provider-v1";
 const MODELS_KEY = "image-workbench-models-v1";
 const TASKS_KEY = "image-workbench-tasks-v1";
@@ -33,15 +39,6 @@ function loadJson(key, fallback) {
 
 function statusLabel(status) {
   return { queued: "排队中", processing: "生成中", completed: "已完成", failed: "失败" }[status] || status;
-}
-
-function profileHeaders(profile, key, model) {
-  return {
-    "x-api-base-url": profile.baseUrl,
-    "x-api-key": key,
-    "x-api-model": encodeURIComponent(model),
-    "x-api-adapter": profile.adapter,
-  };
 }
 
 async function mapWithConcurrency(items, concurrency, mapper) {
@@ -59,9 +56,22 @@ async function mapWithConcurrency(items, concurrency, mapper) {
 }
 
 export default function ImageWorkbench({ onVideoMode, onFaceMode, onTextMode, onLogout }) {
+  const [providers, setProviders] = useState(loadImageProviders);
+  const providersRef = useRef(providers);
+  const [providerDraft, setProviderDraft] = useState(null);
+  const [providerError, setProviderError] = useState("");
+  const [providerDraftKey, setProviderDraftKey] = useState("");
+  const [providerDraftRemember, setProviderDraftRemember] = useState(false);
+  const [modelTesting, setModelTesting] = useState(false);
+  const [modelTestStatus, setModelTestStatus] = useState("");
+  const [imageCatalogs, setImageCatalogs] = useState({});
+  const imageCatalogScopesRef = useRef({});
+  const modelReadRevisionRef = useRef(0);
+  const modelReadAbortRef = useRef(null);
+  const modelReadScopeRef = useRef("");
   const [activeId, setActiveId] = useState(() => localStorage.getItem(ACTIVE_PROVIDER_KEY) || IMAGE_PROVIDER_PROFILES[0].id);
   const [models, setModels] = useState(() => loadJson(MODELS_KEY, {}));
-  const activeProfile = IMAGE_PROVIDER_PROFILES.find((profile) => profile.id === activeId) || IMAGE_PROVIDER_PROFILES[0];
+  const activeProfile = providers.find((profile) => profile.id === activeId) || providers[0];
   const model = models[activeProfile.id] || activeProfile.model;
   const capability = imageModelCapability(activeProfile.adapter, model);
   const [apiKey, setApiKey] = useState(() => readCredentials(activeProfile.id).apiKey);
@@ -91,6 +101,31 @@ export default function ImageWorkbench({ onVideoMode, onFaceMode, onTextMode, on
   const imageBlobRef = useRef(imageBlob);
   const fileInput = useRef(null);
   const jsonInput = useRef(null);
+  modelReadScopeRef.current = JSON.stringify([activeProfile.id, imageModelScope(providerDraft, providerDraftKey)]);
+  const activeCatalog = imageCatalogScopesRef.current[activeProfile.id] === imageModelScope(activeProfile, apiKey) ? imageCatalogs[activeProfile.id] : undefined;
+  const draftCatalog = providerDraft && imageCatalogScopesRef.current[providerDraft.id] === imageModelScope(providerDraft, providerDraftKey) ? imageCatalogs[providerDraft.id] : undefined;
+  const draftModelOptions = providerDraft ? imageSelectableModels(providerDraft, draftCatalog, providerDraft.model) : [];
+
+  useEffect(() => {
+    modelReadRevisionRef.current += 1;
+    modelReadAbortRef.current?.abort();
+    setModelTesting(false);
+    setModelTestStatus("");
+    return () => { modelReadRevisionRef.current += 1; modelReadAbortRef.current?.abort(); };
+  }, [activeProfile.id, providerDraft?.id, providerDraft?.baseUrl, providerDraft?.adapter, providerDraftKey]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const scope = imageModelScope(activeProfile, apiKey);
+    if (apiKey.trim()) imageModelFingerprint(apiKey).then((fingerprint) => {
+      const entry = readImageModelCatalogs()[activeProfile.id];
+      if (!cancelled && imageCatalogMatches(entry, activeProfile, fingerprint)) {
+        imageCatalogScopesRef.current[activeProfile.id] = scope;
+        setImageCatalogs((current) => ({ ...current, [activeProfile.id]: entry }));
+      }
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [activeProfile.id, activeProfile.baseUrl, activeProfile.adapter, apiKey]);
 
   useEffect(() => {
     localStorage.setItem(ACTIVE_PROVIDER_KEY, activeProfile.id);
@@ -98,6 +133,11 @@ export default function ImageWorkbench({ onVideoMode, onFaceMode, onTextMode, on
     setApiKey(credentials.apiKey);
     setRememberKey(credentials.remember);
   }, [activeProfile.id]);
+
+  useEffect(() => {
+    providersRef.current = providers;
+    saveImageProviders(providers);
+  }, [providers]);
 
   useEffect(() => {
     localStorage.setItem(MODELS_KEY, JSON.stringify(models));
@@ -146,13 +186,14 @@ export default function ImageWorkbench({ onVideoMode, onFaceMode, onTextMode, on
               ...task,
               providerId: activeProfile.id,
               providerName: activeProfile.name,
+              providerSnapshot: imageProviderSnapshot(activeProfile),
             }));
           return missing.length ? [...missing, ...current] : current;
         });
       })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, [activeProfile.id, apiKey, model]);
+  }, [activeProfile.id, activeProfile.baseUrl, activeProfile.adapter, apiKey, model]);
 
   useEffect(() => { referencesRef.current = references; }, [references]);
   useEffect(() => { imageBlobRef.current = imageBlob; }, [imageBlob]);
@@ -173,7 +214,7 @@ export default function ImageWorkbench({ onVideoMode, onFaceMode, onTextMode, on
         const pending = Array.from({ length: Math.min(10, activeTasks.length) }, (_, index) => activeTasks[(start + index) % activeTasks.length]);
         imagePollCursorRef.current = (start + pending.length) % activeTasks.length;
         const updates = await Promise.all(pending.map(async (task) => {
-          const profile = IMAGE_PROVIDER_PROFILES.find((item) => item.id === task.providerId);
+          const profile = imageTaskProvider(task, providersRef.current);
           const key = profile ? readCredentials(profile.id).apiKey : "";
           if (!profile || !key) return null;
           try {
@@ -204,12 +245,66 @@ export default function ImageWorkbench({ onVideoMode, onFaceMode, onTextMode, on
     return () => { cancelled = true; window.clearInterval(timer); };
   }, []);
 
-  const modelOptions = useMemo(() => imageModelsFor(activeProfile.adapter), [activeProfile.adapter]);
+  const modelOptions = useMemo(() => imageSelectableModels(activeProfile, activeCatalog, model), [activeProfile, activeCatalog, model]);
   const referenceLimit = workMode === "batch" ? BATCH_IMAGE_LIMIT : capability.references;
   const completedReferenceIds = completedImageReferenceIds(references, tasks);
   const taskEntries = imageTaskEntries(tasks);
   const completedJsonIds = completedImagePromptIds(jsonPrompts, tasks, fixedContent);
   const completedJsonCount = jsonPrompts.filter((item) => completedJsonIds.has(item.id)).length;
+  const jsonClearBlocked = submitting || importingJson || tasks.some((task) => ["queued", "processing"].includes(task.status));
+
+  function editImageProvider(profile = activeProfile) {
+    setProviderError("");
+    setModelTestStatus("");
+    setProviderDraftKey(apiKey);
+    setProviderDraftRemember(rememberKey);
+    setProviderDraft({ ...profile, model: models[profile.id] || profile.model });
+  }
+
+  function saveImageProvider() {
+    if (submitting || !providerDraft) return;
+    try {
+      const saved = normalizeImageProvider(providerDraft);
+      const next = providers.some((profile) => profile.id === saved.id)
+        ? providers.map((profile) => profile.id === saved.id ? saved : profile) : [...providers, saved];
+      saveImageProviders(next);
+      providersRef.current = next;
+      setProviders(next);
+      setModels((current) => ({ ...current, [saved.id]: saved.model }));
+      saveCredentials(saved.id, { apiKey: providerDraftKey, remember: providerDraftRemember });
+      if (saved.id === activeProfile.id) { setApiKey(providerDraftKey); setRememberKey(providerDraftRemember); }
+      setActiveId(saved.id);
+      setProviderDraft(null);
+      setNotice(`已保存 ${saved.name} 的图片中转配置；新任务使用新地址，已有任务保留提交时的地址`);
+    } catch (error) { setProviderError(error.message || "图片中转配置保存失败"); }
+  }
+
+  async function testImageProvider() {
+    if (!providerDraft || submitting) return;
+    const revision = ++modelReadRevisionRef.current;
+    const scope = modelReadScopeRef.current;
+    modelReadAbortRef.current?.abort();
+    const controller = new AbortController();
+    modelReadAbortRef.current = controller;
+    setModelTesting(true);
+    setModelTestStatus("正在测试并读取图片模型目录…（不提交生成任务）");
+    try {
+      const prepared = normalizeImageProvider(providerDraft);
+      const result = await fetchImageModelCatalog(prepared, providerDraftKey, { signal: controller.signal });
+      if (revision !== modelReadRevisionRef.current || scope !== modelReadScopeRef.current) return;
+      const catalog = saveImageModelCatalog(prepared, result.keyFingerprint, result);
+      imageCatalogScopesRef.current[prepared.id] = imageModelScope(prepared, providerDraftKey);
+      setImageCatalogs((current) => ({ ...current, [prepared.id]: catalog }));
+      // Deliberately preserve the user's selected/manual model and unsaved configuration.
+      setModelTestStatus(imageModelCatalogStatus(result, catalog.retained));
+    } catch (error) {
+      if (revision !== modelReadRevisionRef.current || scope !== modelReadScopeRef.current) return;
+      const message = String(error?.message || "模型目录读取失败，原模型已保留");
+      setModelTestStatus(providerDraftKey ? message.split(providerDraftKey).join("[已隐藏]") : message);
+    } finally {
+      if (revision === modelReadRevisionRef.current && scope === modelReadScopeRef.current) setModelTesting(false);
+    }
+  }
 
   function saveCurrentCredentials(nextKey, nextRemember) {
     setApiKey(nextKey);
@@ -272,6 +367,14 @@ export default function ImageWorkbench({ onVideoMode, onFaceMode, onTextMode, on
     setNotice(`已清空 ${completedJsonCount} 条已完成描述；固定内容和其它提示词均已保留`);
   }
 
+  function clearAllJsonPrompts() {
+    if (jsonClearBlocked || !jsonPrompts.length) return;
+    if (!window.confirm(`确定清空全部 ${jsonPrompts.length} 条角色/场景描述吗？仅清空导入列表，不删除已生成图片、任务记录或固定内容。`)) return;
+    const count = jsonPrompts.length;
+    setJsonPrompts([]);
+    setNotice(`已清空 ${count} 条导入描述；已生成图片、任务记录和固定内容均已保留`);
+  }
+
   function insertReference(index) {
     const tag = workMode === "batch" ? "@Image1" : `@Image${index + 1}`;
     setPrompt((value) => `${value}${value && !value.endsWith(" ") ? " " : ""}${tag}`);
@@ -298,6 +401,7 @@ export default function ImageWorkbench({ onVideoMode, onFaceMode, onTextMode, on
 
   async function submitImage() {
     if (!apiKey.trim()) return setNotice("请先填写当前图片中转站的 API Key");
+    if (!imageModelsFor(activeProfile.adapter).includes(model)) return setNotice("当前手动模型尚未适配所选图片协议；已保留模型名称，但不会尝试生成，请选择已适配模型");
     if (workMode === "json") {
       if (!jsonPrompts.length) return setNotice("请先导入角色/场景 JSON");
       const invalidIndex = jsonPrompts.findIndex((item) => !item.name.trim() || !item.prompt.trim());
@@ -352,6 +456,7 @@ export default function ImageWorkbench({ onVideoMode, onFaceMode, onTextMode, on
             model,
             providerId: activeProfile.id,
             providerName: activeProfile.name,
+            providerSnapshot: imageProviderSnapshot(activeProfile),
           }));
           if (!createdTasks.length) throw new Error("中转未返回图片任务编号，请核对中转后台，勿重复提交");
           // Save each accepted task immediately, including long JSON batches.
@@ -377,7 +482,7 @@ export default function ImageWorkbench({ onVideoMode, onFaceMode, onTextMode, on
   }
 
   async function fetchImageBlob(task) {
-    const profile = IMAGE_PROVIDER_PROFILES.find((item) => item.id === task.providerId);
+    const profile = imageTaskProvider(task, providersRef.current);
     const key = profile ? readCredentials(profile.id).apiKey : "";
     if (!profile || !key) throw new Error("请先填写该任务所属中转站的图片 API Key");
     const response = await fetch(task.imageUrl, { headers: profileHeaders(profile, key, task.model) });
@@ -479,7 +584,7 @@ export default function ImageWorkbench({ onVideoMode, onFaceMode, onTextMode, on
           <button className="secondary-button" onClick={onVideoMode}>视频生成</button>
           <button className="secondary-button" onClick={onTextMode}>文本推理</button>
           <button className="secondary-button" onClick={onFaceMode}>明星脸初筛</button>
-          <label><span>当前中转站</span><select value={activeProfile.id} onChange={(event) => setActiveId(event.target.value)}>{IMAGE_PROVIDER_PROFILES.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label>
+          <label><span>当前中转站</span><select value={activeProfile.id} onChange={(event) => { setProviderDraft(null); setActiveId(event.target.value); }}>{providers.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label>
           <span className={`connection-pill ${apiKey ? "ready" : ""}`}>{apiKey ? model : "等待图片 API 配置"}</span>
           <button className="logout-button" onClick={onLogout}>退出登录</button>
         </div>
@@ -495,10 +600,35 @@ export default function ImageWorkbench({ onVideoMode, onFaceMode, onTextMode, on
           </div>
           <div className="panel-body">
             <div className="image-provider-config">
-              <label><span>图片模型</span><select value={model} onChange={(event) => changeModel(event.target.value)}>{modelOptions.map((item) => <option key={item} value={item}>{imageModelLabel(activeProfile.adapter, item)}</option>)}</select></label>
+              <label><span>图片模型</span><select value={model} onChange={(event) => changeModel(event.target.value)}>{modelOptions.map((item) => <option key={item} value={item}>{imageModelLabel(activeProfile.adapter, item)}{!imageModelsFor(activeProfile.adapter).includes(item) ? "（用途/适配未验证）" : ""}</option>)}</select></label>
+              <label><span>手动填写模型（目录不可用时也可使用已适配模型）</span><input value={model} onChange={(event) => changeModel(event.target.value)} /></label>
               <label><span>图片 API Key</span><input type="password" value={apiKey} placeholder={activeProfile.adapter === "canseedream" ? "sk_img_..." : "sk-..."} onChange={(event) => saveCurrentCredentials(event.target.value, rememberKey)} /></label>
               <label className="remember-key-row"><input type="checkbox" checked={rememberKey} onChange={(event) => saveCurrentCredentials(apiKey, event.target.checked)} /><span>在这台浏览器记住图片 Key</span></label>
             </div>
+
+            <div className="image-relay-actions">
+              <button disabled={submitting} onClick={() => editImageProvider()}>中转详细设置</button>
+              <button disabled={submitting} onClick={() => editImageProvider({ ...IMAGE_PROVIDER_PROFILES[0], id: `image-custom-${crypto.randomUUID()}`, name: "新图片中转" })}>＋ 添加兼容中转</button>
+              <small>当前接口：{activeProfile.baseUrl}</small>
+            </div>
+            {providerDraft && <section className="image-relay-settings" aria-label="图片中转详细设置">
+              <h3>图片中转详细设置</h3>
+              <label><span>中转名称</span><input disabled={submitting} value={providerDraft.name} onChange={(event) => setProviderDraft({ ...providerDraft, name: event.target.value })} /></label>
+              <label><span>Base URL（HTTPS 接口域名）</span><input disabled={submitting} type="url" value={providerDraft.baseUrl} onChange={(event) => setProviderDraft({ ...providerDraft, baseUrl: event.target.value })} placeholder="https://api.example.com" /></label>
+              <label><span>图片接口协议</span><select disabled={submitting} value={providerDraft.adapter} onChange={(event) => setProviderDraft({ ...providerDraft, adapter: event.target.value, model: imageModelsFor(event.target.value)[0] })}>{IMAGE_ADAPTERS.map((adapter) => <option key={adapter} value={adapter}>{({ fmgo: "FMGO / 飞猫兼容", canseedream: "CanSeeDream 兼容", qiqi: "QIQI / Pidoi 兼容" })[adapter]}</option>)}</select></label>
+              <label><span>测试/保存用图片 API Key（未保存前不修改原 Key）</span><input disabled={submitting} type="password" autoComplete="off" value={providerDraftKey} onChange={(event) => setProviderDraftKey(event.target.value)} placeholder="填写当前图片中转 Key" /></label>
+              <label className="remember-key-row"><input type="checkbox" checked={providerDraftRemember} onChange={(event) => setProviderDraftRemember(event.target.checked)} /><span>保存时在本机记住此 Key</span></label>
+              <label><span>默认图片模型</span><select disabled={submitting} value={providerDraft.model} onChange={(event) => setProviderDraft({ ...providerDraft, model: event.target.value })}>{draftModelOptions.map((item) => <option key={item} value={item}>{imageModelLabel(providerDraft.adapter, item)}{!imageModelsFor(providerDraft.adapter).includes(item) ? "（用途/适配未验证）" : ""}</option>)}</select></label>
+              <label><span>手动模型名称（不会因读取目录而被替换）</span><input disabled={submitting} value={providerDraft.model} onChange={(event) => setProviderDraft({ ...providerDraft, model: event.target.value })} /></label>
+              <p>目录可能包含文本/视频模型或未知型号，均保留显示但不会自动选用；未适配型号可保存，不能直接生成，以免使用错误协议。</p>
+              <div className="image-relay-actions"><button disabled={submitting || modelTesting} onClick={testImageProvider}>{modelTesting ? "测试中…" : "测试并读取模型"}</button></div>
+              {modelTestStatus && <p role="status" aria-live="polite">{modelTestStatus}</p>}
+              <p>只保存接口域名（不含 /v1 路径）；请填写中转方提供的新地址，不是网页后台地址。已有 Key 的保存方式不变。</p>
+              <p>{imageProviderRoutes(providerDraft.adapter, providerDraft.model)}</p>
+              <p>路径由所选协议自动匹配，不支持任意自定义接口。已有任务仍按提交时地址查询/下载，不会重新生成。本次新增模型读取接口需空闲时重启本地服务一次；不会自动重启或中断任务。</p>
+              {providerError && <p role="alert">{providerError}</p>}
+              <div className="image-relay-actions"><button className="primary-button" disabled={submitting} onClick={saveImageProvider}>保存中转配置</button><button disabled={submitting} onClick={() => setProviderDraft(null)}>取消</button></div>
+            </section>}
 
             <label className="field-label fixed-label" htmlFor="image-fixed-content">
               固定内容
@@ -511,6 +641,7 @@ export default function ImageWorkbench({ onVideoMode, onFaceMode, onTextMode, on
               <div className="section-heading"><div><h3>角色/场景批量提示词</h3><p>JSON 数组中每个 name + description 对应一条；原文导入，点击条目可编辑，下载以名称命名。</p></div><span>{jsonPrompts.length} 条</span></div>
               <div className="reference-toolbar">
                 <button disabled={submitting || importingJson || !completedJsonCount} onClick={clearCompletedJsonPrompts}>清空已处理（{completedJsonCount}）</button>
+                <button disabled={jsonClearBlocked || !jsonPrompts.length} title={jsonClearBlocked ? "请等待导入、提交及排队/生成任务结束后再清空" : "仅清空导入描述，保留已生成图片和固定内容"} onClick={clearAllJsonPrompts}>清空全部（{jsonPrompts.length}）</button>
                 <button disabled={submitting || importingJson} onClick={() => jsonInput.current?.click()}>{importingJson ? "导入中…" : "＋ 导入角色/场景 JSON"}</button>
                 <input ref={jsonInput} hidden multiple type="file" accept=".json,application/json" onChange={(event) => { importJsonFiles(Array.from(event.target.files || [])); event.target.value = ""; }} />
               </div>
@@ -556,7 +687,8 @@ export default function ImageWorkbench({ onVideoMode, onFaceMode, onTextMode, on
               <label><span>输出规格</span><input readOnly value={activeProfile.adapter === "fmgo" ? capability.imageSize : size} /></label>
             </div>
             {notice && <div className="notice">ⓘ {notice}</div>}
-            <div className="submit-row"><button className="primary-button" disabled={submitting || importingJson} onClick={submitImage}>{submitting ? "提交中…" : workMode === "json" ? `一键批量生成（${jsonPrompts.length}）` : workMode === "batch" ? `一键批量生成（${references.length}）` : "开始生成图片"}</button></div>
+            {!imageModelsFor(activeProfile.adapter).includes(model) && <p role="status">当前模型尚未适配所选图片协议；名称已保留，但不会提交生成，请选择已适配的图片模型。</p>}
+            <div className="submit-row"><button className="primary-button" disabled={submitting || importingJson || !imageModelsFor(activeProfile.adapter).includes(model)} onClick={submitImage}>{submitting ? "提交中…" : workMode === "json" ? `一键批量生成（${jsonPrompts.length}）` : workMode === "batch" ? `一键批量生成（${references.length}）` : "开始生成图片"}</button></div>
           </div>
         </section>
 

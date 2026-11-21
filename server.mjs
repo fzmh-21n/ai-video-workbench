@@ -1,3 +1,4 @@
+import { parseImageModelCatalog } from "./src/imageModelDiscovery.js";
 import express from "express";
 import multer from "multer";
 import COS from "cos-nodejs-sdk-v5";
@@ -422,7 +423,7 @@ function inferAdapter(url) {
   return "newapi";
 }
 
-function providerConfig(req, requireModel = true) {
+function providerConfig(req, requireModel = true, scope = "video") {
   let resolvedBaseUrl = baseUrl(req.get("x-api-base-url"));
   const apiKey = normalizeApiKey(req.get("x-api-key"));
   const encodedModel = String(req.get("x-api-model") || "").trim();
@@ -447,7 +448,9 @@ function providerConfig(req, requireModel = true) {
   if (adapter === "bailing") resolvedBaseUrl = BAILING_BASE_URL;
   if (adapter === "huajing") resolvedBaseUrl = HUAJING_BASE_URL;
   if (adapter === "baoju") resolvedBaseUrl = BAOJU_BASE_URL;
-  if (adapter === "qiqi") resolvedBaseUrl = QIQI_IMAGE_BASE_URL;
+  // Image profiles may override QIQI's public HTTPS origin, just like FMGO/CanSeeDream.
+  // Keep the existing fixed-origin behavior for all video/general callers.
+  if (adapter === "qiqi" && scope !== "image") resolvedBaseUrl = QIQI_IMAGE_BASE_URL;
   const rawUploadUrl = String(req.get("x-media-upload-url") || "").trim();
   const mediaUploadUrl = adapter === "maxforai"
     ? `${resolvedBaseUrl}/v1/assets`
@@ -2506,6 +2509,35 @@ app.get("/api/storage/status", (_req, res) => {
     : { configured: false });
 });
 
+app.get("/api/image-config/models", async (req, res, next) => {
+  try {
+    const config = providerConfig(req, false, "image");
+    if (!["fmgo", "canseedream", "qiqi"].includes(config.adapter)) throw httpError(400, "请选择受支持的图片接口协议");
+    // Read-only discovery. Never create a generation or probe by submitting a task.
+    const response = await upstream(`${config.baseUrl}/v1/models`, { headers: authHeaders(config) }, 8000);
+    if ([401, 403].includes(response.status)) {
+      await response.body?.cancel().catch(() => {});
+      throw httpError(response.status, "图片模型目录鉴权失败，请检查 Key 或分组权限");
+    }
+    if ([404, 405, 501].includes(response.status)) {
+      await response.body?.cancel().catch(() => {});
+      const models = config.adapter === "fmgo" ? FMGO_IMAGE_MODELS : config.adapter === "canseedream" ? CANSEEDREAM_IMAGE_MODELS : QIQI_IMAGE_MODELS;
+      return res.json({ ...parseImageModelCatalog({ models, source: "fallback" }, config.adapter), source: "fallback" });
+    }
+    if (!response.ok) throw httpError(502, "中转模型目录暂不可用，请检查接口地址和中转状态");
+    let catalog;
+    try { catalog = parseImageModelCatalog(await readJson(response), config.adapter, config.apiKey); }
+    catch { throw httpError(502, "模型目录格式无效，请保留原模型或手动填写已适配模型"); }
+    return res.json(catalog);
+  } catch (error) {
+    // Do not return arbitrary upstream messages/bodies that might echo credentials.
+    if (error?.status === 400) return next(httpError(400, "图片中转配置无效：请检查公网 HTTPS 地址、协议及 Key"));
+    if ([401, 403].includes(error?.status)) return next(httpError(error.status, "图片模型目录鉴权失败，请检查 Key 或分组权限"));
+    if (error?.status === 502) return next(httpError(502, "图片模型目录不可用或格式无效，请检查地址或手动填写已适配模型"));
+    return next(httpError(502, "图片模型目录连接失败或超时，请检查 HTTPS 接口地址、网络及中转状态"));
+  }
+});
+
 app.get("/api/config/models", async (req, res, next) => {
   try {
     const config = providerConfig(req, false);
@@ -2697,7 +2729,7 @@ app.post("/api/materials", upload.array("references", 50), async (req, res, next
 
 app.get("/api/image-tasks/recent", (req, res, next) => {
   try {
-    const config = providerConfig(req);
+    const config = providerConfig(req, true, "image");
     if (!["fmgo", "canseedream", "qiqi"].includes(config.adapter)) throw httpError(400, "图片生成目前仅支持 FMGO、CanSeeDream 和 QIQI");
     res.json({ tasks: recentImageTaskRecords(config) });
   } catch (error) {
@@ -2712,7 +2744,7 @@ app.post("/api/image-tasks", upload.array("references", 16), async (req, res, ne
       fileBytes(file);
       if (!String(file.mimetype || "").startsWith("image/")) throw httpError(400, "图片生成只支持上传图片参考素材");
     }
-    const config = providerConfig(req);
+    const config = providerConfig(req, true, "image");
     if (!["fmgo", "canseedream", "qiqi"].includes(config.adapter)) throw httpError(400, "图片生成目前仅支持 FMGO、CanSeeDream 和 QIQI");
     const prompt = String(req.body.prompt || "").trim();
     if (!prompt) throw httpError(400, "提示词不能为空");
@@ -2765,7 +2797,7 @@ app.post("/api/image-tasks", upload.array("references", 16), async (req, res, ne
 
 app.get("/api/image-tasks/:id", async (req, res, next) => {
   try {
-    const config = providerConfig(req);
+    const config = providerConfig(req, true, "image");
     const job = decodeJob(req.params.id);
     verifyJobConfig(config, job);
     if (job.mediaType !== "image") throw httpError(400, "这不是图片生成任务");
@@ -2800,7 +2832,7 @@ app.get("/api/image-tasks/:id", async (req, res, next) => {
 
 app.get("/api/image-tasks/:id/content", async (req, res, next) => {
   try {
-    const config = providerConfig(req);
+    const config = providerConfig(req, true, "image");
     const job = decodeJob(req.params.id);
     verifyJobConfig(config, job);
     if (job.mediaType !== "image") throw httpError(400, "这不是图片生成任务");

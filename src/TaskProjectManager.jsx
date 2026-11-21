@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useState } from "react";
+import ResolutionPriceFields from "./ResolutionPriceFields.jsx";
+import { isResolutionPricedModel, modelPriceKey as priceKey, withCostUnitPrice } from "./costAnalytics.js";
 import { allTasks, putTasks } from "./taskStore.js";
 import {
   loadCostSettings,
-  modelPriceKey,
   projectSuccessfulModels,
   saveCostSettings,
   taskEstimatedCost,
@@ -144,10 +145,9 @@ export default function TaskProjectManager({ activeProject, mutationBusy = false
       : [...current, projectName]);
   }
 
-  function updatePrice(profileId, model, value) {
-    const key = modelPriceKey(profileId, model);
+  function updatePrice(profileId, model, value, resolution = "") {
     setSettings((current) => {
-      const next = { ...current, [key]: { ...(current[key] || {}), unitPrice: value } };
+      const next = withCostUnitPrice(current, profileId, model, value, resolution);
       saveCostSettings(next);
       return next;
     });
@@ -193,16 +193,20 @@ export default function TaskProjectManager({ activeProject, mutationBusy = false
                     {models.length ? models.map((item) => (
                       <div className="task-project-model-row" key={item.key}>
                         <strong title={item.providerName}>{item.providerName}</strong>
-                        <code title={item.model}>{item.model}</code>
+                        <code title={item.model}>{item.model}{isResolutionPricedModel(item.model) && <small> · {item.resolution || "分辨率未记录"}</small>}</code>
                         <span>成功 {item.count} 条</span>
                         <label>
                           <span>每条</span>
-                          <input aria-label={`${item.providerName} ${item.model} 每条金额`} type="number" min="0" step="0.01" value={settings[item.key]?.unitPrice ?? ""} onChange={(event) => updatePrice(item.profileId, item.model, event.target.value)} />
+                          <input aria-label={`${item.providerName} ${item.model} 每条金额`} type="number" min="0" step="0.01" value={isResolutionPricedModel(item.model) && item.resolution ? item.unitPrice : settings[item.settingKey || item.key]?.unitPrice ?? ""} onChange={(event) => updatePrice(item.profileId, item.model, event.target.value, item.resolution)} />
                           <b>元</b>
                         </label>
                         <b>小计 {money(item.subtotal)}</b>
                       </div>
                     )) : <p>这个项目还没有生成成功的模型。</p>}
+                    {[...new Map(models.filter((item) => isResolutionPricedModel(item.model)).map((item) => [priceKey(item.profileId, item.model), item])).values()].map((item) => <div className="project-resolution-prices" key={item.settingKey}>
+                      <strong>{item.providerName} · {item.model} 分辨率价格</strong>
+                      <ResolutionPriceFields model={item.model} entry={settings[item.settingKey] || {}} labelPrefix={`${item.providerName} ${item.model}`} onChange={(resolution, value) => updatePrice(item.profileId, item.model, value, resolution)} />
+                    </div>)}
                   </div>}
                 </article>
               );

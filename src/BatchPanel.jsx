@@ -1004,6 +1004,7 @@ export default function BatchPanel({
       model: activeProfile.model,
       title: `第${String(item.section).padStart(2, "0")}节-${activeProfile.model}${created.length > 1 ? `-${index + 1}` : ""}`,
       prompt: submittedPrompt,
+      submittedResolution: params.resolution,
       reuseSnapshot: taskReuseSnapshot({
         prompt: boundPrompt,
         references,

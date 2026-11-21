@@ -1652,6 +1652,7 @@ function Workbench({ onImageMode, onFaceMode, onTextMode, onLogout, onAuthExpire
           model: activeProfile.model,
           title: `${activeProfile.model}-${createdAtMs}${created.length > 1 ? `-${index + 1}` : ""}`,
           prompt: submittedPrompt,
+          submittedResolution: resolution,
           reuseSnapshot: taskReuseSnapshot({
             prompt,
             references,

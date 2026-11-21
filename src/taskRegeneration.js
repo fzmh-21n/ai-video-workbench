@@ -27,6 +27,7 @@ export function regeneratedTaskRecord({
     title: `${sourceTask.title || "视频任务"}-重生成${retryAttempt}`,
     prompt,
     reuseSnapshot,
+    submittedResolution: reuseSnapshot?.resolution,
     projectName: sourceTask.projectName || "",
     retryOfTaskId: sourceTask.id,
     retryAttempt,

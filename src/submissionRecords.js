@@ -1,3 +1,5 @@
+import { recordedTaskResolution } from "./taskResolution.js";
+
 const FIELDS = [
   "id", "upstreamTaskId", "profileId", "providerName", "model", "projectName",
   "batchId", "batchTitle", "batchSection", "createdAtMs", "updatedAtMs", "createdAt", "completedAt",
@@ -5,11 +7,14 @@ const FIELDS = [
 ];
 
 export function submissionRecord(task) {
-  return Object.fromEntries(FIELDS
+  const record = Object.fromEntries(FIELDS
     .filter((field) => task?.[field] !== undefined && (field === "submissionVerified"
       ? typeof task[field] === "boolean"
       : task[field] === null || ["string", "number", "boolean"].includes(typeof task[field])))
     .map((field) => [field, field === "error" ? String(task[field] || "").slice(0, 500) : task[field]]));
+  const resolution = recordedTaskResolution(task);
+  if (resolution) record.resolution = resolution;
+  return record;
 }
 
 function createdTime(record) {
@@ -22,6 +27,8 @@ function createdTime(record) {
 export function mergeSubmissionRecord(stored, update) {
   const record = submissionRecord(update);
   if (!record.id || stored?.id !== record.id) return record;
+  // Receipt pricing attributes are immutable once known; polling/metadata updates must not erase them.
+  if (recordedTaskResolution(stored)) record.resolution = recordedTaskResolution(stored);
   const previous = createdTime(stored);
   const incoming = createdTime(record);
   if (previous && (!incoming || previous <= incoming)) {

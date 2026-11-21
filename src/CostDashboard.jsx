@@ -29,6 +29,8 @@ import { buildRevenueChart } from "./financeChart.js";
 import RevenueChart from "./RevenueChart.jsx";
 import CostTrendChart from "./CostTrendChart.jsx";
 import DramaTrafficPanel from "./DramaTrafficPanel.jsx";
+import ResolutionPriceFields from "./ResolutionPriceFields.jsx";
+import { isResolutionPricedModel, resolvedTaskPrice, withCostUnitPrice } from "./costAnalytics.js";
 import { formatPlayCount, summarizeDramaPlays } from "./dramaTraffic.js";
 import { loadHongguoPlays } from "./projectFinance.js";
 
@@ -142,8 +144,17 @@ export default function CostDashboard({ activeProfileId, modelOptions, onClose, 
     && (!modelQuery.trim() || modelDisplayName(item).toLowerCase().includes(modelQuery.trim().toLowerCase())
       || item.model.toLowerCase().includes(modelQuery.trim().toLowerCase()))
   )), [knownModels, providerFilter, modelQuery, profiles]);
+  function updatePrice(profileId, model, value, resolution = "") {
+    setSettings((current) => {
+      const next = withCostUnitPrice(current, profileId, model, value, resolution);
+      saveCostSettings(next);
+      return next;
+    });
+  }
   const favorites = knownModels.filter((item) => settings[modelPriceKey(item.profileId, item.model)]?.favorite);
   const costTasks = useMemo(() => modelSubmissionStats(tasks).flatMap((item) => item.records), [tasks]);
+  const unknownResolutionCount = costTasks.filter((task) => task.status === "completed" && isResolutionPricedModel(task.model)
+    && (projectFilter === "all" || task.projectName === projectFilter) && !resolvedTaskPrice(task, settings).resolution).length;
   const series = costSeries(costTasks, settings, period, PERIODS[period].count);
   const today = currentCostSummary(costTasks, settings, "day");
   const week = currentCostSummary(costTasks, settings, "week");
@@ -287,6 +298,7 @@ export default function CostDashboard({ activeProfileId, modelOptions, onClose, 
               <div className="cost-kpi"><span>短剧总流量</span><b>{formatPlayCount(trafficTotals.totalPlays)}</b><small>抖音 {formatPlayCount(trafficTotals.douyinPlays)} ＋ 红果 {formatPlayCount(trafficTotals.hongguoPlays)}</small></div>
             </div>
 
+            {unknownResolutionCount > 0 && <p className="cost-hint">当前项目范围有 {unknownResolutionCount} 条 lg-sd2.5-v2 已完成历史任务未记录分辨率，按模型通用价估算（未设置通用价则暂不计）；未将其认定为 720p。</p>}
             <div className="revenue-card" aria-label="收益曲线">
               <div className="revenue-head">
                 <div>
@@ -347,7 +359,7 @@ export default function CostDashboard({ activeProfileId, modelOptions, onClose, 
               <tr key={item.key} className={selectedKey === item.key ? "selected" : ""}><td title={modelDisplayName(item)}><strong>{item.providerName}</strong><span>{modelDisplayName(item).split(" · ")[0]}</span>{modelDisplayName(item).split(" · ")[0] !== item.model && <code>{item.model}</code>}</td>{visibleColumns.map((column) => <td key={column.key} className={`num${Number(item[column.key]) === 0 ? " is-zero" : ""}`}>{column.always ? <b>{item[column.key]}</b> : item[column.key]}</td>)}<td className="action"><button onClick={() => { setSelectedKey(selectedKey === item.key ? "" : item.key); setDetailPage(1); }}>{selectedKey === item.key ? "收起" : "查看"}</button></td></tr>
             ))}</tbody></table></div>
             {!submissionGroups.length && <p className="cost-empty">当前范围没有可核对的任务 ID 记录。</p>}
-            {selectedGroup && <div className="submission-details"><h4>{selectedGroup.model} · task ID 明细</h4><div className="submission-table-scroll"><table className="submission-table"><thead><tr><th>提交时间</th><th>task ID</th><th>项目／章节</th><th>状态</th><th>同节追加</th></tr></thead><tbody>{shownRecords.map((record) => <tr key={record.identity}><td>{record.createdAtMs ? new Date(record.createdAtMs).toLocaleString("zh-CN", { hour12: false }) : "时间未知"}</td><td><code>{record.taskId}</code></td><td>{record.projectName}<br />{record.batchTitle}{record.batchSection ? ` · 第${record.batchSection}节` : ""}</td><td>{record.cancelledByUser ? "手动取消" : ({ completed: "已生成", failed: "生成失败", queued: "排队中", processing: "生成中" }[record.status] || "状态未知")}</td><td>{record.additional ? "是" : "否"}</td></tr>)}</tbody></table></div><div className="cost-pager"><button disabled={currentDetailPage === 1} onClick={() => setDetailPage(currentDetailPage - 1)}>上一页</button><span>第 {currentDetailPage}/{detailPages} 页 · 共 {detailRecords.length} 个 ID</span><button disabled={currentDetailPage === detailPages} onClick={() => setDetailPage(currentDetailPage + 1)}>下一页</button></div></div>}
+            {selectedGroup && <div className="submission-details"><h4>{selectedGroup.model} · task ID 明细</h4><div className="submission-table-scroll"><table className="submission-table"><thead><tr><th>提交时间</th><th>task ID</th><th>项目／章节</th><th>状态</th><th>分辨率</th><th>同节追加</th></tr></thead><tbody>{shownRecords.map((record) => <tr key={record.identity}><td>{record.createdAtMs ? new Date(record.createdAtMs).toLocaleString("zh-CN", { hour12: false }) : "时间未知"}</td><td><code>{record.taskId}</code></td><td>{record.projectName}<br />{record.batchTitle}{record.batchSection ? ` · 第${record.batchSection}节` : ""}</td><td>{record.cancelledByUser ? "手动取消" : ({ completed: "已生成", failed: "生成失败", queued: "排队中", processing: "生成中" }[record.status] || "状态未知")}</td><td>{record.resolution || "未记录（通用价）"}</td><td>{record.additional ? "是" : "否"}</td></tr>)}</tbody></table></div><div className="cost-pager"><button disabled={currentDetailPage === 1} onClick={() => setDetailPage(currentDetailPage - 1)}>上一页</button><span>第 {currentDetailPage}/{detailPages} 页 · 共 {detailRecords.length} 个 ID</span><button disabled={currentDetailPage === detailPages} onClick={() => setDetailPage(currentDetailPage + 1)}>下一页</button></div></div>}
           </section>}
           {openModules.includes("favorites") && <section className="cost-module" aria-label="常用模型">
             <div className="cost-table-toolbar cost-module-head"><h3>常用模型 <small>点击即可切换中转站和模型</small></h3></div>
@@ -355,7 +367,7 @@ export default function CostDashboard({ activeProfileId, modelOptions, onClose, 
 
           </section>}
           {openModules.includes("prices") && <section className="cost-module" aria-label="模型单价设置">
-            <div className="cost-table-toolbar cost-module-head"><h3>模型单价设置 <small>按每个成功视频计算，设置自动保存在本机</small></h3><div><details className="cost-info cost-info-right"><summary>说明</summary><div><p>预计成本只按“已完成任务 × 你填写的单价”计算。如果某家中转失败也扣费，请以中转账单为准。</p></div></details></div></div>
+            <div className="cost-table-toolbar cost-module-head"><h3>模型单价设置 <small>按每个成功视频计算，设置自动保存在本机</small></h3><div><details className="cost-info cost-info-right"><summary>说明</summary><div><p>预计成本只统计已完成任务，逐条按已记录的分辨率匹配单价；未设分辨率价格则沿用模型通用价。如果某家中转失败也扣费，请以中转账单为准。</p></div></details></div></div>
             <div className="cost-filterbar">
               <label><span>中转站</span><select value={providerFilter} onChange={(event) => setProviderFilter(event.target.value)}><option value="all">全部中转站</option>{providers.map(([id, name]) => <option key={id} value={id}>{name}</option>)}</select></label>
               <label className="cost-filter-grow"><span>模型</span><input value={modelQuery} onChange={(event) => setModelQuery(event.target.value)} placeholder="搜索模型名称" /></label>
@@ -364,19 +376,19 @@ export default function CostDashboard({ activeProfileId, modelOptions, onClose, 
               {visibleModels.map((item) => {
                 const key = modelPriceKey(item.profileId, item.model);
                 const setting = settings[key] || {};
-                return <div className="cost-model-row" key={key}><button className={`favorite-star${setting.favorite ? " active" : ""}`} title="设为常用模型" onClick={() => updateSetting(item.profileId, item.model, { favorite: !setting.favorite })}>★</button><strong>{item.providerName}</strong><code>{item.model}</code><label><span>每条</span><input type="number" min="0" step="0.01" value={setting.unitPrice ?? ""} onChange={(event) => updateSetting(item.profileId, item.model, { unitPrice: event.target.value })} placeholder="0.00" /><b>元</b></label></div>;
+                return <div className="cost-model-price-card" key={key}><div className="cost-model-row"><button className={`favorite-star${setting.favorite ? " active" : ""}`} title="设为常用模型" onClick={() => updateSetting(item.profileId, item.model, { favorite: !setting.favorite })}>★</button><strong>{item.providerName}</strong><code>{item.model}</code><label><span>{isResolutionPricedModel(item.model) ? "通用每条" : "每条"}</span><input aria-label={`${item.providerName} ${item.model} 通用每条金额`} type="number" min="0" step="0.01" value={setting.unitPrice ?? ""} onChange={(event) => updatePrice(item.profileId, item.model, event.target.value)} placeholder="0.00" /><b>元</b></label></div><ResolutionPriceFields model={item.model} entry={setting} labelPrefix={`${item.providerName} ${item.model}`} onChange={(resolution, value) => updatePrice(item.profileId, item.model, value, resolution)} /></div>;
               })}
             </div>
           </section>}
 
           {activeTab === "finance" && <div className="cost-pane" role="tabpanel" aria-label="收支账本">
             <div className="cost-filterbar cost-filterbar-end">
-              <details className="cost-info"><summary>说明</summary><div><p>每个月单独录入一次平台结算，不会自动沿用上月收入。抖音、百家号收入都需要每月分别录入。</p><p>API 估算成本＝已完成任务 × 模型单价；净收益＝收入 − 手动成本 − API 估算成本。</p></div></details>
+              <details className="cost-info"><summary>说明</summary><div><p>每个月单独录入一次平台结算，不会自动沿用上月收入。抖音、百家号收入都需要每月分别录入。</p><p>API 估算成本＝逐条匹配分辨率单价后求和（无专属价时沿用模型通用价）；净收益＝收入 − 手动成本 − API 估算成本。</p></div></details>
             </div>
 
             <div className="finance-breakdown">
               <div><h4>收入构成</h4><dl><div><dt>抖音结算收入</dt><dd>{moneyCents(financeSummary.douyinIncomeCents)}</dd></div><div><dt>百家号结算收入</dt><dd>{moneyCents(financeSummary.baijiahaoIncomeCents)}</dd></div></dl></div>
-              <div><h4>成本构成</h4><dl><div><dt title="会员费、素材费等">手动成本</dt><dd>{moneyCents(financeSummary.manualCostCents)}</dd></div><div><dt title="已完成任务 × 模型单价">API 估算成本</dt><dd>{moneyCents(financeSummary.apiCostCents)}</dd></div></dl></div>
+              <div><h4>成本构成</h4><dl><div><dt title="会员费、素材费等">手动成本</dt><dd>{moneyCents(financeSummary.manualCostCents)}</dd></div><div><dt title="已完成任务按分辨率专属价／模型通用价逐条求和">API 估算成本</dt><dd>{moneyCents(financeSummary.apiCostCents)}</dd></div></dl></div>
             </div>
             {(financeSummary.unpricedTasks || financeSummary.undatedTasks) > 0 && <p className="cost-hint">当前统计仍有 {financeSummary.unpricedTasks ? `${financeSummary.unpricedTasks} 条已完成任务未填写模型单价` : ""}{financeSummary.unpricedTasks && financeSummary.undatedTasks ? "；" : ""}{financeSummary.undatedTasks ? `${financeSummary.undatedTasks} 条任务没有可用日期，未计入指定月份` : ""}。</p>}
 

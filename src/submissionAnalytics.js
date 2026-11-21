@@ -1,3 +1,4 @@
+import { recordedTaskResolution } from "./taskResolution.js";
 import { modelPriceKey } from "./costAnalytics.js";
 
 function decodedJob(id) {
@@ -33,6 +34,7 @@ function normalizedRecord(task) {
     profileId: String(task.profileId || ""),
     providerName: String(task.providerName || "历史中转站"),
     model: String(job?.model || task.model || "未知模型"),
+    resolution: recordedTaskResolution(task),
     projectName: String(task.projectName || "未归类"),
     batchTitle: String(task.batchTitle || "").trim().replace(/\.txt$/i, ""),
     batchSection: Number(task.batchSection) || 0,
@@ -60,12 +62,14 @@ export function modelSubmissionStats(tasks, { projectName = "all", from = "", to
     const record = normalizedRecord(task);
     if (!record) continue;
     const old = unique.get(record.identity);
+    // A newer status-only copy must not discard the original submission resolution.
+    const resolution = old?.resolution || record.resolution || "";
     const createdAtMs = old?.createdAtMs
       ? Math.min(old.createdAtMs, record.createdAtMs || old.createdAtMs) : record.createdAtMs;
     if (!old || (record.updatedAtMs > old.updatedAtMs)
       || (record.updatedAtMs === old.updatedAtMs && terminal(record) && !terminal(old))) {
-      unique.set(record.identity, { ...record, createdAtMs });
-    } else if (createdAtMs !== old.createdAtMs) unique.set(record.identity, { ...old, createdAtMs });
+      unique.set(record.identity, { ...record, resolution, createdAtMs });
+    } else if (createdAtMs !== old.createdAtMs || resolution !== old.resolution) unique.set(record.identity, { ...old, resolution, createdAtMs });
   }
   const seenSections = new Set();
   const groups = new Map();
@@ -106,12 +110,12 @@ export function submissionRecordsCsv(records) {
     const safe = /^[\s\uFEFF]*[=+\-@]/.test(text) ? `'${text}` : text;
     return `"${safe.replace(/"/g, '""')}"`;
   };
-  const rows = [["中转站", "模型", "上游task ID", "项目", "章节文件", "节号", "本机提交或恢复记录时间", "状态", "同节追加", "退款"]];
+  const rows = [["中转站", "模型", "上游task ID", "项目", "章节文件", "节号", "本机提交或恢复记录时间", "状态", "同节追加", "退款", "提交分辨率"]];
   for (const record of records || []) rows.push([
     record.providerName, record.model, record.taskId, record.projectName, record.batchTitle, record.batchSection || "",
     record.createdAtMs ? new Date(record.createdAtMs).toLocaleString("zh-CN", { hour12: false }) : "时间未知",
     record.cancelledByUser ? "手动取消（不代表退款）" : record.status,
-    record.additional ? "是（含主动重做/抽卡）" : "否", "未核实",
+    record.additional ? "是（含主动重做/抽卡）" : "否", "未核实", record.resolution || "未记录",
   ]);
   return "\uFEFF" + rows.map((row) => row.map(cell).join(",")).join("\r\n");
 }

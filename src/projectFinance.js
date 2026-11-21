@@ -1,5 +1,5 @@
 import { modelSubmissionStats } from "./submissionAnalytics.js";
-import { modelPriceKey, taskEstimatedCost } from "./costAnalytics.js";
+import { resolvedTaskPrice, taskEstimatedCost } from "./costAnalytics.js";
 
 export const PROJECT_FINANCE_KEY = "video-workbench-project-finance-v1";
 
@@ -138,8 +138,7 @@ function projectMatches(projectName, target) {
 }
 
 function settingHasPrice(settings, record) {
-  const value = settings?.[modelPriceKey(record.profileId, record.model)]?.unitPrice;
-  return value !== undefined && text(value) !== "" && Number.isFinite(Number(value)) && Number(value) >= 0;
+  return resolvedTaskPrice(record, settings).priced;
 }
 
 export function projectFinanceSummary(tasks, settings, entries, { projectName = "all", month = "" } = {}) {

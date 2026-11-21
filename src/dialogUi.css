@@ -386,3 +386,29 @@
 .cost-kpi-split em { color: #6b5640; font-style: normal; font-weight: 700; font-variant-numeric: tabular-nums; }
 .drama-table .drama-link-button { display: inline-block; margin-left: 8px; font-size: 12px; }
 .drama-link-form .finance-note-field { flex: 1 1 360px !important; }
+
+/* Resolution-specific per-video prices share the existing accounting palette. */
+.cost-model-price-card { border-bottom: 1px solid #efe3d1; }
+.cost-center .cost-model-price-card .cost-model-row { border-bottom: 0; }
+.resolution-prices { padding: 10px 14px 14px; }
+.resolution-price-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.resolution-price-grid > label { display: grid; gap: 6px; min-width: 0; }
+.resolution-price-grid > label > span { color: #806f58; font-size: 13px; font-weight: 600; }
+.resolution-price-grid > label > div { display: flex; align-items: center; gap: 5px; }
+.resolution-price-grid input { width: 100%; min-width: 0; }
+.resolution-prices > small { display: block; margin-top: 10px; color: #8b7963; line-height: 1.6; }
+.project-resolution-prices { padding: 12px; border-top: 1px dashed #efe3d1; }
+.project-resolution-prices > .resolution-prices { padding: 10px 0 0; }
+@media (max-width: 760px) {
+  .resolution-price-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* Image relay configuration uses the same compact settings palette as video. */
+.image-relay-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0; }
+.image-relay-actions small { width: 100%; overflow-wrap: anywhere; color: #8b7963; }
+.image-relay-settings { border: 1px solid #efe3d1; border-radius: 12px; padding: 14px; margin: 12px 0 18px; background: #fff; }
+.image-relay-settings h3 { margin: 0 0 12px; font-size: 15px; }
+.image-relay-settings label { display: grid; gap: 6px; margin: 10px 0; font-size: 12px; }
+.image-relay-settings input, .image-relay-settings select { min-height: 38px; width: 100%; min-width: 0; font: inherit; font-size: 13px; }
+.image-relay-settings p { font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; color: #8b7963; }
+.image-relay-settings [role="alert"] { color: #be4d3d; }

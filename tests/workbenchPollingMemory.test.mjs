@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
+import { imageTaskProvider } from "../src/imageProviderSettings.js";
 
 const appSource = readFileSync(new URL("../src/App.jsx", import.meta.url), "utf8");
 const imageSource = readFileSync(new URL("../src/ImageWorkbench.jsx", import.meta.url), "utf8");
@@ -162,7 +163,8 @@ function imageHarness(overrides = {}) {
     tasksRef: { current: tasks },
     imagePollingRef: { current: false },
     imagePollCursorRef: { current: 0 },
-    IMAGE_PROVIDER_PROFILES: [{ id: "profile" }],
+    providersRef: { current: [{ id: "profile", name: "Mock image relay", adapter: "fmgo", baseUrl: "https://mock.invalid", model: "gpt-image-2" }] },
+    imageTaskProvider,
     readCredentials: () => ({ apiKey: "test-key" }),
     profileHeaders: () => ({}),
     AbortSignal,
